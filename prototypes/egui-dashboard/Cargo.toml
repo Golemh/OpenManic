@@ -1,0 +1,8 @@
+[package]
+name = "openmanic-egui-dashboard-spike"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+eframe = "0.35"
