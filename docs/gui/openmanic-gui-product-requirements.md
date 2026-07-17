@@ -536,7 +536,29 @@ Every registered `WidgetDefinition` MUST declare:
 
 If a saved layout references a missing, disabled, or incompatible renderer, the dashboard MUST show a recoverable placeholder that identifies the widget and offers Remove or Reset. A missing renderer MUST NOT prevent the remaining layout or application from opening.
 
-### 16.2 Widget responsibilities
+### 16.2 Required widget separation
+
+Every data-driven widget MUST preserve this dependency flow:
+
+```text
+Canonical domain/storage data
+        -> background analytics or widget projection
+        -> immutable, versioned WidgetSnapshot
+        -> egui WidgetRenderer
+        -> typed AppAction back to the controller
+```
+
+The canonical data model owns facts and authoritative state such as activity intervals, categories, applications, schedules, and focus sessions. It MUST NOT become a collection of widget-specific calculations or egui presentation types.
+
+The background analytics/projection layer owns calculations needed to prepare a widget, including filtering, aggregation, aligned timeline-band projection, percentage calculation, schedule-occurrence expansion, sorting, downsampling, and other work that may exceed the frame budget. A projection MAY be shared by several widgets when their data requirements match.
+
+`WidgetSnapshot` is a presentation-ready, immutable result identified by widget/request context and revision. It SHOULD contain the values a renderer needs without requiring database access or full-history calculation. It MUST remain a read model rather than authoritative writable state.
+
+The `WidgetRenderer` owns only the visual and interactive foreground behavior: allocated layout, painting, hit testing, hover, selection, compact/expanded presentation, transient animation, and emission of typed actions. It MAY perform cheap rectangle-dependent work such as mapping already-prepared time values to pixels, text layout, clipping, and cached geometry lookup.
+
+Changing widget configuration MUST produce a typed action that requests a new projection when recalculation is required. The renderer MUST continue showing a valid prior snapshot with a refreshing state, or an appropriate initial loading state, until the new projection arrives.
+
+### 16.3 Widget renderer responsibilities
 
 A widget renderer MAY:
 
@@ -555,7 +577,7 @@ A widget renderer MUST NOT:
 - Block the UI thread waiting for I/O or computation.
 - Store unversioned configuration that cannot be migrated.
 
-### 16.3 Future extensibility
+### 16.4 Future extensibility
 
 The widget definition and configuration formats SHOULD remain serializable so a future declarative or WebAssembly widget system is possible. Loading arbitrary Rust dynamic libraries is explicitly out of scope until ABI, security, crash isolation, permissions, and versioning have dedicated designs.
 
@@ -702,7 +724,40 @@ The GUI MUST use semantic tokens for:
 
 Renderers MUST not scatter hard-coded colors and spacing throughout widget code.
 
-### 21.3 Theme resolution
+### 21.3 External theme schema and egui adapter
+
+OpenManic MUST own a theme format that is separate from widget rendering code and separate from egui's internal Rust types. The architecture is:
+
+```text
+Bundled or external theme document
+        -> parse, validate, and migrate ThemeSpec
+        -> resolve semantic references and component states
+        -> ResolvedTheme
+             -> egui::Style / egui::Visuals / fonts
+             -> OpenManic component styles
+             -> timeline, chart, schedule, and custom-widget styles
+```
+
+The theme document SHOULD provide a stylesheet-like authoring experience comparable in purpose to QSS or CSS, using semantic tokens, named component variants, and interaction states. egui does not provide a native CSS/QSS parser or complete selector/cascade system, so OpenManic MUST NOT make raw CSS or QSS compatibility a requirement.
+
+The public theme schema SHOULD use a safe data format such as TOML, RON, or JSON. The exact syntax is an architecture decision, but the schema MUST be:
+
+- Versioned and migratable.
+- Declarative and non-executable.
+- Independent of egui release-specific field names where practical.
+- Validated before application.
+- Able to reference semantic colors, spacing, radii, strokes, typography, motion, chart series, timeline bands, and schedule brackets.
+- Able to define controlled component variants and states such as primary button, destructive button, inactive, hovered, pressed, selected, focused, and disabled.
+
+OpenManic MUST NOT use a serialized `egui::Style` as its public or long-term persisted theme contract. Direct egui serialization MAY be used for internal experiments, but it is too coupled to egui versions and does not cover OpenManic's custom-painted visuals.
+
+`ResolvedTheme` MUST expose both the standard egui style and OpenManic-specific styles. Applying `egui::Style` or `egui::Visuals` alone is insufficient because egui cannot infer how to paint the three timeline bands, schedule brackets, charts, or custom widget geometry. Every custom renderer MUST receive or resolve the appropriate OpenManic theme tokens explicitly.
+
+Theme files SHOULD be parsed and validated outside the frame path. A successfully resolved theme is applied atomically on the egui thread at the next safe UI update. A failed reload MUST preserve the prior valid theme and show a useful error. Live reload MAY be enabled for development and MAY become a technical-user feature later.
+
+Bundled Dark, Light, and Follow System themes SHOULD use the same `ThemeSpec` and resolution path as future external themes so built-in and user-authored appearance do not become separate styling systems.
+
+### 21.4 Theme resolution
 
 Appearance MUST resolve in this order:
 
@@ -713,17 +768,17 @@ Appearance MUST resolve in this order:
 
 Application and category identity colors are data-level identity choices and MUST remain distinguishable from general theme colors.
 
-### 21.4 Theme modes
+### 21.5 Theme modes
 
 The app MUST support dark mode. It SHOULD support light mode and following the operating-system preference before the MVP is considered polished. Both modes MUST meet contrast and state-distinction requirements.
 
 The MVP theme UI is limited to built-in Dark, Light, and Follow System choices, with Light and Follow System treated as release-quality targets rather than a general editor. Theme import/export and a user-facing token editor are post-MVP candidates. The MVP MAY expose a small approved set of widget appearance choices, but arbitrary per-widget token editing is not required. Any appearance override that is persisted MUST use the versioned widget appearance schema rather than raw egui values.
 
-### 21.5 Motion
+### 21.6 Motion
 
 Motion SHOULD communicate state change, not decorate idle screens. Animations MUST be interruptible, MUST not delay input, and SHOULD respect reduced-motion preferences where the platform exposes them.
 
-### 21.6 Default and advanced presentation
+### 21.7 Default and advanced presentation
 
 - Default screens MUST use familiar terms such as Application, Time, Category, Schedule, Tracking, and Focus Session.
 - Process names, executable paths, rule precedence, database locations, and diagnostic IDs SHOULD be hidden until requested unless they are required to distinguish two items.
@@ -772,6 +827,8 @@ The foreground layer MUST NOT:
 Background services MUST:
 
 - Own long-running and blocking work.
+- Produce widget projections and immutable `WidgetSnapshot` values from canonical domain/storage data.
+- Keep filtering, aggregation, sorting, downsampling, recurrence expansion, and cross-band interval projection outside egui renderers.
 - Publish typed events and immutable/versioned view snapshots.
 - Report determinate progress when total work is knowable.
 - Report indeterminate activity when total work is not knowable.
@@ -798,7 +855,7 @@ Commands and events MUST have stable IDs where operations can overlap. Late resu
 
 ### 22.5 Snapshot requirements
 
-A UI snapshot SHOULD be immutable and reference-counted where data is substantial. It MUST carry a revision or request identity sufficient to determine whether it is newer and relevant.
+A UI or widget snapshot SHOULD be immutable and reference-counted where data is substantial. It MUST carry a revision or request identity sufficient to determine whether it is newer and relevant, plus enough widget/range/filter context to prevent a result from being applied to the wrong instance or request.
 
 Snapshots SHOULD contain presentation-ready values such as the aligned Category/Activity-state/Application timeline bands, visible schedule intervals, aggregated totals, formatted identity information, and Pomodoro state. Formatting and bracket geometry that depend on locale or available pixels MAY remain in the UI.
 
@@ -933,7 +990,7 @@ openmanic-storage
   SQLite repositories, migrations, CSV import/export
 
 openmanic-analytics
-  range aggregation, indexing, downsampling, snapshots
+  range aggregation, indexing, downsampling, widget projections and snapshots
 
 openmanic-focus
   Pomodoro state machine and notification intents
@@ -942,13 +999,13 @@ openmanic-schedule
   personal schedule intervals, recurrence rules, expansion, validation
 
 openmanic-widgets
-  widget definitions, configuration, layout schema, registry contracts
+  widget definitions, configuration, snapshot contracts, layout schema, registry contracts
 
 openmanic-theme
-  semantic tokens and appearance resolution
+  external ThemeSpec schema, parsing, validation, migration, semantic resolution
 
 openmanic-ui-egui
-  shell, screens, controllers, renderers, accessibility, UI tests
+  shell, screens, controllers, egui theme adapter, renderers, accessibility, UI tests
 ```
 
 The UI crate MAY depend on domain-level types and read-only snapshot types. Domain, tracker, storage, analytics, focus, and schedule modules MUST NOT depend on `egui`.
@@ -1017,6 +1074,9 @@ Logs MUST avoid recording sensitive window titles unless the user explicitly ena
 - Cross-band boundary alignment and schedule-bracket time transforms.
 - Once, Specific weekday, and Custom schedule recurrence expansion across date and daylight-saving boundaries.
 - Schedule overlap and conflict validation.
+- Widget projection results for known filters, ranges, revisions, and configuration.
+- ThemeSpec parsing, semantic-reference resolution, validation, and migration.
+- Conversion from resolved semantic/component styles into egui and custom-renderer styles.
 - Selection/filter reducers.
 - Event ordering and stale-result rejection.
 
@@ -1029,6 +1089,8 @@ Logs MUST avoid recording sensitive window titles unless the user explicitly ena
 - Pomodoro behavior across window hide and simulated sleep/resume.
 - Timeline schedule creation reflected in Calendar and Calendar edits reflected in Timeline.
 - Schedule Save confirmation, rejection rollback, recurrence edit, and deletion.
+- Widget configuration change -> background reprojection -> correctly correlated snapshot -> renderer refresh.
+- Valid theme reload applies atomically; invalid theme reload preserves the prior valid theme.
 
 ### 30.3 GUI tests
 
@@ -1043,6 +1105,7 @@ Logs MUST avoid recording sensitive window titles unless the user explicitly ena
 - Compact and expanded widget presentations.
 - Empty/loading/error states.
 - Theme token application.
+- Standard egui controls and custom-painted widgets resolve appearance from the same theme source.
 - Scaling at supported factors.
 
 ### 30.4 Performance tests
@@ -1160,6 +1223,8 @@ The MVP is acceptable when all of the following are true:
 25. A non-technical user can complete first launch, understand whether tracking is active, inspect an interval, categorize an application, create a one-time schedule interval, and start a Pomodoro without needing implementation terminology or technical setup.
 26. A technical user can discover supported exact timestamps, executable identity, data location, export, advanced settings, and diagnostics without those details overwhelming the default interface.
 27. Temporal, proportional, and schedule relationships use graphical presentation where it materially improves understanding, while every essential value and action remains available through clear text, structured data, or conventional controls where appropriate.
+28. Data-driven widgets render from immutable, correlated snapshots produced outside the egui frame path; widget renderers perform no database query, full-range aggregation, recurrence expansion, or other background calculation.
+29. One versioned OpenManic theme specification resolves into standard egui styling and custom timeline/chart/widget styling; invalid theme input preserves the prior valid appearance without crashing or partially applying.
 
 ## 34. Architecture questions for the next planning session
 
@@ -1183,6 +1248,8 @@ The next architecture discussion should resolve these questions without reopenin
 16. What final domain names replace or confirm `active`, `inactive`, and `powered_off`, and how do they map to Paused, Excluded, Unavailable, and Unknown/Missing states?
 17. How do normal range selection, schedule creation, schedule editing, pan, and zoom gestures arbitrate without ambiguity?
 18. Which technical details belong in default, secondary, advanced, and diagnostic presentation layers, and what user research validates that division?
+19. Which external theme syntax is selected, and what are the exact ThemeSpec versioning, reference-resolution, component-state, asset, validation, and migration rules?
+20. What is the exact WidgetProjection request/snapshot contract, including instance identity, filters, range, configuration revision, cancellation, stale-result rejection, and cache keys?
 
 ## 35. Source documents
 
@@ -1202,8 +1269,10 @@ An independent requirements verifier reviewed this document on 2026-07-18 agains
 - Foreground and background responsibilities are separated in detail.
 - The document is suitable as an architecture-planning handoff after resolving scope and ownership ambiguities.
 
-The review identified release-scope, widget-customization, range-selection, state-ownership, worker-lifecycle, Pomodoro-scheduling, layout-ownership, widget-contract, theme-scope, and performance-verification gaps. Those findings were incorporated into Sections 4.4, 11.3, 14, 15, 16, 17.3, 21.4, 22, 23.5, 24, and 33.
+The review identified release-scope, widget-customization, range-selection, state-ownership, worker-lifecycle, Pomodoro-scheduling, layout-ownership, widget-contract, theme-scope, and performance-verification gaps. Those findings were incorporated into Sections 4.4, 11.3, 14, 15, 16, 17.3, 21.5, 22, 23.5, 24, and 33.
 
 Remaining open items are deliberate architecture or visual-design decisions listed in Sections 6.2 and 34, not silent assumptions.
 
 Subsequent product-owner clarifications added the individual-only scope, non-technical primary audience, progressive disclosure for technical users, purposeful graphics-first emphasis, continuous three-band timeline, pointer-adjacent hover behavior, bracket-style schedule overlays, recurrence popup, and shared Timeline/Calendar scheduling requirements. These additions are captured in Sections 3-5, 7, 11, 19, 21-25, and 30-34.
+
+The widget architecture was subsequently clarified as canonical model -> background projection -> immutable widget snapshot -> egui renderer, with the renderer limited to visual, interaction, and cheap rectangle-dependent work. The theme architecture was clarified as an OpenManic-owned external declarative schema that resolves into both egui styles and custom-renderer styles rather than native CSS/QSS or serialized egui internals. These decisions are captured in Sections 16, 21-22, 25, and 30-34.
