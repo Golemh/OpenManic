@@ -5,3 +5,15 @@
 //! public boundary. Persistence will use one serialized writer and short read transactions.
 
 #![forbid(unsafe_code)]
+
+mod connection;
+mod errors;
+mod migration;
+mod options;
+
+pub use connection::{
+    ConnectionConfiguration, JournalMode, SqliteReader, SqliteWriter, SynchronousMode,
+};
+pub use errors::{ConnectionSetting, StorageError};
+pub use migration::LATEST_SCHEMA_VERSION;
+pub use options::StoreOpenOptions;
