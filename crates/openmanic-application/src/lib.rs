@@ -15,6 +15,9 @@ mod projection;
 mod runtime;
 mod tracking;
 
+// Platform adapters consume only this crate's facade. Re-export the domain values
+// already present in normalized tracking evidence so that boundary remains intact.
+pub use openmanic_domain::{ApplicationId, PowerTransitionEvidence, UtcMicros};
 pub use commands::{CommandEnvelope, CommandReceipt, TrackingCommand, TrackingEvidence};
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
 pub use events::{
