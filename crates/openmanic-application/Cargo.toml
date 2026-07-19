@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 crossbeam-channel.workspace = true
+jiff.workspace = true
 openmanic-domain.workspace = true
 
 [lints]

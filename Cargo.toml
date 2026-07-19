@@ -13,6 +13,7 @@ publish = false
 eframe = { version = "=0.35.0", default-features = false }
 egui = { version = "=0.35.0", default-features = false }
 crossbeam-channel = "=0.5.15"
+jiff = "=0.2.32"
 fixture-generator = { path = "tools/fixture-generator" }
 openmanic-application = { path = "crates/openmanic-application" }
 openmanic-domain = { path = "crates/openmanic-domain" }
