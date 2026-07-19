@@ -12,6 +12,8 @@ compile_error!("select exactly one platform family: platform-windows or platform
 mod adapter;
 mod capabilities;
 mod fake;
+mod windows_control;
+mod windows_raw;
 
 pub use adapter::{
     AdapterObservation, AdapterObservationKind, AdapterPublishResult, AdapterPublishStatus,
@@ -23,3 +25,8 @@ pub use capabilities::{
     FieldSupport, FocusScope, HelperRequirement, PermissionModel, PlatformCapabilities,
 };
 pub use fake::{FakeEvidenceSink, FakeEvidenceSinkError, FakePlatformAdapter};
+pub use windows_control::{
+    WINDOWS_FOREGROUND_INGRESS_CAPACITY, WindowsControlAdapter, WindowsControlDrain,
+};
+#[cfg(windows)]
+pub use windows_control::{WindowsControlError, WindowsControlWindow};
