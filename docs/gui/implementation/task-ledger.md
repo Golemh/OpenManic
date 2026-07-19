@@ -11,8 +11,8 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| OM-040 | `codex/om040-native-ui-fixture` | `F:\\claude\\projects\\OpenManic\\.agents\\om040-native-ui-fixture` | `df085bd32f402a2e3eade28e0ff487e79a57b8d8` | `Cargo.toml`, `Cargo.lock`, `tools/native-ui-fixture/**`, `fixtures/performance/native-ui/**` | Root manifest and lockfile transfer released after integration `ab1b40b6e80767538d14a04cbd70f54a73ecfe39`; no production contract, shared fixture format, or renderer-policy change | Implemented; verification recorded below |
-| OM-050 | `codex/om050-ui-direction-spike` | `F:\\claude\\projects\\OpenManic\\.agents\\om050-ui-direction-spike` | `719497c6209b33a4c146467567b4fc2463a7938e` | `Cargo.lock`, `tools/ui-direction-spike/**`, `fixtures/ui-direction/**` | Lockfile transfer released after integration `c213601f2649eb86e8b4704a89c7367844d517f8`; no root manifest, production contract, shared fixture format, or specification change | Implemented; verification recorded below |
+| OM-040 | `codex/om040-native-ui-fixture` | `F:\\claude\\projects\\OpenManic\\.agents\\om040-native-ui-fixture` | `df085bd32f402a2e3eade28e0ff487e79a57b8d8` | `Cargo.toml`, `Cargo.lock`, `tools/native-ui-fixture/**`, `fixtures/performance/native-ui/**` | Root manifest and lockfile transfer released after integration `ab1b40b6e80767538d14a04cbd70f54a73ecfe39`; source-only repair owns `tools/native-ui-fixture/src/workload.rs` | Repair active: Phase 0 Clippy findings |
+| OM-050 | `codex/om050-ui-direction-spike` | `F:\\claude\\projects\\OpenManic\\.agents\\om050-ui-direction-spike` | `719497c6209b33a4c146467567b4fc2463a7938e` | `Cargo.lock`, `tools/ui-direction-spike/**`, `fixtures/ui-direction/**` | Lockfile transfer released after integration `c213601f2649eb86e8b4704a89c7367844d517f8`; source-only repair owns `tools/ui-direction-spike/src/model.rs` and `src/render.rs` | Repair active: Phase 0 Clippy findings |
 
 ## Completed and integrated work
 
