@@ -1,6 +1,6 @@
 # OpenManic MVP Terra implementation handover
 
-- Handover baseline: `a3d5d9ffebca59bb5eba9d8718a78ba668a8aa61`
+- Accepted implementation baseline: `a3d5d9ffebca59bb5eba9d8718a78ba668a8aa61`
 - Baseline branch: `codex/openmanic-mvp-implementation`
 - Prepared: 2026-07-19
 - Intended implementer: one Terra coding session acting as the sole writer
@@ -34,12 +34,12 @@ If sources conflict, use the precedence above and stop for the user rather than 
 
 ## 3. Exact repository state
 
-The handover was created from a clean checkout with:
+The accepted implementation state before adding this handover document was:
 
 ```text
 repository: F:\claude\projects\OpenManic
 branch:     codex/openmanic-mvp-implementation
-HEAD:       a3d5d9ffebca59bb5eba9d8718a78ba668a8aa61
+accepted ancestor: a3d5d9ffebca59bb5eba9d8718a78ba668a8aa61
 ```
 
 No implementation task is active in the ledger. No secondary worktree remains attached.
@@ -52,13 +52,14 @@ git branch --show-current
 git rev-parse HEAD
 git status --short
 git worktree list
+git merge-base --is-ancestor a3d5d9ffebca59bb5eba9d8718a78ba668a8aa61 HEAD
 ```
 
-The baseline SHA must match exactly. If it does not, stop and report the observed state. Do not reset, clean, delete, or overwrite changes that were not created by your task.
+The final command must succeed. `HEAD` will be later than the accepted ancestor because it includes this handover document and may include user-prepared continuation-branch metadata. Record every later commit before editing. If the accepted ancestor is missing, the worktree is dirty, or later commits contain unexplained implementation changes, stop and report the observed state. Do not reset, clean, delete, or overwrite changes that were not created by your task.
 
 ### 3.1 Continuation branch policy
 
-Do not commit new implementation directly onto `codex/openmanic-mvp-implementation`. Have the user prepare one continuation branch or isolated worktree from the exact baseline above, then work serially there.
+Do not commit new implementation directly onto `codex/openmanic-mvp-implementation`. Have the user prepare one continuation branch or isolated worktree containing this handover and descending from the accepted implementation ancestor above, then work serially there.
 
 Because there will be one Terra writer, prefer one continuation branch with small ordered commits. Extra per-milestone branches are unnecessary. If the user explicitly enables parallel writers, each writer must have a separate worktree and completely disjoint writable paths.
 
