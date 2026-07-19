@@ -12,6 +12,7 @@ pub mod clock;
 pub mod random;
 pub mod scenarios;
 pub mod scripted;
+pub mod serialization;
 
 pub use clock::{ManualClock, MonotonicTicks, UtcMicros};
 pub use random::SeededPrng;
