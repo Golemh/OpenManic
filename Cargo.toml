@@ -18,7 +18,7 @@ openmanic-domain = { path = "crates/openmanic-domain" }
 openmanic-platform = { path = "crates/openmanic-platform", default-features = false }
 openmanic-storage-sqlite = { path = "crates/openmanic-storage-sqlite" }
 openmanic-ui-egui = { path = "crates/openmanic-ui-egui", default-features = false }
-rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled"] }
 thiserror = "=1.0.69"
 
 [workspace.lints.rust]
