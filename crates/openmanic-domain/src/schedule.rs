@@ -34,6 +34,31 @@ pub struct ScheduleSegment {
     category_id: Option<CategoryId>,
 }
 
+/// One persistence-safe occurrence-only edit for a recurring schedule.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduleOccurrenceException {
+    /// Suppresses the occurrence whose civil anchor date is retained.
+    Skip {
+        /// Local civil date on which the original occurrence begins.
+        anchor_date: i32,
+    },
+    /// Replaces one occurrence with an already resolved positive UTC interval.
+    Override {
+        /// Local civil date on which the original occurrence begins.
+        anchor_date: i32,
+        /// Resolved replacement interval.
+        interval: HalfOpenInterval,
+        /// The start boundary used the first-valid-instant-after-gap policy.
+        start_after_gap: bool,
+        /// The start boundary used the earlier-instant-in-fold policy.
+        start_earlier_fold: bool,
+        /// The end boundary used the first-valid-instant-after-gap policy.
+        end_after_gap: bool,
+        /// The end boundary used the earlier-instant-in-fold policy.
+        end_earlier_fold: bool,
+    },
+}
+
 impl ScheduleSegment {
     /// Validates and creates a civil schedule segment.
     ///
@@ -302,6 +327,44 @@ impl ScheduleRule {
         })
     }
 
+    /// Restores a recurring rule and every occurrence-only skip or resolved override.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScheduleValidationError`] when a segment, anchor date, or DST-adjustment
+    /// combination is invalid.
+    pub fn try_restore_repeating_with_exceptions(
+        segments: impl IntoIterator<Item = ScheduleSegment>,
+        exceptions: impl IntoIterator<Item = ScheduleOccurrenceException>,
+    ) -> Result<Self, ScheduleValidationError> {
+        let mut rule = Self::try_restore_repeating(segments)?;
+        for exception in exceptions {
+            match exception {
+                ScheduleOccurrenceException::Skip { anchor_date } => {
+                    rule.skip_only_this_date(anchor_date)?;
+                }
+                ScheduleOccurrenceException::Override {
+                    anchor_date,
+                    interval,
+                    start_after_gap,
+                    start_earlier_fold,
+                    end_after_gap,
+                    end_earlier_fold,
+                } => {
+                    rule.override_only_this_date(
+                        anchor_date,
+                        interval,
+                        start_after_gap,
+                        start_earlier_fold,
+                        end_after_gap,
+                        end_earlier_fold,
+                    )?;
+                }
+            }
+        }
+        Ok(rule)
+    }
+
     /// Creates a positive resolved UTC range from adapter-provided instants.
     ///
     /// The caller applies IANA gap/fold rules, then passes the resolved instants and boundary
@@ -422,6 +485,35 @@ impl ScheduleRule {
     pub fn exception_count(&self) -> usize {
         self.recurring()
             .map_or(0, |schedule| schedule.exceptions.len())
+    }
+
+    /// Returns persistence-safe occurrence-only edits in stable anchor-date order.
+    #[must_use]
+    pub fn exceptions(&self) -> Vec<ScheduleOccurrenceException> {
+        self.recurring().map_or_else(Vec::new, |schedule| {
+            schedule
+                .exceptions
+                .iter()
+                .map(|(&anchor_date, exception)| match exception {
+                    OccurrenceException::Skip => ScheduleOccurrenceException::Skip { anchor_date },
+                    OccurrenceException::Override {
+                        interval,
+                        start_resolution,
+                        end_resolution,
+                    } => ScheduleOccurrenceException::Override {
+                        anchor_date,
+                        interval: *interval,
+                        start_after_gap: *start_resolution
+                            == BoundaryResolution::FirstValidAfterGap,
+                        start_earlier_fold: *start_resolution
+                            == BoundaryResolution::EarlierInstantInFold,
+                        end_after_gap: *end_resolution == BoundaryResolution::FirstValidAfterGap,
+                        end_earlier_fold: *end_resolution
+                            == BoundaryResolution::EarlierInstantInFold,
+                    },
+                })
+                .collect()
+        })
     }
 
     /// Returns true when an occurrence-only skip exists for the anchor date.
@@ -1108,6 +1200,25 @@ mod tests {
             restored.time_zone_for_anchor_date(120),
             Some("Europe/London")
         );
+    }
+
+    #[test]
+    fn persistence_round_trip_retains_skip_and_dst_adjusted_override() {
+        let mut rule = repeating_rule();
+        rule.skip_only_this_date(105).expect("covered anchor");
+        rule.override_only_this_date(110, interval(2_000, 3_000), true, false, false, true)
+            .expect("covered anchor with valid independent adjustments");
+
+        let restored =
+            ScheduleRule::try_restore_repeating_with_exceptions(rule.segments(), rule.exceptions())
+                .expect("persisted recurrence facts should restore");
+        assert!(restored.is_skipped_on(105));
+        assert_eq!(
+            restored.resolved_override_on(110),
+            Some(interval(2_000, 3_000))
+        );
+        assert!(restored.has_gap_adjustment_on(110));
+        assert!(restored.has_fold_adjustment_on(110));
     }
 
     #[test]

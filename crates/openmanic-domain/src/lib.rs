@@ -28,5 +28,8 @@ pub use ids::{
     FocusSessionIdKind, OneTimeScheduleId, OneTimeScheduleIdKind, OpaqueId, OpaqueIdParseError,
     ScheduleSeriesId, ScheduleSeriesIdKind, TrackerRunId, TrackerRunIdKind,
 };
-pub use schedule::{ScheduleEditScope, ScheduleRule, ScheduleValidationError};
+pub use schedule::{
+    ScheduleEditScope, ScheduleOccurrenceException, ScheduleRule, ScheduleSegment,
+    ScheduleValidationError,
+};
 pub use time::{HalfOpenInterval, HalfOpenIntervalError, UtcMicros, UtcMicrosArithmeticError};
