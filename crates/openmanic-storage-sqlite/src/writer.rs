@@ -7,12 +7,13 @@ use openmanic_application::{
     EntityRevision, FocusKind, FocusPersistence, FocusPersistenceError, FocusSnapshot,
     PortFailureReason, ScheduleId, SchedulePersistence, SchedulePersistenceError,
     ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
+    schedule_rule_conflicts_with_intervals,
     TrackingPersistenceSubmit,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
-    CategoryId, CategoryName, FocusSessionId, FocusSessionState, ScheduleOccurrenceException,
-    TrackerRunId, UtcMicros,
+    CategoryId, CategoryName, FocusSessionId, FocusSessionState, HalfOpenInterval,
+    ScheduleOccurrenceException, TrackerRunId, UtcMicros,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -608,7 +609,7 @@ impl SchedulePersistence for StorageWriter {
         {
             return Err(SchedulePersistenceError::Conflict);
         }
-        if one_time_schedule_conflicts(&transaction, snapshot)
+        if schedule_conflicts_with_one_time_intervals(&transaction, snapshot)
             .map_err(|_| SchedulePersistenceError::Failed)?
         {
             return Err(SchedulePersistenceError::Conflict);
@@ -664,24 +665,27 @@ fn schedule_id_exists(
         .map_err(|error| database_error(&error, "check schedule identity"))
 }
 
-fn one_time_schedule_conflicts(
+fn schedule_conflicts_with_one_time_intervals(
     transaction: &Transaction<'_>,
     snapshot: &ScheduleSnapshot,
 ) -> Result<bool, StorageError> {
-    let Some(interval) = snapshot.rule().one_time_interval() else {
-        return Ok(false);
-    };
-    let conflicts: i64 = transaction
-        .query_row(
-            "SELECT EXISTS(
-                 SELECT 1 FROM one_time_schedule
-                  WHERE start_utc_us < ?1 AND end_utc_us > ?2
-             )",
-            params![interval.end().get(), interval.start().get()],
-            |row| row.get(0),
-        )
-        .map_err(|error| database_error(&error, "check one-time schedule overlap"))?;
-    Ok(conflicts != 0)
+    let mut statement = transaction
+        .prepare("SELECT start_utc_us, end_utc_us FROM one_time_schedule")
+        .map_err(|error| database_error(&error, "prepare one-time schedule overlap check"))?;
+    let rows = statement
+        .query_map([], |row| {
+            let interval = HalfOpenInterval::try_new(UtcMicros::new(row.get(0)?), UtcMicros::new(row.get(1)?))
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?;
+            Ok(interval)
+        })
+        .map_err(|error| database_error(&error, "read one-time schedule overlap check"))?;
+    let intervals = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error(&error, "read one-time schedule overlap check"))?;
+    schedule_rule_conflicts_with_intervals(snapshot.rule(), &intervals)
+        .map_err(|_| StorageError::InvalidStoredValue {
+            field: "schedule time-zone overlap validation",
+        })
 }
 
 fn insert_one_time_schedule(
@@ -1814,6 +1818,47 @@ mod tests {
                 .and_then(|mut reader| reader.snapshot())
                 .map(|snapshot| snapshot.revision()),
             Ok(revision(2))
+        );
+    }
+
+    #[test]
+    fn schedule_persistence_rejects_recurring_conflict_with_one_time_schedule() {
+        let database = TemporaryDatabase::new("schedule-recurring-one-time-overlap");
+        let mut store = open_store(database.path(), 28);
+        let one_time = one_time_schedule_snapshot(29, 32_700_000_000, 35_100_000_000);
+        let recurring_rule = ScheduleRule::repeating(
+            "Daily planning",
+            None,
+            0b0111_1111,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("valid recurring rule");
+        let recurring = ScheduleSnapshot::try_new(
+            ScheduleId::Series(ScheduleSeriesId::from_bytes([30; 16])),
+            recurring_rule,
+            EntityRevision::new(0),
+            UtcMicros::new(12),
+        )
+        .expect("matching recurring identity");
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &one_time),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &recurring),
+            Err(SchedulePersistenceError::Conflict)
+        );
+        assert_eq!(
+            store
+                .open_read_session()
+                .and_then(|mut reader| reader.snapshot())
+                .map(|snapshot| snapshot.revision()),
+            Ok(revision(1))
         );
     }
 

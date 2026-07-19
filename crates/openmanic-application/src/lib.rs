@@ -63,6 +63,7 @@ pub use schedule_time::{
     ResolvedScheduleBoundary, ResolvedScheduleOccurrence, SCHEDULE_CIVIL_EPOCH,
     ScheduleBoundaryResolution, ScheduleTimeError, expand_repeating_schedule,
     resolve_schedule_boundary,
+    schedule_rule_conflicts_with_intervals,
 };
 pub use timeline_projection::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,

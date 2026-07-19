@@ -177,6 +177,59 @@ pub fn expand_repeating_schedule(
     Ok(occurrences)
 }
 
+/// Returns whether a schedule rule intersects any supplied canonical UTC interval.
+///
+/// For a recurring rule, each existing interval is translated into every relevant segment zone,
+/// expanded across the enclosing local dates, and compared with half-open interval semantics.
+/// The one-day margin covers overnight rules at either local boundary.
+///
+/// # Errors
+///
+/// Returns [`ScheduleTimeError`] when a stored instant or civil boundary cannot be resolved.
+pub fn schedule_rule_conflicts_with_intervals(
+    rule: &ScheduleRule,
+    existing: &[HalfOpenInterval],
+) -> Result<bool, ScheduleTimeError> {
+    if let Some(candidate) = rule.one_time_interval() {
+        return Ok(existing.iter().any(|interval| candidate.overlaps(*interval)));
+    }
+    let segments = rule.segments();
+    for interval in existing {
+        for segment in &segments {
+            let first = local_anchor_date(interval.start(), segment.time_zone_id())?
+                .checked_sub(1)
+                .ok_or(ScheduleTimeError::CivilDateOutOfRange)?;
+            let last = local_anchor_date(interval.end(), segment.time_zone_id())?
+                .checked_add(1)
+                .ok_or(ScheduleTimeError::CivilDateOutOfRange)?;
+            if expand_repeating_schedule(rule, first, last)?
+                .iter()
+                .any(|occurrence| occurrence.interval().overlaps(*interval))
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn local_anchor_date(instant: UtcMicros, time_zone_id: &str) -> Result<i32, ScheduleTimeError> {
+    let timestamp = jiff::Timestamp::from_microsecond(instant.get())
+        .map_err(|_| ScheduleTimeError::UtcInstantOutOfRange)?;
+    let zone = tz::TimeZone::get(time_zone_id).map_err(|_| ScheduleTimeError::UnknownTimeZone)?;
+    let local_date = jiff::Zoned::new(timestamp, zone).date();
+    let epoch = Date::new(
+        SCHEDULE_CIVIL_EPOCH.0,
+        SCHEDULE_CIVIL_EPOCH.1,
+        SCHEDULE_CIVIL_EPOCH.2,
+    )
+    .map_err(|_| ScheduleTimeError::CivilDateOutOfRange)?;
+    local_date
+        .since(epoch)
+        .map_err(|_| ScheduleTimeError::CivilDateOutOfRange)
+        .map(|span| span.get_days())
+}
+
 fn weekday_index(anchor_local_date: i32) -> i32 {
     // 1970-01-01 was Thursday (Monday-zero index 3).
     (anchor_local_date.rem_euclid(7) + 3).rem_euclid(7)
@@ -281,6 +334,8 @@ pub enum ScheduleTimeError {
     UnknownTimeZone,
     /// The resolver could not derive the policy-selected instant.
     UnresolvableCivilTime,
+    /// The stored UTC instant lies outside the resolver's supported range.
+    UtcInstantOutOfRange,
     /// An occurrence's resolved end did not follow its resolved start.
     NonPositiveOccurrence,
     /// A stored boundary cannot be both a gap and fold adjustment.
@@ -296,6 +351,7 @@ impl fmt::Display for ScheduleTimeError {
             Self::SecondOfDayOutOfRange => "schedule second of day is outside the supported range",
             Self::UnknownTimeZone => "schedule time zone is unavailable",
             Self::UnresolvableCivilTime => "schedule civil time cannot be resolved",
+            Self::UtcInstantOutOfRange => "schedule UTC instant is outside the supported range",
             Self::NonPositiveOccurrence => "schedule occurrence is not positive",
             Self::ContradictoryBoundaryResolution => "schedule boundary resolution is contradictory",
         })
@@ -310,7 +366,7 @@ mod tests {
 
     use super::{
         SCHEDULE_CIVIL_EPOCH, ScheduleBoundaryResolution, ScheduleTimeError,
-        expand_repeating_schedule, resolve_schedule_boundary,
+        expand_repeating_schedule, resolve_schedule_boundary, schedule_rule_conflicts_with_intervals,
     };
 
     #[test]
@@ -377,5 +433,33 @@ mod tests {
         assert_eq!(occurrences[0].interval().end().get(), 36_000_000_000);
         assert_eq!(occurrences[1].anchor_local_date(), 2);
         assert_eq!(occurrences[1].interval(), override_interval);
+    }
+
+    #[test]
+    fn finds_recurring_conflicts_against_one_time_intervals() {
+        let rule = ScheduleRule::repeating(
+            "Daily planning",
+            None,
+            0b0111_1111,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("valid recurring rule");
+        let conflicting = HalfOpenInterval::try_new(
+            UtcMicros::new(32_700_000_000),
+            UtcMicros::new(35_100_000_000),
+        )
+        .expect("positive interval");
+        let adjacent = HalfOpenInterval::try_new(
+            UtcMicros::new(36_000_000_000),
+            UtcMicros::new(39_600_000_000),
+        )
+        .expect("positive interval");
+
+        assert_eq!(schedule_rule_conflicts_with_intervals(&rule, &[conflicting]), Ok(true));
+        assert_eq!(schedule_rule_conflicts_with_intervals(&rule, &[adjacent]), Ok(false));
     }
 }
