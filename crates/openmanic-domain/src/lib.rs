@@ -7,7 +7,10 @@
 
 mod activity;
 mod catalog;
+mod documents;
+mod focus;
 mod ids;
+mod schedule;
 mod time;
 
 pub use activity::{
@@ -18,8 +21,11 @@ pub use catalog::{
     Application, ApplicationError, ApplicationName, ApplicationNameKind, Category, CategoryName,
     CategoryNameKind, NameError, ValidatedName,
 };
+pub use documents::{LayoutDocument, SavedViewDocument, SettingsDocument, ThemeSelection};
+pub use focus::{FocusSession, FocusSessionError, FocusSessionState};
 pub use ids::{
     ApplicationId, ApplicationIdKind, CategoryId, CategoryIdKind, OpaqueId, OpaqueIdParseError,
     TrackerRunId, TrackerRunIdKind,
 };
+pub use schedule::{ScheduleEditScope, ScheduleRule, ScheduleValidationError};
 pub use time::{HalfOpenInterval, HalfOpenIntervalError, UtcMicros, UtcMicrosArithmeticError};
