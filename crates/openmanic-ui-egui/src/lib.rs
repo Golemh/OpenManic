@@ -18,6 +18,7 @@ mod model;
 mod reducer;
 mod repaint;
 mod shell;
+pub mod timeline;
 
 pub use app::OpenManicApp;
 pub use controller::{
@@ -27,4 +28,9 @@ pub use controller::{
 pub use model::{
     DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
     SnapshotReception, UiAction, UiModel, UserFacingError,
+};
+pub use timeline::{
+    AdaptiveTickLayout, BandSegmentGeometry, PixelRange, ScheduleBracketGeometry, TickGeneration,
+    TickLayoutError, TimelineHit, TimelineRangeGeometry, TimelineTick, TimelineTransform,
+    TimelineTransformError, band_geometry, hit_test,
 };
