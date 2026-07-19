@@ -1,0 +1,35 @@
+# Frozen names and defaults for the deterministic performance-fixture generator.
+# Scenario materialization is introduced by OM-030 milestone 2.
+default_seed = 2_026_030
+dense_interval_count = 10_000
+large_list_count = 1_000
+
+[[scenarios]]
+name = "normal-workday"
+
+[[scenarios]]
+name = "dense-10000-interval-range"
+
+[[scenarios]]
+name = "three-segmented-bands"
+
+[[scenarios]]
+name = "rapid-a-b-a"
+
+[[scenarios]]
+name = "schedule-dst-overnight"
+
+[[scenarios]]
+name = "simultaneous-overlays"
+
+[[scenarios]]
+name = "large-application-category-lists"
+
+[[scenarios]]
+name = "title-churn-10-50-100-hz"
+
+[[scenarios]]
+name = "concurrent-jobs"
+
+[[scenarios]]
+name = "slowed-ui"
