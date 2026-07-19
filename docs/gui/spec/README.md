@@ -27,6 +27,7 @@ All unqualified `MUST` requirements in the product document remain in the MVP. T
 | [Platform adapters](platform-adapters.md) | Capability model, Windows foreground detection, stable application identity, platform evidence, and future NixOS adapters |
 | [Project structure](project-structure.md) | Cargo workspace, directory tree, module ownership, dependency rules, crate policy, and development entry points |
 | [Code quality and readability](code-quality-standards.md) | Formatting, workspace lints, unsafe boundaries, documentation, test hygiene, dependency checks, Rust-only automation, and review standards |
+| [Implementation and agent execution](implementation-plan.md) | Ordered work packages, Terra task briefs, branch/worktree isolation, evidence manifests, verification policy, integration gates, and release sequencing |
 | [UI implementation](ui-implementation.md) | Responsive grid, widget registry, theme schema, timeline projections, interaction arbitration, and presentation-state contracts |
 | [Performance and reliability](performance-and-reliability.md) | Responsiveness budgets, benchmarks, assertions, errors, panic behavior, durability, diagnostics, and verification |
 | [Delivery and setup](delivery-and-setup.md) | Portable artifacts, data-directory selection, single-instance behavior, tray/autostart, updates, and NixOS packaging constraints |
