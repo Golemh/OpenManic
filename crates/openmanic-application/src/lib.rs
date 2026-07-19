@@ -60,7 +60,8 @@ pub use schedule::{
     ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
 };
 pub use schedule_time::{
-    ResolvedScheduleBoundary, SCHEDULE_CIVIL_EPOCH, ScheduleBoundaryResolution, ScheduleTimeError,
+    ResolvedScheduleBoundary, ResolvedScheduleOccurrence, SCHEDULE_CIVIL_EPOCH,
+    ScheduleBoundaryResolution, ScheduleTimeError, expand_repeating_schedule,
     resolve_schedule_boundary,
 };
 pub use timeline_projection::{
