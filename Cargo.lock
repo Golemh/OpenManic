@@ -2528,6 +2528,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "ui-direction-spike"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "fixture-generator",
+]
+
+[[package]]
 name = "unicode-general-category"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
