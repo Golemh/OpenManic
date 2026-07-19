@@ -1,9 +1,9 @@
 //! Deterministic building blocks for OpenManic performance fixtures.
 //!
-//! This crate owns seedable pseudo-randomness, manually advanced test time, and
-//! small input/output test doubles. It deliberately does not own fixture
-//! scenarios or production ports; those are introduced after their contracts
-//! are frozen. It depends only on the Rust standard library and has no
+//! This crate owns seedable pseudo-randomness, manually advanced test time,
+//! deterministic fixture scenarios, and small input/output test doubles. It
+//! deliberately does not own production ports. It depends only on the Rust
+//! standard library and has no
 //! persistence or threading assumptions.
 
 #![forbid(unsafe_code)]

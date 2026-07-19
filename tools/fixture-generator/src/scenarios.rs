@@ -507,12 +507,29 @@ fn concurrent_jobs(fixture: &mut ScenarioFixture) {
     }
 }
 fn slowed_ui(fixture: &mut ScenarioFixture) {
+    let mut pending_snapshot = None;
+    let mut submitted_snapshots = 0;
+    let mut coalesced_snapshots = 0;
+    let mut high_water_mark = 0;
+
+    for snapshot_id in 1..=24 {
+        submitted_snapshots += 1;
+        if pending_snapshot.replace(snapshot_id).is_some() {
+            coalesced_snapshots += 1;
+        }
+        high_water_mark = high_water_mark.max(usize::from(pending_snapshot.is_some()));
+    }
+
+    let Some(delivered_snapshot_id) = pending_snapshot.take() else {
+        return;
+    };
+
     fixture.slowed_ui = Some(SlowedUiMetadata {
-        queue_capacity: 8,
-        high_water_mark: 8,
-        submitted_snapshots: 24,
-        delivered_snapshot_id: 24,
-        coalesced_snapshots: 16,
+        queue_capacity: 1,
+        high_water_mark,
+        submitted_snapshots,
+        delivered_snapshot_id,
+        coalesced_snapshots,
     });
 }
 
@@ -807,12 +824,12 @@ mod tests {
         let Some(ui) = slowed_ui else {
             return;
         };
-        assert_eq!(ui.high_water_mark, ui.queue_capacity);
-        assert_eq!(ui.delivered_snapshot_id, ui.submitted_snapshots as u64);
-        assert_eq!(
-            ui.submitted_snapshots,
-            ui.high_water_mark + ui.coalesced_snapshots
-        );
+        assert_eq!(ui.queue_capacity, 1);
+        assert_eq!(ui.high_water_mark, 1);
+        assert_eq!(ui.submitted_snapshots, 24);
+        assert_eq!(ui.coalesced_snapshots, 23);
+        assert_eq!(ui.delivered_snapshot_id, 24);
+        assert_eq!(ui.submitted_snapshots, ui.coalesced_snapshots + 1);
     }
     #[test]
     fn identical_seeds_repeat_and_distinct_seeds_vary() {
