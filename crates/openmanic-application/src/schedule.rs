@@ -185,3 +185,55 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use openmanic_domain::{
+        HalfOpenInterval, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId, UtcMicros,
+    };
+
+    use super::{ScheduleId, ScheduleSnapshot, ScheduleSnapshotError};
+    use crate::EntityRevision;
+
+    #[test]
+    fn stable_identity_must_match_one_time_or_recurring_rule_form() {
+        let one_time = ScheduleRule::one_time(
+            "Lunch",
+            None,
+            HalfOpenInterval::try_new(UtcMicros::new(10), UtcMicros::new(20))
+                .expect("fixture interval is positive"),
+            "Etc/UTC",
+        )
+        .expect("fixture one-time rule is valid");
+        assert_eq!(
+            ScheduleSnapshot::try_new(
+                ScheduleId::Series(ScheduleSeriesId::from_bytes([1; 16])),
+                one_time,
+                EntityRevision::new(0),
+                UtcMicros::new(0),
+            ),
+            Err(ScheduleSnapshotError::IdentityDoesNotMatchRule)
+        );
+
+        let recurring = ScheduleRule::repeating(
+            "Daily review",
+            None,
+            1,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("fixture recurring rule is valid");
+        assert_eq!(
+            ScheduleSnapshot::try_new(
+                ScheduleId::OneTime(OneTimeScheduleId::from_bytes([2; 16])),
+                recurring,
+                EntityRevision::new(0),
+                UtcMicros::new(0),
+            ),
+            Err(ScheduleSnapshotError::IdentityDoesNotMatchRule)
+        );
+    }
+}
