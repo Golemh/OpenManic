@@ -5,3 +5,12 @@
 //! while shutdown will coordinate checkpoints and joins explicitly.
 
 #![forbid(unsafe_code)]
+
+/// Process bootstrap sequencing and first-launch gates.
+pub mod bootstrap;
+/// Minimal command-line parsing for process bootstrap.
+pub mod cli;
+/// Data-root discovery, validation, locator persistence, and writer locking.
+pub mod data_root;
+/// Privacy-safe local bootstrap diagnostics and panic markers.
+pub mod diagnostics;

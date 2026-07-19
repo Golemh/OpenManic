@@ -14,4 +14,8 @@ compile_error!("select exactly one platform family: platform-windows or platform
 #[cfg(not(any(feature = "platform-windows", feature = "platform-linux")))]
 compile_error!("select one platform family: platform-windows or platform-linux");
 
-fn main() {}
+fn main() {
+    // Composition is intentionally introduced in small, independently testable steps. OM-295
+    // provides the bootstrap foundations; the vertical-slice composition owns launching services
+    // and the eframe shell after all adapter and storage wiring is available.
+}
