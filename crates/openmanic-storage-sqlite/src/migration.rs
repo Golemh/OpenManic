@@ -16,15 +16,26 @@ use crate::backup::{
 use crate::{StorageError, StoreOpenOptions};
 
 /// The newest migration version compiled into this storage crate.
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const INITIAL_CHECKSUM: [u8; 8] = migration_checksum(INITIAL_SCHEMA);
-const MIGRATIONS: [Migration; 1] = [Migration {
-    version: LATEST_SCHEMA_VERSION,
-    source: INITIAL_SCHEMA,
-    checksum: INITIAL_CHECKSUM,
-}];
+const SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_SCHEMA: &str =
+    include_str!("../migrations/0002_schedule_exception_boundary_resolution.sql");
+const SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_CHECKSUM: [u8; 8] =
+    migration_checksum(SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_SCHEMA);
+const MIGRATIONS: [Migration; 2] = [
+    Migration {
+        version: 1,
+        source: INITIAL_SCHEMA,
+        checksum: INITIAL_CHECKSUM,
+    },
+    Migration {
+        version: 2,
+        source: SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_SCHEMA,
+        checksum: SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_CHECKSUM,
+    },
+];
 
 #[derive(Clone, Copy)]
 struct Migration {
@@ -44,7 +55,9 @@ pub(crate) fn apply_all(
     } else if has_user_tables(connection)? {
         Err(StorageError::MigrationLedgerMissing)
     } else {
-        apply_initial_schema(connection, options)
+        apply_initial_schema(connection, options)?;
+        migrate_existing(connection, database_path, options)?;
+        update_last_opened_version(connection, options)
     }
 }
 
@@ -388,7 +401,7 @@ fn apply_initial_schema(
              ) VALUES (1, ?1, 0, ?2, ?3, ?4, NULL)",
             params![
                 options.store_id().as_slice(),
-                i64::from(LATEST_SCHEMA_VERSION),
+                i64::from(MIGRATIONS[0].version),
                 options.opened_utc_us(),
                 options.app_version(),
             ],
@@ -397,7 +410,7 @@ fn apply_initial_schema(
             operation: "initialize store metadata",
         })?;
     transaction
-        .pragma_update(None, "user_version", i64::from(LATEST_SCHEMA_VERSION))
+        .pragma_update(None, "user_version", i64::from(MIGRATIONS[0].version))
         .map_err(|_| StorageError::DatabaseOperation {
             operation: "set SQLite user version",
         })?;
@@ -824,7 +837,7 @@ mod tests {
         );
         let reopened = SqliteWriter::open(database.path(), &options)
             .expect("the restored original database should reopen as a writer");
-        assert_eq!(reopened.schema_version(), Ok(1));
+        assert_eq!(reopened.schema_version(), Ok(2));
         assert_writer_configuration(reopened.configuration());
     }
 

@@ -499,6 +499,7 @@ The anchor is the local date on which the original occurrence begins. It remains
 | `label_override` | TEXT NULL | Optional |
 | `category_id_override` | INTEGER NULL | Optional |
 | `resolved_zone_id` | TEXT NULL | Explanation/export context |
+| `start_boundary_resolution` / `end_boundary_resolution` | INTEGER | Required resolver provenance: Exact, FirstValidAfterGap, or EarlierInstantInFold |
 | `revision` | INTEGER | Required |
 
 Unique constraint:
