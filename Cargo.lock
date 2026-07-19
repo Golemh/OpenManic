@@ -1838,6 +1838,7 @@ name = "openmanic-platform"
 version = "0.1.0"
 dependencies = [
  "openmanic-application",
+ "windows",
 ]
 
 [[package]]
