@@ -11,13 +11,13 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| OM-010 | `codex/om-010-workspace-foundation` | `C:\Users\abr\AppData\Local\Temp\openmanic-agent-worktrees\om-010` | `cdacd3cf183027fe26415a488d83ccbc97178c32` | Root workspace/toolchain/quality files and compile-safe crate roots named in its brief | Workspace manifest, lint and target-feature baseline | Active; sole writer |
+| None | - | - | - | - | - | Awaiting next dispatch |
 
 ## Completed and integrated work
 
 | Task | Author head | Verifier verdict | Primary decision | Integration SHA | Remaining risk |
 | --- | --- | --- | --- | --- | --- |
-| None | - | - | - | - | - |
+| OM-010 | `c33ce97085f2b3b44953500bca7dd3f3016f74c1` | PASS; no P0-P3 findings | Accepted after primary checks and Windows newline repair | `2ad86099948a98dbead117f420ec9e04056935c7` | `cargo-deny` execution begins in OM-020; no product behavior exists yet |
 
 ## Ownership rules
 
