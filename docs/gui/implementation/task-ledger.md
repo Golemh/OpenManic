@@ -11,7 +11,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| _None_ | - | - | - | - | - | OM-030 integrated; OM-040/OM-050 scopes are being separated before activation |
+| OM-040 | `codex/om040-native-ui-fixture` | `F:\\claude\\projects\\OpenManic\\.agents\\om040-native-ui-fixture` | _recorded at activation commit_ | `Cargo.toml`, `Cargo.lock`, `tools/native-ui-fixture/**`, `fixtures/performance/native-ui/**` | Root manifest and lockfile exclusively transferred; no production contract, shared fixture format, or renderer-policy change | Active; checks deferred until Phase 0 end |
 
 ## Completed and integrated work
 
