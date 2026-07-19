@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use openmanic_application::{
     ApplicationError, ApplicationPort, CatalogPersistence, CatalogPersistenceError, DataRevision,
     EntityRevision, FocusKind, FocusPersistence, FocusPersistenceError, FocusSnapshot,
-    PortFailureReason, TrackingPersistenceIntent, TrackingPersistencePort,
+    PortFailureReason, ScheduleId, SchedulePersistence, SchedulePersistenceError,
+    ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
     TrackingPersistenceSubmit,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
-    CategoryId, CategoryName, FocusSessionId, FocusSessionState, TrackerRunId, UtcMicros,
+    CategoryId, CategoryName, FocusSessionId, FocusSessionState, ScheduleOccurrenceException,
+    TrackerRunId, UtcMicros,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -590,6 +592,245 @@ impl FocusPersistence for &mut StorageWriter {
         snapshot: &FocusSnapshot,
     ) -> Result<(DataRevision, EntityRevision), FocusPersistenceError> {
         <StorageWriter as FocusPersistence>::replace_focus(*self, snapshot)
+    }
+}
+
+impl SchedulePersistence for StorageWriter {
+    fn create_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin schedule creation")
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        if schedule_id_exists(&transaction, snapshot.id())
+            .map_err(|_| SchedulePersistenceError::Failed)?
+        {
+            return Err(SchedulePersistenceError::Conflict);
+        }
+        let revision = next_revision(&transaction).map_err(|_| SchedulePersistenceError::Failed)?;
+        insert_schedule_snapshot(&transaction, snapshot)
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        update_revision(&transaction, revision).map_err(|_| SchedulePersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        Ok(revision)
+    }
+}
+
+impl SchedulePersistence for &mut StorageWriter {
+    fn create_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        <StorageWriter as SchedulePersistence>::create_schedule(*self, snapshot)
+    }
+}
+
+fn insert_schedule_snapshot(
+    transaction: &Transaction<'_>,
+    snapshot: &ScheduleSnapshot,
+) -> Result<(), StorageError> {
+    match snapshot.id() {
+        ScheduleId::OneTime(id) => {
+            insert_one_time_schedule(transaction, snapshot, &id.as_bytes())
+        }
+        ScheduleId::Series(id) => insert_schedule_series(transaction, snapshot, &id.as_bytes()),
+    }
+}
+
+fn schedule_id_exists(
+    transaction: &Transaction<'_>,
+    schedule_id: ScheduleId,
+) -> Result<bool, StorageError> {
+    let (table, public_id) = match schedule_id {
+        ScheduleId::OneTime(id) => ("one_time_schedule", id.as_bytes()),
+        ScheduleId::Series(id) => ("schedule_series", id.as_bytes()),
+    };
+    transaction
+        .query_row(
+            &format!("SELECT 1 FROM {table} WHERE public_id = ?1"),
+            [public_id.as_slice()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map(|row| row.is_some())
+        .map_err(|error| database_error(&error, "check schedule identity"))
+}
+
+fn insert_one_time_schedule(
+    transaction: &Transaction<'_>,
+    snapshot: &ScheduleSnapshot,
+    public_id: &[u8; 16],
+) -> Result<(), StorageError> {
+    let rule = snapshot.rule();
+    let interval = rule.one_time_interval().ok_or(StorageError::InvalidStoredValue {
+        field: "one-time schedule rule",
+    })?;
+    let created_zone_id = rule.created_zone_id().ok_or(StorageError::InvalidStoredValue {
+        field: "one-time schedule creation zone",
+    })?;
+    let category_row_id = rule
+        .category_id()
+        .map(|category_id| category_row_id(transaction, category_id.as_bytes()))
+        .transpose()?;
+    let entity_revision = i64::try_from(snapshot.entity_revision().get()).map_err(|_| {
+        StorageError::InvalidStoredValue {
+            field: "schedule revision",
+        }
+    })?;
+    transaction
+        .execute(
+            "INSERT INTO one_time_schedule(
+                 public_id, label, category_id, start_utc_us, end_utc_us, created_zone_id,
+                 created_utc_us, updated_utc_us, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?8)",
+            params![
+                public_id.as_slice(),
+                rule.label(),
+                category_row_id,
+                interval.start().get(),
+                interval.end().get(),
+                created_zone_id,
+                snapshot.created_at_utc().get(),
+                entity_revision,
+            ],
+        )
+        .map_err(|error| database_error(&error, "create one-time schedule"))?;
+    Ok(())
+}
+
+fn insert_schedule_series(
+    transaction: &Transaction<'_>,
+    snapshot: &ScheduleSnapshot,
+    public_id: &[u8; 16],
+) -> Result<(), StorageError> {
+    let entity_revision = i64::try_from(snapshot.entity_revision().get()).map_err(|_| {
+        StorageError::InvalidStoredValue {
+            field: "schedule revision",
+        }
+    })?;
+    transaction
+        .execute(
+            "INSERT INTO schedule_series(public_id, created_utc_us, deleted_utc_us, revision)
+             VALUES (?1, ?2, NULL, ?3)",
+            params![
+                public_id.as_slice(),
+                snapshot.created_at_utc().get(),
+                entity_revision,
+            ],
+        )
+        .map_err(|error| database_error(&error, "create schedule series"))?;
+    let series_row_id: i64 = transaction
+        .query_row(
+            "SELECT id FROM schedule_series WHERE public_id = ?1",
+            [public_id.as_slice()],
+            |row| row.get(0),
+        )
+        .map_err(|error| database_error(&error, "find created schedule series"))?;
+    for segment in snapshot.rule().segments() {
+        let category_row_id = segment
+            .category_id()
+            .map(|category_id| category_row_id(transaction, category_id.as_bytes()))
+            .transpose()?;
+        transaction
+            .execute(
+                "INSERT INTO schedule_rule_segment(
+                     series_id, effective_start_date, effective_end_date, weekday_mask,
+                     start_second_of_day, end_second_of_day, end_day_offset, time_zone_id,
+                     label, category_id, created_utc_us, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    series_row_id,
+                    segment.effective_start_date(),
+                    segment.effective_end_date(),
+                    i64::from(segment.weekday_mask()),
+                    i64::from(segment.start_second_of_day()),
+                    i64::from(segment.end_second_of_day()),
+                    i64::from(segment.end_day_offset()),
+                    segment.time_zone_id(),
+                    segment.label(),
+                    category_row_id,
+                    snapshot.created_at_utc().get(),
+                    entity_revision,
+                ],
+            )
+            .map_err(|error| database_error(&error, "create schedule rule segment"))?;
+    }
+    for exception in snapshot.rule().exceptions() {
+        insert_schedule_exception(
+            transaction,
+            series_row_id,
+            snapshot.rule(),
+            exception,
+            entity_revision,
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_schedule_exception(
+    transaction: &Transaction<'_>,
+    series_row_id: i64,
+    rule: &openmanic_domain::ScheduleRule,
+    exception: ScheduleOccurrenceException,
+    entity_revision: i64,
+) -> Result<(), StorageError> {
+    let (anchor_date, kind, start, end, start_resolution, end_resolution) = match exception {
+        ScheduleOccurrenceException::Skip { anchor_date } => (anchor_date, 0, None, None, 0, 0),
+        ScheduleOccurrenceException::Override {
+            anchor_date,
+            interval,
+            start_after_gap,
+            start_earlier_fold,
+            end_after_gap,
+            end_earlier_fold,
+        } => (
+            anchor_date,
+            1,
+            Some(interval.start().get()),
+            Some(interval.end().get()),
+            boundary_resolution_code(start_after_gap, start_earlier_fold)?,
+            boundary_resolution_code(end_after_gap, end_earlier_fold)?,
+        ),
+    };
+    let resolved_zone_id = rule.time_zone_for_anchor_date(anchor_date).ok_or(
+        StorageError::InvalidStoredValue {
+            field: "schedule exception rule segment",
+        },
+    )?;
+    transaction
+        .execute(
+            "INSERT INTO schedule_exception(
+                 series_id, anchor_local_date, kind, override_start_utc_us, override_end_utc_us,
+                 label_override, category_id_override, resolved_zone_id, revision,
+                 start_boundary_resolution, end_boundary_resolution
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
+            params![
+                series_row_id,
+                anchor_date,
+                kind,
+                start,
+                end,
+                resolved_zone_id,
+                entity_revision,
+                start_resolution,
+                end_resolution,
+            ],
+        )
+        .map_err(|error| database_error(&error, "create schedule exception"))?;
+    Ok(())
+}
+
+fn boundary_resolution_code(after_gap: bool, earlier_fold: bool) -> Result<i64, StorageError> {
+    match (after_gap, earlier_fold) {
+        (false, false) => Ok(0),
+        (true, false) => Ok(1),
+        (false, true) => Ok(2),
+        (true, true) => Err(StorageError::InvalidStoredValue {
+            field: "schedule exception boundary resolution",
+        }),
     }
 }
 
@@ -1355,13 +1596,15 @@ mod tests {
     use openmanic_application::{
         CommandEnvelope, CommandId, EntityRevision, FocusCommand, FocusKind,
         FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
-        FocusSnapshot, OrderingKey, SchemaRevision, TrackingCheckpoint, TrackingPersistenceIntent,
+        FocusSnapshot, OrderingKey, ScheduleId, SchedulePersistence, SchedulePersistenceError,
+        ScheduleSnapshot, SchemaRevision, TrackingCheckpoint, TrackingPersistenceIntent,
         TrackingPersistencePort, TrackingPersistenceSubmit,
     };
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application,
         ApplicationId, ApplicationName, Category, CategoryId, CategoryName, FocusSessionId,
-        FocusSessionState, HalfOpenInterval, TrackerRunId, UtcMicros,
+        FocusSessionState, HalfOpenInterval, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId,
+        TrackerRunId, UtcMicros,
     };
     use rusqlite::Connection;
 
@@ -1437,6 +1680,191 @@ mod tests {
         assert!(snapshot.activities().is_empty());
         assert_eq!(snapshot.applications().len(), 1);
         assert_eq!(snapshot.categories().len(), 1);
+    }
+
+    #[test]
+    fn schedule_persistence_writes_one_time_schedule_and_category_reference() {
+        let database = TemporaryDatabase::new("schedule-one-time");
+        let mut store = open_store(database.path(), 21);
+        let category = Category::new(
+            category_id(22),
+            CategoryName::try_new("Planning").expect("valid category name"),
+        );
+        assert_eq!(
+            store.writer().create_category(&category, UtcMicros::new(10)),
+            Ok(revision(1))
+        );
+        let rule = ScheduleRule::one_time(
+            "Doctor appointment",
+            Some(category.id()),
+            HalfOpenInterval::try_new(UtcMicros::new(100), UtcMicros::new(200))
+                .expect("positive interval"),
+            "America/Toronto",
+        )
+        .expect("valid one-time rule");
+        let snapshot = ScheduleSnapshot::try_new(
+            ScheduleId::OneTime(OneTimeScheduleId::from_bytes([23; 16])),
+            rule,
+            EntityRevision::new(0),
+            UtcMicros::new(11),
+        )
+        .expect("matching one-time identity");
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &snapshot),
+            Ok(revision(2))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &snapshot),
+            Err(SchedulePersistenceError::Conflict)
+        );
+        let stored = store
+            .writer()
+            .writer
+            .connection_mut()
+            .query_row(
+                "SELECT label, category_id IS NOT NULL, start_utc_us, end_utc_us,
+                        created_zone_id, created_utc_us, updated_utc_us, revision
+                   FROM one_time_schedule",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .expect("stored one-time schedule");
+        assert_eq!(
+            stored,
+            (
+                "Doctor appointment".to_owned(),
+                true,
+                100,
+                200,
+                "America/Toronto".to_owned(),
+                11,
+                11,
+                0,
+            )
+        );
+        assert_eq!(
+            store
+                .open_read_session()
+                .and_then(|mut reader| reader.snapshot())
+                .map(|snapshot| snapshot.revision()),
+            Ok(revision(2))
+        );
+    }
+
+    #[test]
+    fn schedule_persistence_writes_segments_and_exception_provenance() {
+        let database = TemporaryDatabase::new("schedule-series");
+        let mut store = open_store(database.path(), 24);
+        let mut rule = ScheduleRule::repeating(
+            "Morning planning",
+            None,
+            0b0001_1111,
+            9 * 3_600,
+            10 * 3_600,
+            20_000,
+            None,
+            "America/Toronto",
+        )
+        .expect("valid recurring rule");
+        let override_interval = HalfOpenInterval::try_new(UtcMicros::new(300), UtcMicros::new(600))
+            .expect("positive override");
+        rule.override_only_this_date(20_005, override_interval, true, false, false, true)
+            .expect("valid exception");
+        let snapshot = ScheduleSnapshot::try_new(
+            ScheduleId::Series(ScheduleSeriesId::from_bytes([25; 16])),
+            rule,
+            EntityRevision::new(4),
+            UtcMicros::new(12),
+        )
+        .expect("matching recurring identity");
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &snapshot),
+            Ok(revision(1))
+        );
+        let connection = store.writer().writer.connection_mut();
+        let segment = stored_schedule_segment(connection);
+        assert_eq!(
+            segment,
+            (
+                31,
+                32_400,
+                36_000,
+                0,
+                "America/Toronto".to_owned(),
+                "Morning planning".to_owned(),
+                12,
+                4,
+            )
+        );
+        let exception = stored_schedule_exception(connection);
+        assert_eq!(
+            exception,
+            (20_005, 1, 300, 600, "America/Toronto".to_owned(), 4, 1, 2)
+        );
+    }
+
+    fn stored_schedule_segment(
+        connection: &mut Connection,
+    ) -> (i64, i64, i64, i64, String, String, i64, i64) {
+        connection
+            .query_row(
+                "SELECT weekday_mask, start_second_of_day, end_second_of_day, end_day_offset,
+                        time_zone_id, label, created_utc_us, revision
+                   FROM schedule_rule_segment",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .expect("stored schedule segment")
+    }
+
+    fn stored_schedule_exception(
+        connection: &mut Connection,
+    ) -> (i32, i64, i64, i64, String, i64, i64, i64) {
+        connection
+            .query_row(
+                "SELECT anchor_local_date, kind, override_start_utc_us, override_end_utc_us,
+                        resolved_zone_id, revision, start_boundary_resolution,
+                        end_boundary_resolution
+                   FROM schedule_exception",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .expect("stored schedule exception")
     }
 
     #[test]
