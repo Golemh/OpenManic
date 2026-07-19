@@ -127,7 +127,9 @@ CREATE TABLE focus_session (
     id INTEGER PRIMARY KEY,
     public_id BLOB NOT NULL UNIQUE CHECK(length(public_id) = 16),
     kind INTEGER NOT NULL CHECK(kind IN (0, 1)),
-    state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 4),
+    -- FocusSessionState mapping: 0 Ready, 1 Planned, 2 Running, 3 Paused,
+    -- 4 Completed, 5 Cancelled. These values are durable and immutable.
+    state INTEGER NOT NULL CHECK(state BETWEEN 0 AND 5),
     label TEXT CHECK(label IS NULL OR length(trim(label)) > 0),
     category_id INTEGER REFERENCES category(id) ON DELETE SET NULL,
     planned_start_utc_us INTEGER,
@@ -140,36 +142,51 @@ CREATE TABLE focus_session (
     cancelled_utc_us INTEGER,
     revision INTEGER NOT NULL CHECK(revision >= 0),
     CHECK(
-        planned_start_utc_us IS NULL
-        OR planned_end_utc_us IS NULL
-        OR planned_end_utc_us > planned_start_utc_us
-    ),
-    CHECK(
         (state = 0
+            AND planned_start_utc_us IS NULL
+            AND planned_end_utc_us IS NULL
             AND actual_start_utc_us IS NULL
             AND deadline_utc_us IS NULL
             AND paused_remaining_us IS NULL
             AND completed_utc_us IS NULL
             AND cancelled_utc_us IS NULL)
         OR (state = 1
+            AND planned_start_utc_us IS NOT NULL
+            AND planned_end_utc_us IS NOT NULL
+            AND planned_end_utc_us > planned_start_utc_us
+            AND actual_start_utc_us IS NULL
+            AND deadline_utc_us IS NULL
+            AND paused_remaining_us IS NULL
+            AND completed_utc_us IS NULL
+            AND cancelled_utc_us IS NULL)
+        OR (state = 2
+            AND planned_start_utc_us IS NULL
+            AND planned_end_utc_us IS NULL
             AND actual_start_utc_us IS NOT NULL
             AND deadline_utc_us IS NOT NULL
             AND paused_remaining_us IS NULL
             AND completed_utc_us IS NULL
             AND cancelled_utc_us IS NULL)
-        OR (state = 2
+        OR (state = 3
+            AND planned_start_utc_us IS NULL
+            AND planned_end_utc_us IS NULL
             AND actual_start_utc_us IS NOT NULL
             AND deadline_utc_us IS NULL
+            AND paused_remaining_us IS NOT NULL
             AND paused_remaining_us > 0
             AND completed_utc_us IS NULL
             AND cancelled_utc_us IS NULL)
-        OR (state = 3
+        OR (state = 4
+            AND planned_start_utc_us IS NULL
+            AND planned_end_utc_us IS NULL
             AND actual_start_utc_us IS NOT NULL
             AND deadline_utc_us IS NULL
             AND paused_remaining_us IS NULL
             AND completed_utc_us IS NOT NULL
             AND cancelled_utc_us IS NULL)
-        OR (state = 4
+        OR (state = 5
+            AND planned_start_utc_us IS NULL
+            AND planned_end_utc_us IS NULL
             AND actual_start_utc_us IS NOT NULL
             AND deadline_utc_us IS NULL
             AND paused_remaining_us IS NULL
@@ -349,4 +366,4 @@ CREATE INDEX idx_saved_overview_view_display_order
     ON saved_overview_view(display_order);
 CREATE UNIQUE INDEX idx_focus_session_at_most_one_active_or_paused
     ON focus_session((1))
-    WHERE state IN (1, 2);
+    WHERE state IN (2, 3);

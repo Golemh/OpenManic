@@ -149,6 +149,103 @@ fn migration_ledger_rejects_a_database_newer_than_the_binary() -> Result<(), Box
 }
 
 #[test]
+fn focus_session_state_mapping_accepts_each_domain_state_shape() -> Result<(), Box<dyn Error>> {
+    let database = TemporaryDatabase::new("focus-state-mapping");
+    SqliteWriter::open(database.path(), &open_options(10))?;
+    let connection = Connection::open(database.path())?;
+
+    connection.execute(
+        "INSERT INTO focus_session(public_id, kind, state, intended_duration_us, revision)
+         VALUES (?1, 0, 0, 1, 0)",
+        [vec![10_u8; 16]],
+    )?;
+    assert_eq!(focus_session_state(&connection, 10)?, 0);
+
+    connection.execute(
+        "INSERT INTO focus_session(
+             public_id, kind, state, planned_start_utc_us, planned_end_utc_us,
+             intended_duration_us, revision
+         ) VALUES (?1, 0, 1, 100, 200, 1, 0)",
+        [vec![11_u8; 16]],
+    )?;
+    assert_eq!(focus_session_state(&connection, 11)?, 1);
+
+    connection.execute(
+        "INSERT INTO focus_session(
+             public_id, kind, state, actual_start_utc_us, deadline_utc_us,
+             intended_duration_us, revision
+         ) VALUES (?1, 0, 2, 100, 101, 1, 0)",
+        [vec![12_u8; 16]],
+    )?;
+    assert_eq!(focus_session_state(&connection, 12)?, 2);
+
+    connection.execute(
+        "INSERT INTO focus_session(
+             public_id, kind, state, actual_start_utc_us, completed_utc_us,
+             intended_duration_us, revision
+         ) VALUES (?1, 0, 4, 100, 101, 1, 0)",
+        [vec![13_u8; 16]],
+    )?;
+    assert_eq!(focus_session_state(&connection, 13)?, 4);
+
+    connection.execute(
+        "INSERT INTO focus_session(
+             public_id, kind, state, actual_start_utc_us, cancelled_utc_us,
+             intended_duration_us, revision
+         ) VALUES (?1, 0, 5, 100, 101, 1, 0)",
+        [vec![14_u8; 16]],
+    )?;
+    assert_eq!(focus_session_state(&connection, 14)?, 5);
+
+    connection.execute(
+        "DELETE FROM focus_session WHERE public_id = ?1",
+        [vec![12_u8; 16]],
+    )?;
+    connection.execute(
+        "INSERT INTO focus_session(
+             public_id, kind, state, actual_start_utc_us, paused_remaining_us,
+             intended_duration_us, revision
+         ) VALUES (?1, 0, 3, 100, 1, 1, 0)",
+        [vec![15_u8; 16]],
+    )?;
+    assert_eq!(focus_session_state(&connection, 15)?, 3);
+
+    Ok(())
+}
+
+#[test]
+fn focus_session_rejects_malformed_planned_bounds() -> Result<(), Box<dyn Error>> {
+    let database = TemporaryDatabase::new("focus-planned-bounds");
+    SqliteWriter::open(database.path(), &open_options(11))?;
+    let connection = Connection::open(database.path())?;
+    let malformed_bounds: [(u8, Option<i64>, Option<i64>); 4] = [
+        (20, None, Some(200)),
+        (21, Some(100), None),
+        (22, Some(100), Some(100)),
+        (23, Some(200), Some(100)),
+    ];
+
+    for (public_id, planned_start, planned_end) in malformed_bounds {
+        let result = connection.execute(
+            "INSERT INTO focus_session(
+                 public_id, kind, state, planned_start_utc_us, planned_end_utc_us,
+                 intended_duration_us, revision
+             ) VALUES (?1, 0, 1, ?2, ?3, 1, 0)",
+            params![vec![public_id; 16], planned_start, planned_end],
+        );
+        let Err(error) = result else {
+            return Err("malformed planned bounds were accepted".into());
+        };
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(ErrorCode::ConstraintViolation)
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn initial_schema_is_strict_and_enforces_key_constraints_and_indexes() -> Result<(), Box<dyn Error>>
 {
     let database = TemporaryDatabase::new("schema-invariants");
@@ -211,14 +308,21 @@ fn assert_key_constraints(connection: &Connection) -> Result<(), Box<dyn Error>>
         "INSERT INTO focus_session(
              public_id, kind, state, intended_duration_us, actual_start_utc_us,
              deadline_utc_us, revision
-         ) VALUES (?1, 0, 1, 1, 10, 11, 0)",
+         ) VALUES (?1, 0, 2, 1, 10, 11, 0)",
         [vec![6_u8; 16]],
+    )?;
+    connection.execute(
+        "INSERT INTO focus_session(
+             public_id, kind, state, planned_start_utc_us, planned_end_utc_us,
+             intended_duration_us, revision
+         ) VALUES (?1, 0, 1, 20, 30, 1, 0)",
+        [vec![9_u8; 16]],
     )?;
     let second_active_session = connection.execute(
         "INSERT INTO focus_session(
              public_id, kind, state, intended_duration_us, actual_start_utc_us,
              paused_remaining_us, revision
-         ) VALUES (?1, 0, 2, 1, 12, 1, 0)",
+         ) VALUES (?1, 0, 3, 1, 12, 1, 0)",
         [vec![7_u8; 16]],
     );
     let Err(error) = second_active_session else {
@@ -245,6 +349,14 @@ fn assert_key_constraints(connection: &Connection) -> Result<(), Box<dyn Error>>
     assert!(active_interval_without_application.is_err());
 
     Ok(())
+}
+
+fn focus_session_state(connection: &Connection, public_id: u8) -> rusqlite::Result<i64> {
+    connection.query_row(
+        "SELECT state FROM focus_session WHERE public_id = ?1",
+        [vec![public_id; 16]],
+        |row| row.get(0),
+    )
 }
 
 fn assert_required_indexes(connection: &Connection) -> Result<(), Box<dyn Error>> {
