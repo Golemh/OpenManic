@@ -1836,6 +1836,7 @@ version = "0.1.0"
 dependencies = [
  "openmanic-application",
  "rusqlite",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
