@@ -9,10 +9,10 @@ use std::collections::VecDeque;
 
 use openmanic_application::{
     AppEvent, ApplicationError, CommandEnvelope, CommandPort, CommandReceipt, EventEnvelope,
-    SnapshotEnvelope,
+    ProjectionRequest, SnapshotEnvelope,
 };
 
-use crate::model::{EventReception, SnapshotReception, UiModel};
+use crate::model::{EventReception, SnapshotReception, UiAction, UiModel};
 
 /// The normal maximum number of inbound messages handled by one eframe update.
 pub(crate) const DEFAULT_INBOUND_DRAIN_LIMIT: usize = 32;
@@ -130,6 +130,27 @@ impl<P, T> UiController<P, T> {
     #[must_use]
     pub const fn model(&self) -> &UiModel<T> {
         &self.model
+    }
+
+    /// Registers the correlation target that a background snapshot must satisfy.
+    ///
+    /// This is UI-local bookkeeping only. It does not invoke a projection port or wait for a
+    /// worker, so composition can establish a new request before publishing it to a bounded lane.
+    pub fn begin_projection<K>(&mut self, request: &ProjectionRequest<K>) {
+        self.model.begin_projection(request);
+    }
+
+    /// Applies one already-decided UI-local action without invoking a port.
+    pub fn reduce_local(&mut self, action: UiAction) {
+        self.model.reduce(action);
+    }
+
+    /// Records a command accepted outside the egui frame, such as a tray action.
+    ///
+    /// The matching authoritative event must still arrive through normal bounded ingress before
+    /// this status becomes confirmed or rejected.
+    pub fn record_external_pending(&mut self, command_id: openmanic_application::CommandId) {
+        self.model.record_pending_mutation(command_id);
     }
 
     /// Returns mutable UI-owned state for shell rendering and pure reducers.

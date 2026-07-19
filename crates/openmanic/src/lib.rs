@@ -10,6 +10,8 @@
 pub mod bootstrap;
 /// Minimal command-line parsing for process bootstrap.
 pub mod cli;
+/// Primary-owned vertical-slice composition of accepted subsystem boundaries.
+pub mod composition;
 /// Data-root discovery, validation, locator persistence, and writer locking.
 pub mod data_root;
 /// Privacy-safe local bootstrap diagnostics and panic markers.

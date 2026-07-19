@@ -142,15 +142,23 @@ pub enum TrackerRunIdKind {}
 /// Stable opaque identifier for one tracker run.
 pub type TrackerRunId = OpaqueId<TrackerRunIdKind>;
 
+/// Marker for a stable focus-session identifier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum FocusSessionIdKind {}
+
+/// Stable opaque identifier for one focus session.
+pub type FocusSessionId = OpaqueId<FocusSessionIdKind>;
+
 #[cfg(test)]
 mod tests {
-    use super::{ApplicationId, CategoryId, OpaqueIdParseError, TrackerRunId};
+    use super::{ApplicationId, CategoryId, FocusSessionId, OpaqueIdParseError, TrackerRunId};
 
     #[test]
     fn stable_ids_round_trip_exact_bytes_with_lowercase_encoding() {
         let category = CategoryId::from_bytes([0x0f; 16]);
         let application = ApplicationId::from_bytes([0xf0; 16]);
         let tracker_run = TrackerRunId::from_bytes([0x12; 16]);
+        let focus_session = FocusSessionId::from_bytes([0x21; 16]);
 
         assert_eq!(
             category.to_lowercase_hex(),
@@ -161,6 +169,7 @@ mod tests {
             "f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
         );
         assert_eq!(tracker_run.as_bytes(), [0x12; 16]);
+        assert_eq!(focus_session.as_bytes(), [0x21; 16]);
         assert_eq!(
             CategoryId::parse_lowercase_hex(&category.to_lowercase_hex()),
             Ok(category)

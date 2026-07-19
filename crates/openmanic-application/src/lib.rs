@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod catalog;
 mod commands;
 mod errors;
 mod events;
@@ -18,6 +19,11 @@ mod tracking;
 
 // Platform adapters consume only this crate's facade. Re-export the domain values
 // already present in normalized tracking evidence so that boundary remains intact.
+pub use catalog::{
+    CatalogApplicationSnapshot, CatalogAssignmentFilter, CatalogCategorySnapshot, CatalogCommand,
+    CatalogCommandError, CatalogFilter, CatalogPersistence, CatalogPersistenceError,
+    CatalogService, CatalogSnapshot,
+};
 pub use commands::{CommandEnvelope, CommandReceipt, TrackingCommand, TrackingEvidence};
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
 pub use events::{

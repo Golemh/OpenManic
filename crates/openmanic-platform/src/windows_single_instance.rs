@@ -55,7 +55,7 @@ pub enum ActivationCommandDecode {
 
 /// Parses a complete activation request without allocating or accepting user data.
 #[must_use]
-pub fn decode_activation_command(message: &[u8]) -> ActivationCommandDecode {
+pub(crate) fn decode_activation_command(message: &[u8]) -> ActivationCommandDecode {
     if message.len() > WINDOWS_ACTIVATION_MESSAGE_LIMIT
         || !message.starts_with(ACTIVATION_PROTOCOL_PREFIX)
         || !message.ends_with(b"\n")
@@ -97,6 +97,8 @@ mod native {
     };
 
     use super::{LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT};
+
+    const ACTIVATION_MESSAGE_LIMIT_U32: u32 = 64;
 
     /// Failure to obtain or contact the local current-user instance without raw OS error leakage.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,6 +217,19 @@ mod native {
         pub fn activation_server(&self) -> Result<WindowsActivationServer, WindowsInstanceError> {
             WindowsActivationServer::create(self)
         }
+
+        /// Wakes a blocked local activation listener so coordinated shutdown can join it.
+        ///
+        /// The wire request remains the fixed payload-free activation command; no process data is
+        /// exposed. Callers set their own stop signal before invoking this method, so the listener
+        /// exits after accepting this wake-up request rather than restoring the viewport.
+        #[must_use]
+        pub fn wake_activation_listener(&self) -> ActivationSendOutcome {
+            WindowsExistingInstance {
+                pipe_name: self.pipe_name.clone(),
+            }
+            .send(LocalActivationCommand::Activate)
+        }
     }
 
     impl Drop for WindowsInstanceOwner {
@@ -253,7 +268,7 @@ mod native {
                 CallNamedPipeW(
                     windows::core::PCWSTR(self.pipe_name.as_ptr()),
                     Some(message.as_ptr().cast()),
-                    message.len() as u32,
+                    u32::try_from(message.len()).unwrap_or(ACTIVATION_MESSAGE_LIMIT_U32),
                     None,
                     0,
                     &raw mut response_length,
@@ -279,6 +294,11 @@ mod native {
         pipe: HANDLE,
     }
 
+    // SAFETY: this owned named-pipe HANDLE has no thread-affine state. The server is moved once
+    // into its dedicated listener thread and all connect/read/disconnect operations remain
+    // serialized through `&mut self`; Drop closes the handle on that same owner thread.
+    unsafe impl Send for WindowsActivationServer {}
+
     impl WindowsActivationServer {
         fn create(owner: &WindowsInstanceOwner) -> Result<Self, WindowsInstanceError> {
             let attributes = owner.security_attributes();
@@ -290,8 +310,8 @@ mod native {
                     PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                     1,
-                    WINDOWS_ACTIVATION_MESSAGE_LIMIT as u32,
-                    WINDOWS_ACTIVATION_MESSAGE_LIMIT as u32,
+                    ACTIVATION_MESSAGE_LIMIT_U32,
+                    ACTIVATION_MESSAGE_LIMIT_U32,
                     0,
                     Some(&raw const attributes),
                 )
@@ -304,7 +324,8 @@ mod native {
 
         /// Waits for one local client and returns a bounded, decoded command without a response.
         ///
-        /// Unknown protocol revisions/commands are returned as [`ActivationCommandDecode::IgnoredUnknown`]
+        /// Unknown protocol revisions/commands are returned as
+        /// [`crate::ActivationCommandDecode::IgnoredUnknown`]
         /// so a future client cannot become a data-access path. Invalid input is rejected. The
         /// server is immediately reusable after this call because the pipe is disconnected before
         /// the result is returned.
@@ -381,61 +402,27 @@ mod native {
         }
 
         fn from_token(token: HANDLE) -> Result<Self, WindowsInstanceError> {
-            let mut required = 0_u32;
-            // SAFETY: This standard sizing call passes no data buffer and lets Windows write only
-            // the required byte count. Its expected insufficient-buffer result is intentionally
-            // ignored because the size is checked before allocation.
-            let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &raw mut required) };
-            if required < size_of::<TOKEN_USER>() as u32 {
-                return Err(WindowsInstanceError::CurrentUserSecurity);
-            }
-            let mut token_bytes = vec![0_u8; required as usize];
-            // SAFETY: The vector supplies exactly the byte capacity requested above and Windows
-            // writes a TOKEN_USER whose SID remains valid until this vector is dropped.
-            unsafe {
-                GetTokenInformation(
-                    token,
-                    TokenUser,
-                    Some(token_bytes.as_mut_ptr().cast()),
-                    required,
-                    &raw mut required,
-                )
-            }
-            .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
-            // SAFETY: GetTokenInformation initialized the leading TOKEN_USER with native layout.
-            let token_user = unsafe { &*token_bytes.as_ptr().cast::<TOKEN_USER>() };
-            let sid_length = unsafe { GetLengthSid(token_user.User.Sid) } as usize;
-            if sid_length == 0 {
-                return Err(WindowsInstanceError::CurrentUserSecurity);
-            }
-            let mut sid = vec![0_u8; sid_length].into_boxed_slice();
-            // SAFETY: The token-owned SID is at least `sid_length` bytes and the destination owns
-            // exactly that many writable bytes. This copy ends the token buffer lifetime tie.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    token_user.User.Sid.0.cast::<u8>(),
-                    sid.as_mut_ptr(),
-                    sid_length,
-                );
-            }
+            let sid = Self::copy_token_sid(token)?;
 
             let acl_bytes = size_of::<ACL>()
                 .saturating_add(size_of::<ACCESS_ALLOWED_ACE>())
-                .saturating_add(sid_length)
+                .saturating_add(sid.len())
                 .saturating_sub(size_of::<u32>());
             let word_count = acl_bytes.div_ceil(size_of::<usize>());
+            let acl_bytes_u32 =
+                u32::try_from(acl_bytes).map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
             let mut acl_words = vec![0_usize; word_count].into_boxed_slice();
             let acl = acl_words.as_mut_ptr().cast::<ACL>();
             // SAFETY: The word-backed allocation has sufficient size and alignment for ACL. The
             // following calls initialize its header and one ACE for the copied current-user SID.
             unsafe {
-                InitializeAcl(acl, acl_bytes as u32, ACL_REVISION)
+                InitializeAcl(acl, acl_bytes_u32, ACL_REVISION)
                     .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
                 AddAccessAllowedAce(
                     acl,
                     ACL_REVISION,
                     GENERIC_ALL.0,
-                    PSID(sid.as_mut_ptr().cast()),
+                    PSID(sid.as_ptr().cast_mut().cast()),
                 )
                 .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
             }
@@ -451,7 +438,7 @@ mod native {
                 .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
                 SetSecurityDescriptorOwner(
                     windows::Win32::Security::PSECURITY_DESCRIPTOR((&raw mut *descriptor).cast()),
-                    Some(PSID(sid.as_mut_ptr().cast())),
+                    Some(PSID(sid.as_ptr().cast_mut().cast())),
                     false,
                 )
                 .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
@@ -471,12 +458,63 @@ mod native {
             })
         }
 
+        fn copy_token_sid(token: HANDLE) -> Result<Box<[u8]>, WindowsInstanceError> {
+            let mut required = 0_u32;
+            // SAFETY: This standard sizing call passes no data buffer and lets Windows write only
+            // the required byte count. Its expected insufficient-buffer result is intentionally
+            // ignored because the size is checked before allocation.
+            let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &raw mut required) };
+            let minimum_token_user_size =
+                u32::try_from(size_of::<TOKEN_USER>()).unwrap_or(u32::MAX);
+            if required < minimum_token_user_size {
+                return Err(WindowsInstanceError::CurrentUserSecurity);
+            }
+            let token_bytes_len =
+                usize::try_from(required).map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
+            let mut token_bytes = vec![0_u8; token_bytes_len];
+            // SAFETY: The vector supplies exactly the byte capacity requested above and Windows
+            // writes a TOKEN_USER whose SID remains valid until this vector is dropped.
+            unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    Some(token_bytes.as_mut_ptr().cast()),
+                    required,
+                    &raw mut required,
+                )
+            }
+            .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
+            // SAFETY: GetTokenInformation initialized the leading TOKEN_USER. `read_unaligned`
+            // copies that value without assuming the byte buffer has TOKEN_USER alignment.
+            let token_user =
+                unsafe { std::ptr::read_unaligned(token_bytes.as_ptr().cast::<TOKEN_USER>()) };
+            // SAFETY: `token_user.User.Sid` was populated by GetTokenInformation and remains
+            // valid while `token_bytes` is retained below.
+            let sid_length = usize::try_from(unsafe { GetLengthSid(token_user.User.Sid) })
+                .map_err(|_| WindowsInstanceError::CurrentUserSecurity)?;
+            if sid_length == 0 {
+                return Err(WindowsInstanceError::CurrentUserSecurity);
+            }
+            let mut sid = vec![0_u8; sid_length].into_boxed_slice();
+            // SAFETY: The token-owned SID is at least `sid_length` bytes and the destination owns
+            // exactly that many writable bytes. This copy ends the token buffer lifetime tie.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    token_user.User.Sid.0.cast::<u8>(),
+                    sid.as_mut_ptr(),
+                    sid_length,
+                );
+            }
+
+            Ok(sid)
+        }
+
         fn attributes(&self) -> SECURITY_ATTRIBUTES {
             // The descriptor borrows this allocation as its DACL, so retaining the field here is
             // part of the security-attribute lifetime contract rather than dead storage.
             let _ = &self.acl_words;
             SECURITY_ATTRIBUTES {
-                nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+                nLength: u32::try_from(size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
                 lpSecurityDescriptor: (&raw const *self.descriptor).cast_mut().cast(),
                 bInheritHandle: false.into(),
             }

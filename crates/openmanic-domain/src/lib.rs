@@ -24,8 +24,8 @@ pub use catalog::{
 pub use documents::{LayoutDocument, SavedViewDocument, SettingsDocument, ThemeSelection};
 pub use focus::{FocusSession, FocusSessionError, FocusSessionState};
 pub use ids::{
-    ApplicationId, ApplicationIdKind, CategoryId, CategoryIdKind, OpaqueId, OpaqueIdParseError,
-    TrackerRunId, TrackerRunIdKind,
+    ApplicationId, ApplicationIdKind, CategoryId, CategoryIdKind, FocusSessionId,
+    FocusSessionIdKind, OpaqueId, OpaqueIdParseError, TrackerRunId, TrackerRunIdKind,
 };
 pub use schedule::{ScheduleEditScope, ScheduleRule, ScheduleValidationError};
 pub use time::{HalfOpenInterval, HalfOpenIntervalError, UtcMicros, UtcMicrosArithmeticError};

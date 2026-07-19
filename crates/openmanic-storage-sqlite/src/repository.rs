@@ -15,6 +15,7 @@ use crate::{SqliteReader, StorageError};
 /// One immutable activity interval returned by a storage snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActivityRecord {
+    raw_id: u64,
     interval: ActivityInterval,
     recovered: bool,
     uncertainty_us: u64,
@@ -22,6 +23,12 @@ pub struct ActivityRecord {
 }
 
 impl ActivityRecord {
+    /// Returns the stable SQLite row identity used by timeline hit testing and detail recovery.
+    #[must_use]
+    pub const fn raw_id(&self) -> u64 {
+        self.raw_id
+    }
+
     /// Returns the canonical domain interval reconstructed from the strict row.
     #[must_use]
     pub const fn interval(&self) -> ActivityInterval {
@@ -148,7 +155,7 @@ impl ActivityRepository {
     fn read(transaction: &Transaction<'_>) -> Result<Vec<ActivityRecord>, StorageError> {
         let mut statement = transaction
             .prepare(
-                "SELECT tracker_run.public_id, activity_interval.start_utc_us,
+                "SELECT activity_interval.id, tracker_run.public_id, activity_interval.start_utc_us,
                         activity_interval.end_utc_us, activity_interval.state,
                         activity_interval.cause, application.public_id,
                         activity_interval.origin, activity_interval.uncertainty_us,
@@ -162,20 +169,22 @@ impl ActivityRepository {
         let rows = statement
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, Vec<u8>>(0)?,
-                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
                     row.get::<_, i64>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
-                    row.get::<_, Option<Vec<u8>>>(5)?,
-                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<Vec<u8>>>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })
             .map_err(|error| database_error(&error, "read activity snapshot"))?;
         rows.map(|row| {
             let (
+                raw_id,
                 tracker_run_id,
                 start_utc_us,
                 end_utc_us,
@@ -187,6 +196,9 @@ impl ActivityRepository {
                 source_revision,
             ) = row.map_err(|error| database_error(&error, "read activity snapshot"))?;
             Ok(ActivityRecord {
+                raw_id: u64::try_from(raw_id).map_err(|_| StorageError::InvalidStoredValue {
+                    field: "activity row identity",
+                })?,
                 interval: activity_interval(
                     tracker_run_id,
                     start_utc_us,

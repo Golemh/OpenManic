@@ -11,6 +11,8 @@
 
 Prioritize implementation throughput over per-task ceremony.
 
+Follow the shared [agent execution and context strategy](agent-execution-strategy.md).
+
 - Batch adjacent plan rows that share a crate/layer and have no unresolved dependency; keep the plan's ordering and product requirements intact.
 - Use at most three implementation agents at once, normally one each for independent domain/application-storage, platform, and UI streams.
 - Keep a small stable set of worktrees for a batch. Do not create a new worktree, ledger commit, verifier, or full review for every plan row.
@@ -22,13 +24,19 @@ Prioritize implementation throughput over per-task ceremony.
 
 Phase 0 and Phase 1 are accepted. Phase 2 component tasks OM-200 through OM-296 are integrated, including the runtime, storage, Windows adapters, timeline projection/interaction/rendering, Today controller, and summary presentation models.
 
-OM-299 is the remaining Phase 2 task. It is primary-owned and must compose the accepted pieces into the first end-to-end Windows vertical slice. Start by wiring the existing bootstrap/data-root lock, SQLite store, bounded application runtime, Windows control/tray/single-instance adapters, immutable UI snapshots, and coordinated Quit path. Do not replace the accepted bounded, adapter-free, or immutable-snapshot boundaries with shortcuts.
+OM-299 now has the primary vertical-slice composition in `crates/openmanic/src/composition.rs`: it keeps the bootstrap/data-root lock and instance owner alive for the full process, runs the exclusive SQLite writer and tracking service on the named writer worker, supplies immutable Today snapshots through a latest mailbox, routes tray/activation actions through bounded ingress, and drives ordered explicit Quit. The root has a direct, pinned `eframe` dependency so its renderer features match the selected UI renderer. Close-to-tray retains the process resources and tracking worker; the Today view exposes pause/resume controls with correlated pending/confirmed/rejected acknowledgement.
 
-After OM-299, run one consolidated Phase 2 gate. It must include the repository quality command and the plan's Windows vertical-slice evidence; do not claim real Windows lifecycle evidence that was not run.
+Use `cargo +stable-x86_64-pc-windows-msvc` for all Windows checks in this checkout. The configured GNU toolchain cannot build bundled SQLite because `gcc.exe` is absent; this is an environment limitation, not a product failure. The MSVC toolchain and `cl.exe` are installed and `cargo +stable-x86_64-pc-windows-msvc xtask quality` has passed after the current source repairs. Set `CARGO_TARGET_DIR=target-msvc` for that command and remove the generated directory afterwards.
+
+The current primary-owned changes also repair Windows-only quality defects in `windows_single_instance.rs` and `windows_tray.rs`, and add `WindowsControlWindow::run_with_tray_actions`. That control-loop method forwards retained tray actions only after their native callback returns, so the composition may route Open/Pause/Resume/Quit without blocking a callback. Keep this bounded behavior; do not call storage or application services directly from a Win32 callback.
+
+The resolver/catalog blocker is now wired: a changed live HWND is resolved on the normal control loop, mapped deterministically from a stable AUMID or normalized executable path, and placed on the writer lane with an application upsert before its `TrackingEvidence::Foreground` command. Unresolved/process-denied identity remains an explicit `ApplicationIdentity` degradation, and overflow still emits loss before a fresh foreground sample. The foreground catalog preserves its earliest and latest observed bounds across upserts.
+
+Phase 2's implementation gate is accepted on the completed integration and `CARGO_TARGET_DIR=target-msvc cargo +stable-x86_64-pc-windows-msvc xtask quality`, which covers formatting, workspace checks, strict Clippy, tests, rustdoc, and documentation checks. The independent read-only review and the full Windows lifecycle checklist are deferred to the UI/UX-complete stabilization gate; the latter remains explicitly unobserved.
 
 ## After Phase 2
 
-Use the ordered Phase 3+ work packages and gates in `docs/gui/spec/implementation-plan.md` as written. Do not begin broad Phase 3 feature work until the G2 gate passes. Preserve the ledger's one-writer/disjoint-path rule and create new task worktrees from the current integration tip.
+Proceed with the ordered Phase 3+ work packages in `docs/gui/spec/implementation-plan.md`. Preserve the ledger's one-writer/disjoint-path rule and create new task worktrees from the current integration tip.
 
 ## Workspace hygiene
 

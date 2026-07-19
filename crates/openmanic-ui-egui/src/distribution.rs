@@ -14,10 +14,11 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::model::{DataLimitation, PresentableData};
+use egui::{Color32, Rect, Vec2};
 
 /// The user-visible dimension used to group a distribution.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub(crate) enum DistributionGrouping {
+pub enum DistributionGrouping {
     /// Groups included time by category.
     Category,
     /// Groups included time by application.
@@ -40,7 +41,7 @@ impl DistributionGrouping {
 
 /// One immutable, already-filtered input contribution.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DistributionContribution {
+pub struct DistributionContribution {
     key: String,
     label: String,
     included_micros: u64,
@@ -49,11 +50,7 @@ pub(crate) struct DistributionContribution {
 impl DistributionContribution {
     /// Creates one contribution identified by an application-owned stable key.
     #[must_use]
-    pub(crate) fn new(
-        key: impl Into<String>,
-        label: impl Into<String>,
-        included_micros: u64,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, label: impl Into<String>, included_micros: u64) -> Self {
         Self {
             key: key.into(),
             label: label.into(),
@@ -98,7 +95,7 @@ impl DistributionGroup {
 
 /// A failure while constructing an immutable distribution snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DistributionBuildError {
+pub enum DistributionBuildError {
     /// A key had no stable identity.
     EmptyKey,
     /// A group cannot be understood without an ordinary-language label.
@@ -111,7 +108,7 @@ pub(crate) enum DistributionBuildError {
 
 /// Immutable presentation-ready distribution input.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct DistributionSnapshot {
+pub struct DistributionSnapshot {
     grouping: DistributionGrouping,
     total_included_micros: u64,
     groups: Arc<[DistributionGroup]>,
@@ -119,7 +116,12 @@ pub(crate) struct DistributionSnapshot {
 
 impl DistributionSnapshot {
     /// Groups contributions deterministically, preserving exact total duration.
-    pub(crate) fn try_from_contributions(
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DistributionBuildError`] when a contribution lacks a stable key or label,
+    /// conflicts with a prior label for the same key, or would overflow the exact total.
+    pub fn try_from_contributions(
         grouping: DistributionGrouping,
         contributions: impl IntoIterator<Item = DistributionContribution>,
     ) -> Result<Self, DistributionBuildError> {
@@ -380,6 +382,77 @@ fn content(
         limitations,
         recovery_notice,
     }
+}
+
+/// Paints the approved compact time-distribution treatment from an immutable snapshot.
+///
+/// The widget keeps exact labels and values visible beneath the stacked bar, so no meaning
+/// depends on color alone. It performs no aggregation or application-port work during a frame.
+pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSnapshot) {
+    let data = PresentableData::Ready(Arc::new(snapshot.clone()));
+    let DistributionRenderModel::Content { presentation, .. } = render_model(
+        &data,
+        DistributionLayout::Compact {
+            max_named_groups: 4,
+        },
+    ) else {
+        return;
+    };
+
+    ui.label(format!(
+        "{}: {}",
+        presentation.grouping_label(),
+        presentation.total_label()
+    ));
+    let (rect, _) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 14.0), egui::Sense::hover());
+    let palette = [
+        Color32::from_rgb(121, 151, 255),
+        Color32::from_rgb(107, 201, 139),
+        Color32::from_rgb(236, 190, 93),
+        Color32::from_rgb(197, 128, 255),
+        Color32::from_rgb(176, 188, 208),
+    ];
+    let visual_total = presentation
+        .segments()
+        .iter()
+        .map(|segment| visual_minutes(segment.included_micros()))
+        .map(f32::from)
+        .sum::<f32>()
+        .max(1.0);
+    let mut left = rect.left();
+    for (index, segment) in presentation.segments().iter().enumerate() {
+        let width =
+            rect.width() * (f32::from(visual_minutes(segment.included_micros())) / visual_total);
+        let right = if index + 1 == presentation.segments().len() {
+            rect.right()
+        } else {
+            (left + width).min(rect.right())
+        };
+        let segment_rect = Rect::from_min_max(
+            egui::pos2(left, rect.top()),
+            egui::pos2(right, rect.bottom()),
+        );
+        ui.painter()
+            .rect_filled(segment_rect, 2.0, palette[index % palette.len()]);
+        left = right;
+    }
+    for segment in presentation.segments() {
+        ui.label(format!(
+            "{}: {}",
+            segment.label(),
+            segment.exact_value_label()
+        ));
+    }
+}
+
+fn visual_minutes(micros: u64) -> u16 {
+    const MICROS_PER_MINUTE: u64 = 60_000_000;
+    if micros == 0 {
+        return 0;
+    }
+    let rounded_up = micros.saturating_add(MICROS_PER_MINUTE.saturating_sub(1)) / MICROS_PER_MINUTE;
+    u16::try_from(rounded_up).unwrap_or(u16::MAX)
 }
 
 fn format_duration(micros: u64) -> String {

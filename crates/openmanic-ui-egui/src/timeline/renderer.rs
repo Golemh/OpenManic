@@ -134,7 +134,13 @@ impl TimelineRenderer {
         self.show_snapshot(ui, snapshot, context, create_schedule_mode)
     }
 
-    fn show_snapshot(
+    /// Renders an already-selected immutable snapshot.
+    ///
+    /// A composition root that owns a correlated multi-widget snapshot can use this entry point
+    /// after presenting its own loading or error state, without rebuilding or querying data on
+    /// the egui thread.
+    #[must_use]
+    pub fn show_snapshot(
         &mut self,
         ui: &mut Ui,
         snapshot: &TimelineSnapshot,

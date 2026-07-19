@@ -297,7 +297,8 @@ mod native {
                 return Ok(true);
             }
             if message == TRAY_CALLBACK_MESSAGE {
-                self.handle_icon_callback(lparam as u32)?;
+                let notification = u32::try_from(lparam).map_err(|_| WindowsTrayError::Menu)?;
+                self.handle_icon_callback(notification)?;
                 return Ok(true);
             }
             if message != WM_COMMAND {
@@ -358,38 +359,43 @@ mod native {
             // SAFETY: Windows creates a private menu handle, immediately populated and destroyed
             // by this method on the same control thread.
             let menu = unsafe { CreatePopupMenu() }.map_err(|_| WindowsTrayError::Menu)?;
-            let result = (|| {
-                append_menu_item(menu, MENU_OPEN, "Open")?;
-                append_menu_item(menu, MENU_PAUSE, "Pause Tracking")?;
-                append_menu_item(menu, MENU_RESUME, "Resume Tracking")?;
-                append_menu_item(menu, MENU_START_FOCUS, "Start Focus Session")?;
-                append_menu_item(menu, MENU_QUIT, "Quit")?;
-
-                let mut point = POINT::default();
-                // SAFETY: POINT is initialized writable storage owned by this stack frame.
-                unsafe { GetCursorPos(&raw mut point) }.map_err(|_| WindowsTrayError::Menu)?;
-                // SAFETY: The control window owns the normal message loop. This is the standard
-                // notification-area popup sequence and retains no caller-owned pointer.
-                let displayed = unsafe {
-                    let _ = SetForegroundWindow(self.control_window);
-                    TrackPopupMenu(
-                        menu,
-                        TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
-                        point.x,
-                        point.y,
-                        None,
-                        self.control_window,
-                        None,
-                    )
-                };
-                if !displayed.as_bool() {
-                    return Err(WindowsTrayError::Menu);
-                }
-                Ok(())
-            })();
+            let result = self.populate_and_show_menu(menu);
             // SAFETY: `menu` was created above and is not retained after this method returns.
             let _ = unsafe { DestroyMenu(menu) };
             result
+        }
+
+        fn populate_and_show_menu(
+            &self,
+            menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
+        ) -> Result<(), WindowsTrayError> {
+            append_menu_item(menu, MENU_OPEN, "Open")?;
+            append_menu_item(menu, MENU_PAUSE, "Pause Tracking")?;
+            append_menu_item(menu, MENU_RESUME, "Resume Tracking")?;
+            append_menu_item(menu, MENU_START_FOCUS, "Start Focus Session")?;
+            append_menu_item(menu, MENU_QUIT, "Quit")?;
+            let mut point = POINT::default();
+            // SAFETY: POINT is initialized writable storage owned by this stack frame.
+            unsafe { GetCursorPos(&raw mut point) }.map_err(|_| WindowsTrayError::Menu)?;
+            // SAFETY: The control window owns the normal message loop. This is the standard
+            // notification-area popup sequence and retains no caller-owned pointer.
+            let displayed = unsafe {
+                let _ = SetForegroundWindow(self.control_window);
+                TrackPopupMenu(
+                    menu,
+                    TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
+                    point.x,
+                    point.y,
+                    None,
+                    self.control_window,
+                    None,
+                )
+            };
+            if displayed.as_bool() {
+                Ok(())
+            } else {
+                Err(WindowsTrayError::Menu)
+            }
         }
 
         fn icon_data(
@@ -397,7 +403,7 @@ mod native {
             flags: windows::Win32::UI::Shell::NOTIFY_ICON_DATA_FLAGS,
         ) -> NOTIFYICONDATAW {
             let mut data = NOTIFYICONDATAW {
-                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+                cbSize: u32::try_from(size_of::<NOTIFYICONDATAW>()).unwrap_or(u32::MAX),
                 hWnd: self.control_window,
                 uID: TRAY_ICON_ID,
                 uFlags: flags,

@@ -15,7 +15,8 @@ compile_error!("select exactly one platform family: platform-windows or platform
 compile_error!("select one platform family: platform-windows or platform-linux");
 
 fn main() {
-    // Composition is intentionally introduced in small, independently testable steps. OM-295
-    // provides the bootstrap foundations; the vertical-slice composition owns launching services
-    // and the eframe shell after all adapter and storage wiring is available.
+    if let Err(error) = openmanic::composition::run_process() {
+        eprintln!("OpenManic could not start: {}", error.safe_summary());
+        std::process::exit(1);
+    }
 }

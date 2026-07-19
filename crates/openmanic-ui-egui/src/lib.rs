@@ -28,6 +28,10 @@ pub use controller::{
     CommandDispatcher, DispatchDrain, InboundMessage, QueueCapacityError, QueueOverflow,
     UiController,
 };
+pub use distribution::{
+    DistributionBuildError, DistributionContribution, DistributionGrouping, DistributionSnapshot,
+    render_distribution_snapshot,
+};
 pub use model::{
     DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
     SnapshotReception, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext, UiAction,
@@ -43,3 +47,4 @@ pub use today::{
     TodayWidgetInstance, TodayWidgetInstanceId, TodayWidgetKind, TodayWidgetRegistry,
     TrackingControlAcknowledgement, TrackingControlAction,
 };
+pub use usage::{ApplicationUsage, ApplicationUsageSnapshot, render_usage_snapshot};

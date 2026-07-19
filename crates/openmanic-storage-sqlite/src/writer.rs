@@ -3,11 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use openmanic_application::{
-    ApplicationError, ApplicationPort, DataRevision, PortFailureReason, TrackingPersistenceIntent,
-    TrackingPersistencePort, TrackingPersistenceSubmit,
+    ApplicationError, ApplicationPort, CatalogPersistence, CatalogPersistenceError, DataRevision,
+    PortFailureReason, TrackingPersistenceIntent, TrackingPersistencePort,
+    TrackingPersistenceSubmit,
 };
 use openmanic_domain::{
-    ActivityCause, ActivityInterval, ActivityState, Application, Category, TrackerRunId, UtcMicros,
+    ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
+    CategoryId, CategoryName, TrackerRunId, UtcMicros,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -152,6 +154,146 @@ impl StorageWriter {
         Ok(revision)
     }
 
+    /// Creates one category and advances the authoritative revision atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the stable ID is already present or the mutation cannot
+    /// commit. Renaming is deliberately a separate operation so a create cannot silently replace
+    /// an existing user category.
+    pub fn create_category(
+        &mut self,
+        category: &Category,
+        observed_at_utc: UtcMicros,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin category creation")?;
+        let revision = next_revision(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO category(
+                     public_id, display_name, color_spec, icon_spec, description,
+                     productivity_class, created_utc_us, updated_utc_us
+                 ) VALUES (?1, ?2, NULL, NULL, NULL, NULL, ?3, ?3)",
+                params![
+                    category.id().as_bytes().as_slice(),
+                    category.name().as_str(),
+                    observed_at_utc.get(),
+                ],
+            )
+            .map_err(|error| database_error(&error, "create category"))?;
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit category creation"))?;
+        Ok(revision)
+    }
+
+    /// Renames one existing category without changing application assignments.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the category no longer exists or the mutation cannot commit.
+    pub fn rename_category(
+        &mut self,
+        category_id: CategoryId,
+        name: &CategoryName,
+        observed_at_utc: UtcMicros,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin category rename")?;
+        let revision = next_revision(&transaction)?;
+        let changed = transaction
+            .execute(
+                "UPDATE category
+                    SET display_name = ?1, updated_utc_us = ?2
+                  WHERE public_id = ?3",
+                params![
+                    name.as_str(),
+                    observed_at_utc.get(),
+                    category_id.as_bytes().as_slice()
+                ],
+            )
+            .map_err(|error| database_error(&error, "rename category"))?;
+        if changed != 1 {
+            return Err(StorageError::CategoryMissing);
+        }
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit category rename"))?;
+        Ok(revision)
+    }
+
+    /// Deletes one category, atomically returning every assigned application to Uncategorized.
+    ///
+    /// SQLite's `ON DELETE SET NULL` foreign key is the single authoritative assignment reset;
+    /// activity rows retain their application IDs and are never rewritten.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the category no longer exists or the mutation cannot commit.
+    pub fn delete_category(
+        &mut self,
+        category_id: CategoryId,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin category deletion")?;
+        let revision = next_revision(&transaction)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM category WHERE public_id = ?1",
+                [category_id.as_bytes().as_slice()],
+            )
+            .map_err(|error| database_error(&error, "delete category"))?;
+        if changed != 1 {
+            return Err(StorageError::CategoryMissing);
+        }
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit category deletion"))?;
+        Ok(revision)
+    }
+
+    /// Assigns distinct existing applications to a category, or explicitly to Uncategorized.
+    ///
+    /// All requested applications are verified before any assignment is changed, so a stale bulk
+    /// selection cannot partially mutate the catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the category or an application no longer exists, or the
+    /// mutation cannot commit.
+    pub fn assign_applications(
+        &mut self,
+        application_ids: &[ApplicationId],
+        category_id: Option<CategoryId>,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin application assignment")?;
+        let revision = next_revision(&transaction)?;
+        let category_row_id = category_id
+            .map(|id| category_row_id(&transaction, id.as_bytes()))
+            .transpose()?;
+        let application_row_ids = application_ids
+            .iter()
+            .map(|id| {
+                application_row_id(&transaction, id.as_bytes())?
+                    .ok_or(StorageError::ApplicationMissing)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for application_row_id in application_row_ids {
+            transaction
+                .execute(
+                    "UPDATE application SET category_id = ?1 WHERE id = ?2",
+                    params![category_row_id, application_row_id],
+                )
+                .map_err(|error| database_error(&error, "assign application category"))?;
+        }
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit application assignment"))?;
+        Ok(revision)
+    }
+
     /// Stores an application's current category association and observation bounds atomically.
     ///
     /// # Errors
@@ -177,8 +319,8 @@ impl StorageWriter {
                  ON CONFLICT(public_id) DO UPDATE SET
                      display_name = excluded.display_name,
                      category_id = excluded.category_id,
-                     first_seen_utc_us = excluded.first_seen_utc_us,
-                     last_seen_utc_us = excluded.last_seen_utc_us",
+                     first_seen_utc_us = MIN(application.first_seen_utc_us, excluded.first_seen_utc_us),
+                     last_seen_utc_us = MAX(application.last_seen_utc_us, excluded.last_seen_utc_us)",
                 params![
                     application.id().as_bytes().as_slice(),
                     application.name().as_str(),
@@ -329,6 +471,53 @@ impl TrackingPersistencePort for StorageWriter {
     }
 }
 
+impl CatalogPersistence for StorageWriter {
+    fn create_category(
+        &mut self,
+        category: &Category,
+        observed_at_utc: UtcMicros,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        StorageWriter::create_category(self, category, observed_at_utc)
+            .map_err(|error| catalog_persistence_error(&error))
+    }
+
+    fn rename_category(
+        &mut self,
+        category_id: CategoryId,
+        name: &CategoryName,
+        observed_at_utc: UtcMicros,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        StorageWriter::rename_category(self, category_id, name, observed_at_utc)
+            .map_err(|error| catalog_persistence_error(&error))
+    }
+
+    fn delete_category(
+        &mut self,
+        category_id: CategoryId,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        StorageWriter::delete_category(self, category_id)
+            .map_err(|error| catalog_persistence_error(&error))
+    }
+
+    fn assign_applications(
+        &mut self,
+        application_ids: &[ApplicationId],
+        category_id: Option<CategoryId>,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        StorageWriter::assign_applications(self, application_ids, category_id)
+            .map_err(|error| catalog_persistence_error(&error))
+    }
+}
+
+fn catalog_persistence_error(error: &StorageError) -> CatalogPersistenceError {
+    match error {
+        StorageError::CategoryMissing | StorageError::ApplicationMissing => {
+            CatalogPersistenceError::NotFound
+        }
+        _ => CatalogPersistenceError::Failed,
+    }
+}
+
 /// A local store facade that creates one serialized writer and short read sessions.
 pub struct SqliteStore {
     database_path: PathBuf,
@@ -457,9 +646,7 @@ fn category_row_id(
         )
         .optional()
         .map_err(|error| database_error(&error, "find application category"))?
-        .ok_or(StorageError::InvalidStoredValue {
-            field: "application category reference",
-        })
+        .ok_or(StorageError::CategoryMissing)
 }
 
 fn application_row_id(
@@ -887,6 +1074,58 @@ mod tests {
         assert!(snapshot.activities().is_empty());
         assert_eq!(snapshot.applications().len(), 1);
         assert_eq!(snapshot.categories().len(), 1);
+    }
+
+    #[test]
+    fn catalog_mutations_preserve_history_and_update_assignments_atomically() {
+        let database = TemporaryDatabase::new("catalog-mutations");
+        let mut store = open_store(database.path(), 12);
+        let writer = store.writer();
+        seed_active_application(writer, 1);
+        seed_active_application(writer, 2);
+        let category = Category::new(
+            category_id(3),
+            CategoryName::try_new("Work").expect("fixture category name should be valid"),
+        );
+        writer
+            .create_category(&category, time(10))
+            .expect("a new category should commit");
+        writer
+            .assign_applications(&[application_id(1), application_id(2)], Some(category.id()))
+            .expect("the complete selected set should be assigned together");
+        writer
+            .rename_category(
+                category.id(),
+                &CategoryName::try_new("Deep work").expect("fixture category name should be valid"),
+                time(20),
+            )
+            .expect("renaming an existing category should commit");
+
+        assert_eq!(
+            writer.assign_applications(&[application_id(1), application_id(9)], None),
+            Err(StorageError::ApplicationMissing)
+        );
+        writer
+            .delete_category(category.id())
+            .expect("category deletion should return applications to Uncategorized");
+
+        let snapshot = store
+            .open_read_session()
+            .and_then(|mut reader| reader.snapshot())
+            .expect("the catalog should remain readable after all mutations");
+        assert_eq!(snapshot.revision(), revision(8));
+        assert!(
+            snapshot
+                .applications()
+                .iter()
+                .all(|record| record.application().category_id().is_none())
+        );
+        assert!(
+            snapshot
+                .categories()
+                .iter()
+                .all(|record| record.category().name().as_str() != "Deep work")
+        );
     }
 
     #[test]

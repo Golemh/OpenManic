@@ -14,6 +14,10 @@ use std::{error::Error, fmt};
 #[cfg(windows)]
 use crate::windows_tray::WindowsTray;
 
+#[cfg(windows)]
+use crate::windows_identity::{
+    ApplicationIdentityResolution, StableApplicationIdentity, WindowsIdentityResolver,
+};
 use crate::windows_raw::{
     RawEventIngress, RawForegroundEvent, RawIngressDrainError, RawWindowHandle, receive_time_utc,
 };
@@ -77,6 +81,8 @@ pub struct WindowsControlAdapter {
     ingress: Arc<RawEventIngress>,
     startup_announced: bool,
     last_live_window: Option<RawWindowHandle>,
+    #[cfg(windows)]
+    identity_resolver: WindowsIdentityResolver,
 }
 
 impl Default for WindowsControlAdapter {
@@ -162,6 +168,8 @@ impl WindowsControlAdapter {
             ingress: Arc::new(RawEventIngress::new(capacity)),
             startup_announced: false,
             last_live_window: None,
+            #[cfg(windows)]
+            identity_resolver: WindowsIdentityResolver::default(),
         }
     }
 
@@ -235,9 +243,49 @@ impl WindowsControlAdapter {
     ) {
         let changed_window = self.last_live_window != Some(event.window());
         self.last_live_window = Some(event.window());
-        if changed_window || self.normalizer.reconciliation_required() {
-            self.announce_identity_degraded(event, sink, drain);
+        if !changed_window && !self.normalizer.reconciliation_required() {
+            return;
         }
+        #[cfg(windows)]
+        match self
+            .identity_resolver
+            .resolve_window(event.window().value())
+        {
+            ApplicationIdentityResolution::Resolved(application) => {
+                if self.normalizer.reconciliation_required() {
+                    self.normalizer.acknowledge_reconciliation();
+                }
+                self.announce_foreground(
+                    event,
+                    stable_application_id(application.identity()),
+                    sink,
+                    drain,
+                );
+            }
+            ApplicationIdentityResolution::Unresolved { .. } => {
+                self.announce_identity_degraded(event, sink, drain);
+            }
+        }
+        #[cfg(not(windows))]
+        self.announce_identity_degraded(event, sink, drain);
+    }
+
+    #[cfg(windows)]
+    fn announce_foreground(
+        &mut self,
+        event: RawForegroundEvent,
+        application_id: openmanic_application::ApplicationId,
+        sink: &dyn TrackingEvidenceSink,
+        drain: &mut WindowsControlDrain,
+    ) {
+        drain.record(self.normalizer.normalize_and_publish(
+            AdapterObservation::new(
+                event.source_order(),
+                event.received_at_utc(),
+                AdapterObservationKind::Foreground { application_id },
+            ),
+            sink,
+        ));
     }
 
     fn announce_temporary_unavailability(
@@ -323,13 +371,44 @@ fn detected_capabilities() -> PlatformCapabilities {
             .with_focus_scope(FocusScope::DesktopGlobal)
             .with_field_support(Capability::ForegroundTracking, FieldSupport::Available)
             .with_field_support(Capability::WindowInstance, FieldSupport::Available)
-            .with_field_support(Capability::ApplicationIdentity, FieldSupport::Unavailable)
+            .with_field_support(Capability::ApplicationIdentity, FieldSupport::Available)
     }
 
     #[cfg(not(windows))]
     {
         PlatformCapabilities::unavailable()
     }
+}
+
+/// Produces a deterministic local catalog key from a resolved Windows identity.
+///
+/// The source value is already a stable AUMID or normalized full executable path; raw window,
+/// PID, title, and executable filename values never participate. The root composition persists
+/// the resulting ID before it submits foreground evidence to the tracking reducer.
+#[cfg(windows)]
+fn stable_application_id(
+    identity: &StableApplicationIdentity,
+) -> openmanic_application::ApplicationId {
+    let (kind, value) = match identity {
+        StableApplicationIdentity::Packaged { aumid, .. } => {
+            (b"aumid:".as_slice(), aumid.as_bytes())
+        }
+        StableApplicationIdentity::ExecutablePath { executable_path } => (
+            b"path:".as_slice(),
+            executable_path.identity_path().as_bytes(),
+        ),
+    };
+    let mut first = 0xcbf2_9ce4_8422_2325_u64;
+    let mut second = 0x9e37_79b9_7f4a_7c15_u64;
+    for byte in kind.iter().chain(value) {
+        first = (first ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3);
+        second = second.rotate_left(5) ^ u64::from(*byte);
+        second = second.wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&first.to_be_bytes());
+    bytes[8..].copy_from_slice(&second.to_be_bytes());
+    openmanic_application::ApplicationId::from_bytes(bytes)
 }
 
 #[cfg(windows)]
@@ -563,11 +642,31 @@ impl WindowsControlWindow {
     /// Returns [`WindowsControlError::Tray`] if Explorer recreation cannot restore the tray icon,
     /// or [`WindowsControlError::MessageLoop`] when Windows reports message retrieval failure.
     pub fn run_with_tray(
-        mut self,
+        self,
         adapter: &mut WindowsControlAdapter,
         sink: &dyn TrackingEvidenceSink,
         tray: &mut WindowsTray,
     ) -> Result<(), WindowsControlError> {
+        self.run_with_tray_actions(adapter, sink, tray, |_| {})
+    }
+
+    /// Runs the control loop and forwards each retained tray action after its Win32 callback
+    /// returns. The action handler executes on the control-loop thread and must remain bounded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsControlError::Tray`] if Explorer recreation cannot restore the tray icon,
+    /// or [`WindowsControlError::MessageLoop`] when Windows reports message retrieval failure.
+    pub fn run_with_tray_actions<F>(
+        mut self,
+        adapter: &mut WindowsControlAdapter,
+        sink: &dyn TrackingEvidenceSink,
+        tray: &mut WindowsTray,
+        mut on_action: F,
+    ) -> Result<(), WindowsControlError>
+    where
+        F: FnMut(crate::WindowsPlatformAction),
+    {
         use windows::Win32::UI::WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, MSG, TranslateMessage,
         };
@@ -596,6 +695,9 @@ impl WindowsControlWindow {
             }
             adapter.note_callback_registration_loss();
             let _ = adapter.drain(sink);
+            while let Some(action) = tray.take_next_action() {
+                on_action(action);
+            }
         };
         tray.remove_icon();
         result
@@ -802,7 +904,7 @@ mod tests {
     use crate::windows_raw::{RawWindowHandle, receive_time_utc};
 
     #[test]
-    fn overflowing_raw_callback_ingress_preserves_loss_and_never_invents_foreground() {
+    fn overflowing_raw_callback_ingress_announces_loss_before_a_fresh_foreground_sample() {
         let mut adapter = WindowsControlAdapter::with_ingress_capacity(1);
         let sink = FakeEvidenceSink::new(8);
 
@@ -834,10 +936,16 @@ mod tests {
                 .iter()
                 .any(|value| matches!(value, TrackingEvidence::EvidenceQueueOverflow { .. }))
         );
-        assert!(!evidence.iter().any(|value| matches!(
-            value,
-            TrackingEvidence::Foreground { .. } | TrackingEvidence::ExcludedForeground { .. }
-        )));
+        let overflow = evidence
+            .iter()
+            .position(|value| matches!(value, TrackingEvidence::EvidenceQueueOverflow { .. }));
+        let foreground = evidence
+            .iter()
+            .position(|value| matches!(value, TrackingEvidence::Foreground { .. }));
+        assert!(
+            foreground
+                .is_none_or(|foreground| overflow.is_some_and(|overflow| overflow < foreground))
+        );
     }
 
     #[cfg(windows)]

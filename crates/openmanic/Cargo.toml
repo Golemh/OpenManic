@@ -7,13 +7,14 @@ publish.workspace = true
 
 [features]
 default = ["renderer-wgpu", "platform-windows"]
-renderer-wgpu = ["openmanic-ui-egui/renderer-wgpu"]
-renderer-glow = ["openmanic-ui-egui/renderer-glow"]
+renderer-wgpu = ["openmanic-ui-egui/renderer-wgpu", "eframe/wgpu"]
+renderer-glow = ["openmanic-ui-egui/renderer-glow", "eframe/glow"]
 platform-windows = ["openmanic-platform/platform-windows"]
 platform-linux = ["openmanic-platform/platform-linux"]
 dev-tools = ["openmanic-ui-egui/dev-tools"]
 
 [dependencies]
+eframe = { workspace = true, default-features = false, features = ["default_fonts"] }
 openmanic-application.workspace = true
 openmanic-domain.workspace = true
 openmanic-platform.workspace = true

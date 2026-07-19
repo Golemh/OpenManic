@@ -7,7 +7,7 @@
 
 #![expect(
     dead_code,
-    reason = "OM-250 deliberately remains disconnected from the degraded control loop until OM-299 composition"
+    reason = "resolver details remain private until later catalog presentation and diagnostics work"
 )]
 
 use std::collections::HashMap;

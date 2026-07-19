@@ -482,19 +482,17 @@ OM-110, OM-120, and OM-130 may run in parallel after OM-100, using disjoint path
 
 After G1, OM-200, OM-210, OM-230, OM-270, OM-280, and OM-295 may begin in isolated worktrees where dependencies permit. OM-240 -> OM-250/260, OM-280 -> OM-281 -> OM-282, and OM-270/280 -> OM-290 -> OM-291/292/293 remain ordered. OM-299 is primary-owned and high-risk.
 
-### Gate G2: Windows vertical slice
+### Gate G2: Windows vertical slice implementation
 
-- Hidden, minimized, resized, or deliberately stalled UI does not stop tracking.
-- Tracking history survives restart and uncertainty is labeled honestly.
-- Pause/resume acknowledgement is visible by the next normal frame.
+- The code paths for hidden, minimized, resized, or deliberately stalled UI tracking; restart persistence; and pause/resume acknowledgement are integrated and covered by the applicable deterministic checks.
 - The UI performs no storage/platform/full-history work.
 - The timeline uses one interaction response and meets the G0 provisional dense-fixture p50/p95 budget.
 - Today date controls, usage totals, distribution totals, tooltip/detail behavior, and shared narrowing state pass their explicit AC mappings.
 - SQLite is WAL/FULL with one writer and short reader transactions.
-- Tray, single instance, data root, and explicit Quit work on Windows 11.
-- All cross-layer and platform work has independent verification.
+- Tray, single instance, data root, and explicit Quit code paths are integrated and covered by the applicable deterministic checks.
+- The complete primary-owned cross-layer diff receives independent read-only review at the UI/UX-complete stabilization gate.
 
-Broad feature implementation does not begin until G2 passes on a real Windows environment.
+The user has deferred real-Windows lifecycle validation until UI/UX is complete. Phase 3 may proceed after this implementation gate; the human checklist remains mandatory before release and is recorded in `docs/gui/implementation/agent-execution-strategy.md`.
 
 ## 15. Phase 3: titles, categories, focus, and schedules
 

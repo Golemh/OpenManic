@@ -38,6 +38,12 @@ pub enum StorageError {
     /// A tracker run required by an activity mutation has not been registered.
     #[error("SQLite tracker run is not registered")]
     TrackerRunMissing,
+    /// A category targeted by a catalog mutation is no longer present.
+    #[error("SQLite category is not registered")]
+    CategoryMissing,
+    /// An application targeted by a catalog mutation is no longer present.
+    #[error("SQLite application is not registered")]
+    ApplicationMissing,
     /// A recovered checkpoint boundary predates its last trusted confirmation.
     #[error("SQLite recovery boundary predates the last trusted checkpoint")]
     RecoveryBoundaryBeforeCheckpoint,

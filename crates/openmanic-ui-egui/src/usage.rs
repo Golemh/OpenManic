@@ -1,4 +1,4 @@
-//! Private application-usage widget support.
+//! Application-usage widget support.
 //!
 //! The application layer supplies an already aggregated immutable snapshot. This
 //! module deliberately neither derives usage from timeline data nor asks a port
@@ -19,7 +19,7 @@ use crate::model::{DataLimitation, EmptyReason, PresentableData};
 
 /// One immutable application total supplied for the selected range.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ApplicationUsage {
+pub struct ApplicationUsage {
     application_id: ApplicationId,
     display_name: String,
     duration_us: u64,
@@ -28,11 +28,7 @@ pub(crate) struct ApplicationUsage {
 impl ApplicationUsage {
     /// Creates one application total. The caller owns name resolution and aggregation.
     #[must_use]
-    pub(crate) fn new(
-        application_id: ApplicationId,
-        display_name: String,
-        duration_us: u64,
-    ) -> Self {
+    pub fn new(application_id: ApplicationId, display_name: String, duration_us: u64) -> Self {
         Self {
             application_id,
             display_name,
@@ -64,7 +60,7 @@ impl ApplicationUsage {
 /// `range_label` is supplied by the application/composition boundary because
 /// civil-time formatting cannot be inferred safely from UTC values in a widget.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ApplicationUsageSnapshot {
+pub struct ApplicationUsageSnapshot {
     range_label: String,
     applications: Arc<[ApplicationUsage]>,
 }
@@ -72,7 +68,7 @@ pub(crate) struct ApplicationUsageSnapshot {
 impl ApplicationUsageSnapshot {
     /// Creates an immutable application-usage snapshot.
     #[must_use]
-    pub(crate) fn new(range_label: String, applications: Vec<ApplicationUsage>) -> Self {
+    pub fn new(range_label: String, applications: Vec<ApplicationUsage>) -> Self {
         Self {
             range_label,
             applications: Arc::from(applications),
@@ -382,6 +378,16 @@ pub(crate) fn render_usage(ui: &mut Ui, presentation: &UsagePresentation) {
         }
         UsagePresentationState::Ready => {}
     }
+}
+
+/// Renders a composed immutable usage snapshot with the standard bounded row treatment.
+///
+/// The caller supplies the already-aggregated value; this helper performs no port, storage, or
+/// platform access while painting.
+pub fn render_usage_snapshot(ui: &mut Ui, snapshot: &ApplicationUsageSnapshot) {
+    let data = PresentableData::Ready(Arc::new(snapshot.clone()));
+    let presentation = UsagePresentation::from_data(&data, 5);
+    render_usage(ui, &presentation);
 }
 
 #[cfg(test)]

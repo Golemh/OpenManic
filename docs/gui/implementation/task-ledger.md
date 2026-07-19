@@ -3,7 +3,7 @@
 - Integration branch: `codex/openmanic-mvp-implementation-continuation`
 - Plan commit: `9002482`
 - Integration authority: primary agent only
-- Last updated: 2026-07-20
+- Last updated: 2026-07-19
 
 This ledger is the source of truth for delegated implementation ownership and integration decisions. A task may have only one writing agent, and concurrently active tasks must have separate worktrees and disjoint writable paths.
 
@@ -33,7 +33,8 @@ This ledger is the source of truth for delegated implementation ownership and in
 | OM-291 | `codex/om291-timeline-renderer` | `F:\\claude\\projects\\OpenManic\\.agents\\om291-timeline-renderer` | `aa4a1cc` | `crates/openmanic-ui-egui/src/timeline/{mod.rs,renderer.rs,detail.rs}` | Recreated from the compacted clean task branch at the latest integrated head; uses stable IDs when snapshot display names/occurrences are unavailable | Integrated at `80b7e7d`; Phase 2 verification deferred to the one phase gate |
 | OM-292 | `codex/om292-usage-widget` | `F:\\claude\\projects\\OpenManic\\.agents\\om292-usage-widget` | `aa4a1cc` | `crates/openmanic-ui-egui/src/usage.rs` | Recreated from the compacted clean task branch at the latest integrated head; composition must supply the exact already-formatted range label | Integrated at `7bdf299`; Phase 2 verification deferred to the one phase gate |
 | OM-293 | `codex/om293-distribution-widget` | `F:\\claude\\projects\\OpenManic\\.agents\\om293-distribution-widget` | `2e0bd4d` | `crates/openmanic-ui-egui/src/distribution.rs` | The primary predeclared the private module; composition must provide stable, already-filtered contribution inputs | Integrated at `3120f0a`; Phase 2 verification deferred to the one phase gate |
-| OM-299 | primary integration branch | `F:\\claude\\projects\\OpenManic` | `80b7e7d` | `crates/openmanic/{Cargo.toml,src/{lib.rs,main.rs,composition.rs}}` | Primary-owned end-to-end vertical composition; no delegated writer; preserve the unrelated pending handover-document deletion | Active; this is the last implementation task before the single Phase 2 gate |
+| OM-299 | primary integration branch | `D:\\y-Coding\\Human_Coding\\Codex_Hackathon\\OpenManic` | `f906d4a` | `crates/openmanic/{Cargo.toml,src/{lib.rs,main.rs,composition.rs}}, crates/openmanic-platform/src/{windows_control.rs,windows_identity.rs,windows_single_instance.rs,windows_tray.rs}, crates/openmanic-storage-sqlite/src/writer.rs` | Primary-owned end-to-end vertical composition and G2 quality repairs. Resolved Windows identity now maps to a deterministic local catalog ID, upserts on the writer before foreground evidence, and preserves observed bounds; MSVC `cargo xtask quality` passes. | Phase 2 implementation accepted; independent review and human Windows lifecycle validation deferred to the UI/UX-complete stabilization gate |
+| OM-310 | primary integration branch | `D:\\y-Coding\\Human_Coding\\Codex_Hackathon\\OpenManic` | `f906d4a` | `crates/openmanic-application/src/{catalog.rs,lib.rs}`, `crates/openmanic-storage-sqlite/src/{errors.rs,writer.rs}` | Primary-owned Phase 3 catalog service: explicit create/rename/delete/bulk-assignment commands, correlated mutation outcomes, a persistence port, atomic SQLite writer mutations, and immutable revision-correlated name/category/Uncategorized query snapshots. The existing projection reads catalog associations at the shared data revision. | Implemented and focused-verified; UI command dispatch and destructive confirmation are consumed by dependent OM-311 |
 | OM-240 | `codex/om240-windows-control-loop` | `F:\\claude\\projects\\OpenManic\\.agents\\om240-windows-control-loop` | `e2a4ca6` | `crates/openmanic-platform/src/{lib.rs,windows_control.rs,windows_raw.rs}` | The primary prepared pinned Windows bindings and the lockfile at `e2a4ca6`; live HWND attribution honestly remains degraded until OM-250 | Integrated at `8e3e49d`; Phase 2 verification deferred to the one phase gate |
 | OM-250 | `codex/om250-windows-identity` | `F:\\claude\\projects\\OpenManic\\.agents\\om250-windows-identity` | `f9457f9` | `crates/openmanic-platform/src/windows_identity.rs` | The primary enabled the Appx/Globalization namespaces before author checks; control-loop composition remains OM-299-owned | Integrated at `8e9dd90`; Phase 2 verification deferred to the one phase gate |
 | OM-260 | `codex/om260-windows-lifecycle` | `F:\\claude\\projects\\OpenManic\\.agents\\om260-windows-lifecycle` | `f9457f9` | `crates/openmanic-platform/src/windows_lifecycle.rs` | The primary enabled the Performance/WindowsProgramming namespaces before final author checks; control-loop composition remains OM-299-owned | Integrated at `1d04a7a`; Phase 2 verification deferred to the one phase gate |
@@ -106,6 +107,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 - Root manifests, lockfiles, public contracts, migrations, dependency policy, packaging, and specifications are primary-owned unless a task explicitly transfers them.
 - Authors do not merge, rebase, push, change branches, or edit outside their allowlist.
 - The normal cadence is batch-level: authors run only focused unblock checks while implementing; one consolidated quality run and targeted read-only review occur at the applicable phase/gate. Escalate to an earlier review only for a concrete failure, conflict, or newly discovered high-risk boundary.
+- Follow the shared [agent execution and context strategy](agent-execution-strategy.md) for batching, context use, quality cadence, and deferred human evidence.
 - The primary records author evidence, verifier findings, and the final integration decision here.
 
 ## Task record template
@@ -119,6 +121,7 @@ Base SHA:
 Writable paths:
 Read-only dependencies:
 Public contracts or migrations touched:
+Acceptance checklist (contracts / automated / review / manual):
 Author head and evidence:
 Verifier findings/verdict:
 Primary decision:
