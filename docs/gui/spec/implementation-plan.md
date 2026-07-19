@@ -25,19 +25,19 @@ Terra agents author bounded changes. They do not approve architecture, integrate
 
 - owns the task graph and shared contracts;
 - creates task branches and worktrees;
-- reviews every changed line and public boundary;
-- reruns relevant checks independently;
-- requests separate verification where required;
+- reviews each coherent batch integration diff and its public boundaries;
+- runs focused unblock checks during assembly and the full relevant checks at its phase/gate;
+- requests separate verification at a phase/gate or for a concrete high-risk concern;
 - accepts, rejects, or returns work for repair; and
 - performs all integration into the implementation branch.
 
 ```mermaid
 flowchart LR
     SPEC["Verified specification baseline"] --> READY["Primary prepares bounded task"]
-    READY --> AUTHOR["Terra implementation worktree"]
-    AUTHOR --> SELF["Author self-review and evidence manifest"]
-    SELF --> PRIMARY["Primary code and behavior review"]
-    PRIMARY -->|"medium/high risk"| VERIFY["Independent Terra verifier"]
+    READY --> AUTHOR["Terra implementation worktrees"]
+    AUTHOR --> SELF["Focused author checks and evidence"]
+    SELF --> PRIMARY["Primary batch integration review"]
+    PRIMARY -->|"phase/gate or high-risk concern"| VERIFY["Independent Terra verifier"]
     VERIFY --> DECIDE["Primary final decision"]
     PRIMARY -->|"low risk"| DECIDE
     DECIDE -->|"repair"| AUTHOR
@@ -125,16 +125,18 @@ It may recommend a contract change but may not apply an unapproved one. It may n
 
 ### 4.3 Terra verifier
 
-A verifier starts read-only from the reviewed task head. It:
+When the primary requests one for a phase/gate or a concrete high-risk concern, a verifier starts
+read-only from the reviewed batch head. It:
 
-- receives the task brief, base/head SHAs, diff, and author evidence;
+- receives the relevant batch/task briefs, base/head SHAs, diff, and author evidence;
 - independently maps requirements to behavior and tests;
 - reruns relevant checks and searches for counterexamples;
 - examines actual failure, privacy, concurrency, and recovery paths;
 - reports findings with severity, exact location, and evidence; and
 - does not fix the author's code.
 
-The original author repairs findings on the same task branch. P0/P1 repairs receive another verifier pass. The verifier advises; the primary decides.
+The original author repairs findings on the same task branch. P0/P1 repairs receive another verifier
+pass. The verifier advises; the primary decides.
 
 ## 5. Task sizing and ownership
 
@@ -277,24 +279,16 @@ git_status:
 
 ## 9. Review and verification policy
 
-### 9.1 Primary review for every task
+### 9.1 Primary review for each coherent batch
 
-The primary MUST:
+The primary MUST confirm task bases/heads, clean status, and path ownership before integration;
+inspect the batch integration diff; and reject a concrete scope, contract, safety, or regression
+concern. The primary records the batch decision and real limitations in the ledger. Full
+requirement-to-evidence reconstruction and adversarial review occur at the applicable phase/gate.
 
-1. Confirm the branch, base, head, and clean worktree.
-2. Compare changed paths with the writable-path allowlist.
-3. Read the complete base-to-head diff.
-4. Inspect every public API, error/recovery path, unsafe block, transaction, and dependency change.
-5. Reconstruct requirement -> implementation -> test evidence.
-6. Check the frontend/backend boundary and egui frame path independently.
-7. Rerun the author's targeted commands from the exact head.
-8. Add at least one independent adversarial or boundary check for medium/high-risk behavior.
-9. Reject silent assumptions, weakened checks, hidden fallback, or scope expansion.
-10. Record an accept, repair, or reject decision before integration.
+### 9.2 Escalated independent verification
 
-### 9.2 Mandatory independent verification
-
-A separate verifier is mandatory for changes involving:
+The primary requests a separate read-only verifier at the applicable phase/gate when a batch includes:
 
 - domain invariants or public command/event/snapshot/port contracts;
 - SQLite schema, migrations, transactions, recovery, import, backup, move, or deletion;
@@ -307,7 +301,10 @@ A separate verifier is mandatory for changes involving:
 - a new dependency; or
 - flaky behavior, data-loss regression, or repeated failed repair.
 
-Localized documentation, test-data additions, mechanical renames, and isolated visual polish may use primary-only review when they change no behavior or contract. Medium-risk tasks receive at least a verifier pass at their integration gate even if they did not require per-task verification.
+Localized documentation, test-data additions, mechanical renames, and isolated visual polish may
+use primary-only review. An earlier separate verifier is required only when a concrete failure,
+conflict, suspected privacy/security issue, unsafe boundary, fabricated tracking evidence, or
+similar material concern is discovered; ordinary task completion alone is not a trigger.
 
 ### 9.3 Finding severity
 
@@ -637,7 +634,10 @@ If a supposedly parallel task discovers a shared-contract need, it stops. The pr
 
 ## 21. Agent self-review checklist
 
-Before handoff, the author verifies:
+Before handoff, the author completes the applicable focused checks named in the batch brief. Full
+quality and platform evidence are phase/gate responsibilities, not automatic per-task work. The
+following checklist remains required when its item is relevant to the assigned change or explicitly
+requested by the primary:
 
 ### Repository
 
@@ -647,7 +647,7 @@ Before handoff, the author verifies:
 - [ ] No cache, generated database, log, secret, or unrelated file is committed.
 - [ ] Commit history is coherent and carries the task ID.
 
-### Rust and tests
+### Rust and tests when applicable
 
 - [ ] Formatting, targeted check, Clippy with `-D warnings`, and targeted tests pass.
 - [ ] Relevant feature/target combinations compile.
@@ -668,17 +668,22 @@ Before handoff, the author verifies:
 
 ## 22. Integration procedure
 
-For each candidate:
+For each coherent batch:
 
-1. Freeze and record the author head SHA and evidence manifest.
-2. Run primary review and required verifier pass.
-3. Return findings to the author until blocking issues are resolved.
-4. Cherry-pick reviewed atomic commits onto the integration branch.
-5. Run formatting, targeted crate checks, and affected cross-crate tests.
-6. Inspect the integration diff rather than assuming a clean cherry-pick preserved behavior.
-7. At each coherent batch/gate, run full workspace quality and the relevant feature/platform checks.
-8. Record task head, integration SHA, verifier verdict, primary decision, and remaining risks in the ledger.
-9. Retain the task branch/worktree until integrated checks pass; then remove it through the primary.
+1. Freeze and record every author head SHA and concise evidence manifest.
+2. Inspect assigned paths and integration diffs before cherry-picking atomic commits in dependency order.
+3. Return a concrete conflict, regression, missing contract, or safety concern to a bounded repair task.
+4. Run only the focused checks needed to unblock the batch while it is being assembled.
+5. At the applicable phase/gate, run full workspace quality, the relevant feature/platform checks,
+   and one targeted read-only review.
+6. Record the batch/task heads, integration SHAs, gate verdict, primary decision, and remaining
+   risks in the ledger.
+7. Retain task worktrees only while they are active or awaiting batch integration; then remove them
+   through the primary.
+
+An earlier independent review is required for suspected corruption, privacy leak, unsafe
+unsoundness, fabricated tracking time, or another concrete high-risk boundary. It is not required
+solely because an ordinary task is ready to integrate.
 
 Never merge another task to conceal a failed integration check. A conflict or regression returns to a bounded repair task.
 
@@ -738,7 +743,8 @@ A task is done only when:
 - scope and path ownership were respected;
 - every acceptance criterion has concrete evidence;
 - author self-review is complete;
-- all required checks pass at the reported head SHA;
+- all focused checks required by the batch brief pass at the reported head SHA, and the applicable
+  phase/gate checks pass at the resulting integration SHA;
 - independent verification has no unresolved P0/P1 finding where required;
 - the primary reviewed the implementation, not only the summary;
 - accepted commits are integrated in dependency order;

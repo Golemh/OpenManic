@@ -27,6 +27,15 @@ These instructions apply to every delegated implementation, repair, and verifica
 - Do not add a dependency, feature, migration, or shared public type unless the task explicitly transfers that ownership.
 - Use deterministic tests without network access, arbitrary sleeps, or uncontrolled wall time.
 
+## Execution cadence
+
+- Follow the user-directed batch cadence in `docs/gui/implementation/terra-handover.md`.
+- Run only the focused checks named in the task or batch brief while implementing. Full quality, platform
+  evidence, and targeted read-only review occur at the applicable phase/gate unless the primary
+  identifies a concrete regression or high-risk boundary.
+- Do not request a verifier or create a new worktree merely because an ordinary plan row ends.
+  Batch adjacent, dependency-compatible work only when writable paths remain disjoint.
+
 ## Handoff
 
 - Review the complete base-to-head diff and confirm every changed path is owned.
