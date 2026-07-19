@@ -3,7 +3,7 @@
 - Integration branch: `codex/openmanic-mvp-implementation-continuation`
 - Plan commit: `9002482`
 - Integration authority: primary agent only
-- Last updated: 2026-07-19
+- Last updated: 2026-07-20
 
 This ledger is the source of truth for delegated implementation ownership and integration decisions. A task may have only one writing agent, and concurrently active tasks must have separate worktrees and disjoint writable paths.
 
