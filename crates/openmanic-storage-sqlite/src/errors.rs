@@ -76,6 +76,24 @@ pub enum StorageError {
     /// SQLite's foreign-key check rejected the pre-migration backup.
     #[error("SQLite foreign-key check rejected the pre-migration backup")]
     BackupForeignKeyCheckFailed,
+    /// The restored database failed SQLite's quick check after writer settings were reapplied.
+    #[error("SQLite quick check rejected the restored database")]
+    RestoredDatabaseQuickCheckFailed,
+    /// The restored database failed SQLite's foreign-key check after writer settings were reapplied.
+    #[error("SQLite foreign-key check rejected the restored database")]
+    RestoredDatabaseForeignKeyCheckFailed,
+    /// A post-migration quick check failed before SQLite accepted the migration transaction.
+    #[error("SQLite quick check rejected migration {version} before commit")]
+    MigrationQuickCheckFailed {
+        /// The migration version whose transaction was rejected.
+        version: u32,
+    },
+    /// A post-migration foreign-key check failed before SQLite accepted the migration transaction.
+    #[error("SQLite foreign-key check rejected migration {version} before commit")]
+    MigrationForeignKeyCheckFailed {
+        /// The migration version whose transaction was rejected.
+        version: u32,
+    },
     /// A post-initial migration failed after its verified backup was retained and restored.
     #[error("SQLite migration {version} failed; the retained pre-migration backup was restored")]
     MigrationFailed {
@@ -202,6 +220,22 @@ mod tests {
             (
                 StorageError::BackupForeignKeyCheckFailed,
                 "SQLite foreign-key check rejected the pre-migration backup",
+            ),
+            (
+                StorageError::RestoredDatabaseQuickCheckFailed,
+                "SQLite quick check rejected the restored database",
+            ),
+            (
+                StorageError::RestoredDatabaseForeignKeyCheckFailed,
+                "SQLite foreign-key check rejected the restored database",
+            ),
+            (
+                StorageError::MigrationQuickCheckFailed { version: 2 },
+                "SQLite quick check rejected migration 2 before commit",
+            ),
+            (
+                StorageError::MigrationForeignKeyCheckFailed { version: 2 },
+                "SQLite foreign-key check rejected migration 2 before commit",
             ),
             (
                 StorageError::MigrationFailed { version: 2 },

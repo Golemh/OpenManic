@@ -9,7 +9,10 @@ use std::path::Path;
 
 use rusqlite::{Connection, Transaction, TransactionBehavior, params};
 
-use crate::backup::{VerifiedBackup, create_verified_backup, restore_verified_backup};
+use crate::backup::{
+    IntegrityCheckFailure, VerifiedBackup, create_verified_backup, restore_verified_backup,
+    verify_database_integrity,
+};
 use crate::{StorageError, StoreOpenOptions};
 
 /// The newest migration version compiled into this storage crate.
@@ -136,15 +139,17 @@ fn migrate_existing(
     database_path: &Path,
     options: &StoreOpenOptions,
 ) -> Result<(), StorageError> {
-    migrate_existing_with(
+    migrate_existing_with_integrity(
         connection,
         database_path,
         options,
         &MIGRATIONS,
         apply_migration_sql,
+        verify_post_migration_integrity,
     )
 }
 
+#[cfg(test)]
 fn migrate_existing_with<F>(
     connection: &mut Connection,
     database_path: &Path,
@@ -154,6 +159,28 @@ fn migrate_existing_with<F>(
 ) -> Result<(), StorageError>
 where
     F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+{
+    migrate_existing_with_integrity(
+        connection,
+        database_path,
+        options,
+        migrations,
+        apply,
+        verify_post_migration_integrity,
+    )
+}
+
+fn migrate_existing_with_integrity<F, I>(
+    connection: &mut Connection,
+    database_path: &Path,
+    options: &StoreOpenOptions,
+    migrations: &[Migration],
+    apply: F,
+    verify_integrity: I,
+) -> Result<(), StorageError>
+where
+    F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+    I: FnMut(&Transaction<'_>, Migration) -> Result<(), StorageError>,
 {
     // Ledger, checksum, schema-version, and store-identity failures must not
     // create a backup or begin migration work.
@@ -166,19 +193,22 @@ where
         current_version,
         migrations,
         apply,
+        verify_integrity,
     )
 }
 
-fn apply_pending_migrations_with<F>(
+fn apply_pending_migrations_with<F, I>(
     connection: &mut Connection,
     database_path: &Path,
     options: &StoreOpenOptions,
     current_version: u32,
     migrations: &[Migration],
     mut apply: F,
+    mut verify_integrity: I,
 ) -> Result<(), StorageError>
 where
     F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+    I: FnMut(&Transaction<'_>, Migration) -> Result<(), StorageError>,
 {
     let mut applied_version = current_version;
     for migration in migrations {
@@ -192,28 +222,34 @@ where
             applied_version,
             migration.version,
         )?;
-        let result =
-            apply_migration_transactionally(connection, options, *migration, &backup, &mut apply);
-        if result.is_err() {
+        let result = apply_migration_transactionally(
+            connection,
+            options,
+            *migration,
+            &backup,
+            &mut apply,
+            &mut verify_integrity,
+        );
+        if let Err(error) = result {
             restore_verified_backup(connection, &backup)?;
-            return Err(StorageError::MigrationFailed {
-                version: migration.version,
-            });
+            return Err(migration_error_after_recovery(migration.version, error));
         }
         applied_version = migration.version;
     }
     Ok(())
 }
 
-fn apply_migration_transactionally<F>(
+fn apply_migration_transactionally<F, I>(
     connection: &mut Connection,
     options: &StoreOpenOptions,
     migration: Migration,
     backup: &VerifiedBackup,
     apply: &mut F,
+    verify_integrity: &mut I,
 ) -> Result<(), StorageError>
 where
     F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+    I: FnMut(&Transaction<'_>, Migration) -> Result<(), StorageError>,
 {
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -223,11 +259,34 @@ where
     apply(&transaction, migration, backup)?;
     record_migration(&transaction, options, migration)?;
     update_schema_version(&transaction, migration.version)?;
+    verify_integrity(&transaction, migration)?;
     transaction
         .commit()
         .map_err(|_| StorageError::DatabaseOperation {
             operation: "commit migration",
         })
+}
+
+fn verify_post_migration_integrity(
+    transaction: &Transaction<'_>,
+    migration: Migration,
+) -> Result<(), StorageError> {
+    verify_database_integrity(transaction).map_err(|failure| match failure {
+        IntegrityCheckFailure::QuickCheck => StorageError::MigrationQuickCheckFailed {
+            version: migration.version,
+        },
+        IntegrityCheckFailure::ForeignKeyCheck => StorageError::MigrationForeignKeyCheckFailed {
+            version: migration.version,
+        },
+    })
+}
+
+fn migration_error_after_recovery(version: u32, error: StorageError) -> StorageError {
+    match error {
+        StorageError::MigrationQuickCheckFailed { .. }
+        | StorageError::MigrationForeignKeyCheckFailed { .. } => error,
+        _ => StorageError::MigrationFailed { version },
+    }
 }
 
 fn apply_migration_sql(
@@ -443,20 +502,28 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
     use rusqlite::Connection;
 
-    use crate::{StorageError, StoreOpenOptions};
+    use crate::connection;
+    use crate::{
+        ConnectionConfiguration, JournalMode, SqliteWriter, StorageError, StoreOpenOptions,
+        SynchronousMode,
+    };
 
     use super::{
-        MIGRATIONS, Migration, create_verified_backup, migrate_existing_with,
-        restore_verified_backup,
+        MIGRATIONS, Migration, apply_migration_sql, create_verified_backup, migrate_existing_with,
+        migrate_existing_with_integrity, restore_verified_backup,
     };
 
     static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
 
     const TEST_MIGRATION_SOURCE: &str =
         "CREATE TABLE migration_safety_probe (id INTEGER PRIMARY KEY) STRICT;";
+    const FOREIGN_KEY_FAILURE_MIGRATION_SOURCE: &str = "INSERT INTO application(
+        public_id, display_name, category_id, exclusion_policy, first_seen_utc_us, last_seen_utc_us
+    ) VALUES (X'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'invalid migration reference', 999, 0, 0, 0);";
 
     struct TemporaryDatabase {
         path: PathBuf,
@@ -545,6 +612,26 @@ mod tests {
         ]
     }
 
+    fn foreign_key_failure_migrations() -> [Migration; 2] {
+        [
+            MIGRATIONS[0],
+            Migration {
+                version: 2,
+                source: FOREIGN_KEY_FAILURE_MIGRATION_SOURCE,
+                checksum: super::migration_checksum(FOREIGN_KEY_FAILURE_MIGRATION_SOURCE),
+            },
+        ]
+    }
+
+    fn assert_writer_configuration(configuration: ConnectionConfiguration) {
+        assert_eq!(configuration.journal_mode(), Some(JournalMode::Wal));
+        assert_eq!(configuration.synchronous(), Some(SynchronousMode::Full));
+        assert!(configuration.foreign_keys());
+        assert!(!configuration.trusted_schema());
+        assert!(!configuration.query_only());
+        assert_eq!(configuration.busy_timeout(), Duration::from_secs(5));
+    }
+
     fn retained_backup_count(database_path: &Path) -> usize {
         let Some(directory) = database_path.parent() else {
             return 0;
@@ -614,6 +701,10 @@ mod tests {
         assert!(!sidecar_path(&backup_path, "-shm").exists());
         assert!(!sidecar_path(&backup_path, "-wal").exists());
         assert_eq!(retained_backup_count(database.path()), 1);
+        assert_writer_configuration(
+            connection::verify_writer_configuration(&connection)
+                .expect("the restored current connection should be configured as a writer"),
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -657,6 +748,10 @@ mod tests {
             .expect("the verified backup should restore the original state");
 
         assert!(retained_path.is_file());
+        assert_writer_configuration(
+            connection::verify_writer_configuration(&connection)
+                .expect("the restored current connection should be configured as a writer"),
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -666,6 +761,130 @@ mod tests {
                 )
                 .expect("the restored database should remain queryable"),
             0
+        );
+        let reopened = SqliteWriter::open(database.path(), &options)
+            .expect("the restored database should reopen as a configured writer");
+        assert_writer_configuration(reopened.configuration());
+    }
+
+    #[test]
+    fn successful_post_initial_migration_passes_integrity_before_commit() {
+        let database = TemporaryDatabase::new("post-migration-success");
+        let options = open_options(6);
+        let mut connection = initialized_connection(&database, &options);
+        let migrations = test_migrations();
+
+        migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &migrations,
+            apply_migration_sql,
+        )
+        .expect("a valid post-initial migration should pass both integrity checks");
+
+        assert_eq!(super::verify_existing_with(&connection, &migrations), Ok(2));
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM schema_migration", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("the successful migration ledger should remain readable"),
+            2
+        );
+    }
+
+    #[test]
+    fn post_migration_foreign_key_failure_rolls_back_and_restores_original_database() {
+        let database = TemporaryDatabase::new("post-migration-foreign-key-failure");
+        let options = open_options(7);
+        let mut connection = initialized_connection(&database, &options);
+        let migrations = foreign_key_failure_migrations();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("the fixture can model a migration containing invalid foreign-key data");
+
+        let error = migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &migrations,
+            apply_migration_sql,
+        )
+        .expect_err("the post-migration foreign-key check must reject the transaction");
+
+        assert_eq!(
+            error,
+            StorageError::MigrationForeignKeyCheckFailed { version: 2 }
+        );
+        assert_eq!(super::verify_existing_with(&connection, &MIGRATIONS), Ok(1));
+        assert_writer_configuration(
+            connection::verify_writer_configuration(&connection)
+                .expect("the restored current connection should be configured as a writer"),
+        );
+        let reopened = SqliteWriter::open(database.path(), &options)
+            .expect("the restored original database should reopen as a writer");
+        assert_eq!(reopened.schema_version(), Ok(1));
+        assert_writer_configuration(reopened.configuration());
+    }
+
+    #[test]
+    fn integrity_checkpoint_runs_after_metadata_updates_and_before_commit() {
+        let database = TemporaryDatabase::new("integrity-ordering");
+        let options = open_options(8);
+        let mut connection = initialized_connection(&database, &options);
+        let migrations = test_migrations();
+        let mut integrity_checkpoint_observed = false;
+
+        let error = migrate_existing_with_integrity(
+            &mut connection,
+            database.path(),
+            &options,
+            &migrations,
+            apply_migration_sql,
+            |transaction, migration| {
+                assert_eq!(migration.version, 2);
+                assert_eq!(
+                    transaction
+                        .query_row(
+                            "SELECT COUNT(*) FROM schema_migration WHERE version = 2",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .expect("the integrity checkpoint should observe its ledger row"),
+                    1
+                );
+                assert_eq!(
+                    transaction
+                        .query_row(
+                            "SELECT schema_version FROM store_metadata WHERE singleton_id = 1",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .expect("the integrity checkpoint should observe updated metadata"),
+                    2
+                );
+                assert_eq!(
+                    transaction
+                        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                        .expect("the integrity checkpoint should observe the updated user version"),
+                    2
+                );
+                integrity_checkpoint_observed = true;
+                Err(StorageError::MigrationQuickCheckFailed { version: 2 })
+            },
+        )
+        .expect_err("an integrity failure must reject the migration before commit");
+
+        assert_eq!(
+            error,
+            StorageError::MigrationQuickCheckFailed { version: 2 }
+        );
+        assert!(integrity_checkpoint_observed);
+        assert_eq!(super::verify_existing_with(&connection, &MIGRATIONS), Ok(1));
+        assert_writer_configuration(
+            connection::verify_writer_configuration(&connection)
+                .expect("the restored current connection should be configured as a writer"),
         );
     }
 

@@ -21,6 +21,7 @@ pub struct ConnectionConfiguration {
     foreign_keys: bool,
     trusted_schema: bool,
     query_only: bool,
+    busy_timeout: Duration,
 }
 
 impl ConnectionConfiguration {
@@ -52,6 +53,12 @@ impl ConnectionConfiguration {
     #[must_use]
     pub const fn query_only(self) -> bool {
         self.query_only
+    }
+
+    /// Returns the bounded busy timeout verified for this connection.
+    #[must_use]
+    pub const fn busy_timeout(self) -> Duration {
+        self.busy_timeout
     }
 }
 
@@ -170,7 +177,10 @@ impl SqliteReader {
     }
 }
 
-fn configure_writer(connection: &Connection) -> Result<ConnectionConfiguration, StorageError> {
+/// Reapplies and verifies all mandatory writer settings after a connection reset or restore.
+pub(crate) fn configure_writer(
+    connection: &Connection,
+) -> Result<ConnectionConfiguration, StorageError> {
     configure_busy_timeout(connection)?;
     connection
         .execute_batch(
@@ -180,6 +190,13 @@ fn configure_writer(connection: &Connection) -> Result<ConnectionConfiguration, 
             setting: ConnectionSetting::JournalMode,
         })?;
 
+    verify_writer_configuration(connection)
+}
+
+/// Verifies all mandatory writer settings without changing the connection.
+pub(crate) fn verify_writer_configuration(
+    connection: &Connection,
+) -> Result<ConnectionConfiguration, StorageError> {
     let journal_mode =
         query_text_pragma(connection, "journal_mode", ConnectionSetting::JournalMode)?;
     if !journal_mode.eq_ignore_ascii_case("wal") {
@@ -187,6 +204,12 @@ fn configure_writer(connection: &Connection) -> Result<ConnectionConfiguration, 
             setting: ConnectionSetting::JournalMode,
         });
     }
+    verify_integer_pragma(
+        connection,
+        "busy_timeout",
+        BUSY_TIMEOUT_MILLISECONDS,
+        ConnectionSetting::BusyTimeout,
+    )?;
     verify_integer_pragma(
         connection,
         "synchronous",
@@ -212,6 +235,7 @@ fn configure_writer(connection: &Connection) -> Result<ConnectionConfiguration, 
         foreign_keys: true,
         trusted_schema: false,
         query_only: false,
+        busy_timeout: BUSY_TIMEOUT,
     })
 }
 
@@ -244,6 +268,7 @@ fn configure_reader(connection: &Connection) -> Result<ConnectionConfiguration, 
         foreign_keys: true,
         trusted_schema: false,
         query_only: true,
+        busy_timeout: BUSY_TIMEOUT,
     })
 }
 

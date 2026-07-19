@@ -12,6 +12,16 @@ use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::StorageError;
+use crate::connection;
+
+/// The database check that rejected a backup, restored store, or migration transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IntegrityCheckFailure {
+    /// SQLite's quick check could not establish basic structural consistency.
+    QuickCheck,
+    /// SQLite found a foreign-key violation.
+    ForeignKeyCheck,
+}
 
 /// A backup that passed the recovery checks required before a migration starts.
 ///
@@ -80,7 +90,8 @@ pub(crate) fn restore_verified_backup(
     destination
         .restore("main", &backup.path, None::<fn(rusqlite::backup::Progress)>)
         .map_err(|_| StorageError::BackupRestoreFailed)?;
-    verify_connection(destination)
+    connection::configure_writer(destination)?;
+    verify_database_integrity(destination).map_err(restored_database_integrity_error)
 }
 
 fn reserve_backup_path(
@@ -126,28 +137,50 @@ fn reserve_backup_path(
 fn verify_backup(path: &Path) -> Result<(), StorageError> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| StorageError::BackupVerificationOpenFailed)?;
-    verify_connection(&connection)
+    verify_database_integrity(&connection).map_err(backup_integrity_error)
 }
 
-fn verify_connection(connection: &Connection) -> Result<(), StorageError> {
+/// Verifies a complete SQLite image after migration or unclean recovery work.
+///
+/// Migration execution and future unclean-recovery ownership both use this
+/// crate-private primitive so the integrity policy cannot drift by call site.
+pub(crate) fn verify_database_integrity(
+    connection: &Connection,
+) -> Result<(), IntegrityCheckFailure> {
     let quick_check: String = connection
         .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .map_err(|_| StorageError::BackupQuickCheckFailed)?;
+        .map_err(|_| IntegrityCheckFailure::QuickCheck)?;
     if !quick_check.eq_ignore_ascii_case("ok") {
-        return Err(StorageError::BackupQuickCheckFailed);
+        return Err(IntegrityCheckFailure::QuickCheck);
     }
 
     let mut statement = connection
         .prepare("PRAGMA foreign_key_check")
-        .map_err(|_| StorageError::BackupForeignKeyCheckFailed)?;
+        .map_err(|_| IntegrityCheckFailure::ForeignKeyCheck)?;
     let mut rows = statement
         .query([])
-        .map_err(|_| StorageError::BackupForeignKeyCheckFailed)?;
+        .map_err(|_| IntegrityCheckFailure::ForeignKeyCheck)?;
     match rows
         .next()
-        .map_err(|_| StorageError::BackupForeignKeyCheckFailed)?
+        .map_err(|_| IntegrityCheckFailure::ForeignKeyCheck)?
     {
-        Some(_) => Err(StorageError::BackupForeignKeyCheckFailed),
+        Some(_) => Err(IntegrityCheckFailure::ForeignKeyCheck),
         None => Ok(()),
+    }
+}
+
+fn backup_integrity_error(failure: IntegrityCheckFailure) -> StorageError {
+    match failure {
+        IntegrityCheckFailure::QuickCheck => StorageError::BackupQuickCheckFailed,
+        IntegrityCheckFailure::ForeignKeyCheck => StorageError::BackupForeignKeyCheckFailed,
+    }
+}
+
+fn restored_database_integrity_error(failure: IntegrityCheckFailure) -> StorageError {
+    match failure {
+        IntegrityCheckFailure::QuickCheck => StorageError::RestoredDatabaseQuickCheckFailed,
+        IntegrityCheckFailure::ForeignKeyCheck => {
+            StorageError::RestoredDatabaseForeignKeyCheckFailed
+        }
     }
 }
