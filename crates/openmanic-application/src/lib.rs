@@ -15,6 +15,7 @@ mod ids;
 mod ports;
 mod projection;
 mod runtime;
+mod schedule;
 mod timeline_projection;
 mod tracking;
 
@@ -52,6 +53,10 @@ pub use runtime::{
     RuntimeSupervisor, RuntimeWorker, ShutdownAdvance, ShutdownCoordinator, ShutdownError,
     ShutdownPhase, ShutdownStep, ThreadRoot, WorkLane, WorkerEscalation, WorkerFailure,
     WorkerHealth, WorkerHealthState, bounded_runtime_lanes, latest_mailbox,
+};
+pub use schedule::{
+    ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
+    ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
 };
 pub use timeline_projection::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,
