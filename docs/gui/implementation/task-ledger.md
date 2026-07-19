@@ -19,7 +19,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 | OM-130 | `codex/om130-document-domain` | `F:\\claude\\projects\\OpenManic\\.agents\\om130-document-domain` | `deda5083905e4f5d22d84721ca0baf56eceb5b6f` | `crates/openmanic-domain/src/documents.rs` | Module transfer released after integration `96e5295` | Implemented and focused-verified |
 | OM-140 | `codex/om140-application-contracts` | `F:\\claude\\projects\\OpenManic\\.agents\\om140-application-contracts` | `4188184925a9006a846defb9867ed4eed44cee89` | `crates/openmanic-application/**` | Application crate transfer released after integration `96105c0688d2a0047344ae5e682b1b4b7771f2e7` | Implemented and focused-verified |
 | OM-150 | `codex/om150-sqlite-schema-v2` | `F:\\claude\\projects\\OpenManic\\.agents\\om150-sqlite-schema-v2` | `b4eb766330b3fa97190e6c2ddcbdc926249454e2` | `crates/openmanic-storage-sqlite/**` | Root `rusqlite` dependency/lockfile was integrated separately; `0001` and the storage crate were serialized. The primary also approved direct use of already-locked `thiserror = 1.0.69`; no new package or transitive footprint | Integrated and focused-verified; OM-151 owns online pre-migration backup, restore, and post-migration integrity checks |
-| OM-151 | `codex/om151-migration-safety` | `F:\\claude\\projects\\OpenManic\\.agents\\om151-migration-safety` | `f7d3a9b6b00c665fc0091cd91f8f71da94437ac7` | `crates/openmanic-storage-sqlite/src/{backup.rs,connection.rs,errors.rs,lib.rs,migration.rs}`, `crates/openmanic-storage-sqlite/tests/migration_safety.rs` | No schema or migration source change. The primary enabled the existing pinned `rusqlite` backup API feature before delegation | Active; serialized after OM-150 and before all post-`0001` migration work |
+| OM-151 | `codex/om151-migration-safety` | `F:\\claude\\projects\\OpenManic\\.agents\\om151-migration-safety` | `f7d3a9b6b00c665fc0091cd91f8f71da94437ac7` | `crates/openmanic-storage-sqlite/src/{backup.rs,connection.rs,errors.rs,lib.rs,migration.rs}` | No schema or migration source change. The primary enabled the existing pinned `rusqlite` backup API feature before delegation | Integrated and Phase 1 verified; every later post-`0001` migration must use this crate-private guard |
 
 ## Completed and integrated work
 
@@ -29,6 +29,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 | OM-020 | `554352106120cb8cd520ce9b5c38b269df15e3b6` | PASS; no P0-P3 findings; quality, 10 xtask tests, 13-document check, and missing-tool diagnostic reproduced | Accepted after complete diff review, independent verification, both Windows renderer checks, and integration `cargo xtask quality` | `b3845aadd430e6543e34e265bc6b9131d35d98fa` | Real Windows lifecycle and portable-artifact smoke evidence remains a release-gate prerequisite; `cargo-deny 0.20.2` is intentionally installed by CI/release environments, not xtask |
 | OM-030 | `492bdcdbd31483dd3b70a98c53a79f5a5be3ea3f` | Initial FAIL on one-slot snapshot semantics; focused repair reverified PASS with no remaining findings | Accepted after complete milestone diffs, 25 fixture tests, exact 11-file generation, full workspace quality, and verifier repair pass | `d3a9d748564b54d31433033f3aaba54975773262` | Fixtures are synthetic evidence inputs, not measured performance results; reference-hardware measurements begin in OM-040 |
 | OM-150 | `05fd758b613179ca02e23c631be6678f72797ddd`, repaired by `133714c2bd3598cd429b9914f6e32fb9d1562026` and `56be818b0e35cec181dce3ec6569501c4e948e68` | Initial FAIL: P1 focus-state schema mismatch. Repair PASS with no P0/P1; typed-error dependency repair PASS with no P0-P3 | Accepted after serialized schema repair, two independent verifier passes, primary diff/ownership review, and final offline format, 8-test, and strict Clippy checks | `68ecd784e79b1030abb63cfdca70f2b59d0e17a1` | OM-151 must provide pre-migration online backup, retained recovery/restore, and `quick_check`/`foreign_key_check`; repositories and the serialized writer service are OM-220 |
+| OM-151 | `27d0737d29e9b9e48582a49236f4e8164ec4baa8`, repaired by `df28da420644cedb0ac05dd2a073c15c30ab7d5d` | Consolidated G1 review found no P0/P1. Verifier-worktree quality run was ACL-blocked before compilation; the identical primary-checkout gate passed | Accepted after the retained-online-backup, restore writer-configuration, and post-migration integrity repairs, then the one Phase 1 gate | `83b7334035066b3f0d9ef9f58603eedbe2efe244` | User-directed backup discovery/restore UI is later work; OM-220 owns repositories and the serialized writer service |
 
 ## Provisional OM-060 / G0 record
 
@@ -64,6 +65,20 @@ This ledger is the source of truth for delegated implementation ownership and in
 - User-scoped deferrals: named-hardware renderer comparison, memory sampling, accepted p50/p95
   budgets, final renderer selection, native review captures, real DPI observation, and final visual
   direction. They remain documented diagnostic/provisional evidence, not release or product claims.
+
+### Consolidated Phase 1 verification
+
+- Verified integration head: `83b7334035066b3f0d9ef9f58603eedbe2efe244`.
+- The one consolidated G1 verifier found no P0/P1: domain and application boundaries remain
+  adapter-free, `0001` covers the required MVP entities and constraints, and OM-151 has no schema
+  change while enforcing validation-before-backup, retained online backup/recovery, restored writer
+  configuration, and integrity checks before migration commit.
+- `cargo xtask quality` passed from the primary checkout: formatting, workspace check, strict
+  Clippy, all workspace tests, rustdoc warnings-as-errors, and documentation checks. The verifier
+  worktree's attempt was blocked before compilation by its ACL-protected Cargo build-lock file;
+  no code check failed.
+- G1 is accepted. Phase 2 may begin from the post-ledger integration head; Phase 2 preparation
+  remains dependency-aware and does not waive later Windows-specific verification.
 
 ## Ownership rules
 
