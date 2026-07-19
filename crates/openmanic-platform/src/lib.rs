@@ -13,6 +13,8 @@ mod adapter;
 mod capabilities;
 mod fake;
 mod windows_control;
+mod windows_identity;
+mod windows_lifecycle;
 mod windows_raw;
 
 pub use adapter::{
