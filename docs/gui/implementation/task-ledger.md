@@ -11,7 +11,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| _None_ | - | - | - | - | - | OM-020 integrated; the next task has not been activated yet |
+| OM-030 | `codex/om-030-fixtures` | `C:\Users\abr\AppData\Local\Temp\openmanic-agent-worktrees\om-030` | `d66edfa2a13fd06c5d0db4c857793fd6390c80fa` | `tools/fixture-generator/**`, `fixtures/performance/**`, root `Cargo.toml`, and `Cargo.lock` | Workspace tool membership and deterministic fixture formats only; no production-domain contracts | Active sole writer; milestone 1 owns schema/config and deterministic generator foundation |
 
 ## Completed and integrated work
 
