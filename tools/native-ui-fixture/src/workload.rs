@@ -12,6 +12,10 @@ use std::{
 };
 
 const SCRIPT_STEP_FRAMES: u32 = 30;
+const CAMERA_SCALE: i64 = 1_000_000;
+const MIN_CAMERA_SPAN: i64 = 50_000;
+const POINTER_PAN_STEP: i64 = 80_000;
+const PROJECTION_SCALE: u16 = 10_000;
 
 /// Minimal eframe app that measures a deterministic synthetic paint workload.
 pub(crate) struct NativeFixture {
@@ -33,7 +37,7 @@ impl NativeFixture {
         launch_started: Instant,
         measurements: Arc<Mutex<RunMeasurements>>,
     ) -> Self {
-        let paint_items = PaintItem::from_fixture(&fixture);
+        let paint_items = PaintItem::from_fixture(fixture);
         let time_range = TimeRange::from_items(&paint_items);
         Self {
             paint_items,
@@ -73,8 +77,12 @@ impl NativeFixture {
 
     fn apply_pointer_interaction(&mut self, response: &egui::Response, rect: Rect) {
         if response.dragged() && rect.width() > 0.0 {
-            let drag_fraction = f64::from(response.drag_delta().x / rect.width());
-            self.camera.pan(-drag_fraction);
+            let drag = response.drag_delta().x;
+            if drag > 0.0 {
+                self.camera.pan(-POINTER_PAN_STEP);
+            } else if drag < 0.0 {
+                self.camera.pan(POINTER_PAN_STEP);
+            }
         }
         if response.double_clicked() {
             self.camera.reset();
@@ -175,46 +183,55 @@ struct PaintItem {
 }
 
 impl PaintItem {
-    fn from_fixture(fixture: &ScenarioFixture) -> Vec<Self> {
+    fn from_fixture(fixture: ScenarioFixture) -> Vec<Self> {
+        let ScenarioFixture {
+            activity_intervals,
+            category_band,
+            state_band,
+            application_band,
+            schedules,
+            overlays,
+            ..
+        } = fixture;
         let mut items = Vec::with_capacity(
-            fixture.activity_intervals.len()
-                + fixture.category_band.len()
-                + fixture.state_band.len()
-                + fixture.application_band.len()
-                + fixture.schedules.len()
-                + fixture.overlays.len(),
+            activity_intervals.len()
+                + category_band.len()
+                + state_band.len()
+                + application_band.len()
+                + schedules.len()
+                + overlays.len(),
         );
-        items.extend(fixture.activity_intervals.iter().map(|interval| Self {
+        items.extend(activity_intervals.into_iter().map(|interval| Self {
             id: interval.id,
             start: interval.start.get(),
             end: interval.end.get(),
             lane: 0,
         }));
-        items.extend(fixture.category_band.iter().map(|segment| Self {
+        items.extend(category_band.into_iter().map(|segment| Self {
             id: 10_000_000_u64 + segment.id,
             start: segment.start.get(),
             end: segment.end.get(),
             lane: 1,
         }));
-        items.extend(fixture.state_band.iter().map(|segment| Self {
+        items.extend(state_band.into_iter().map(|segment| Self {
             id: 20_000_000_u64 + segment.id,
             start: segment.start.get(),
             end: segment.end.get(),
             lane: 2,
         }));
-        items.extend(fixture.application_band.iter().map(|segment| Self {
+        items.extend(application_band.into_iter().map(|segment| Self {
             id: 30_000_000_u64 + segment.id,
             start: segment.start.get(),
             end: segment.end.get(),
             lane: 3,
         }));
-        items.extend(fixture.schedules.iter().map(|schedule| Self {
+        items.extend(schedules.into_iter().map(|schedule| Self {
             id: 40_000_000_u64 + schedule.id,
             start: schedule.start.get(),
             end: schedule.end.get(),
             lane: 3,
         }));
-        items.extend(fixture.overlays.iter().map(|overlay| Self {
+        items.extend(overlays.into_iter().map(|overlay| Self {
             id: 50_000_000_u64 + overlay.id,
             start: overlay.start.get(),
             end: overlay.end.get(),
@@ -235,7 +252,7 @@ fn paint_item(
     let left = project(item.start, range, rect);
     let right = project(item.end, range, rect).max(left + 1.0);
     let lane_height = rect.height() / 4.0;
-    let top = rect.top() + lane_height * item.lane as f32 + 2.0;
+    let top = rect.top() + lane_height * lane_offset(item.lane) + 2.0;
     let bottom = top + (lane_height - 4.0).max(1.0);
     let color = if selected_id == Some(item.id) {
         Color32::from_rgb(245, 190, 65)
@@ -250,9 +267,23 @@ fn paint_item(
 }
 
 fn project(value: i64, range: TimeRange, rect: Rect) -> f32 {
-    let normalized = (value.saturating_sub(range.start)) as f64
-        / (range.end.saturating_sub(range.start).max(1)) as f64;
-    rect.left() + rect.width() * normalized.clamp(0.0, 1.0) as f32
+    let duration = range.end.saturating_sub(range.start).max(1);
+    let offset = value.saturating_sub(range.start).clamp(0, duration);
+    let scaled = offset
+        .saturating_mul(i64::from(PROJECTION_SCALE))
+        .div_euclid(duration);
+    let scaled = u16::try_from(scaled).unwrap_or(PROJECTION_SCALE);
+    let normalized = f32::from(scaled) / f32::from(PROJECTION_SCALE);
+    rect.left() + rect.width() * normalized
+}
+
+fn lane_offset(lane: usize) -> f32 {
+    match lane {
+        0 => 0.0,
+        1 => 1.0,
+        2 => 2.0,
+        _ => 3.0,
+    }
 }
 
 fn color_for(id: u64, lane: usize) -> Color32 {
@@ -293,16 +324,16 @@ impl TimeRange {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Camera {
-    center: f64,
-    span: f64,
+    center: i64,
+    span: i64,
     selected_id: Option<u64>,
 }
 
 impl Default for Camera {
     fn default() -> Self {
         Self {
-            center: 0.5,
-            span: 1.0,
+            center: CAMERA_SCALE / 2,
+            span: CAMERA_SCALE,
             selected_id: None,
         }
     }
@@ -310,23 +341,33 @@ impl Default for Camera {
 
 impl Camera {
     fn visible_range(self, full: TimeRange) -> TimeRange {
-        let total = full.end.saturating_sub(full.start).max(1) as f64;
-        let span = total * self.span;
-        let center = full.start as f64 + total * self.center;
-        let start = (center - span / 2.0).round() as i64;
-        let end = (center + span / 2.0).round() as i64;
+        let total = full.end.saturating_sub(full.start).max(1);
+        let span = total
+            .saturating_mul(self.span)
+            .div_euclid(CAMERA_SCALE)
+            .max(1);
+        let center = full
+            .start
+            .saturating_add(total.saturating_mul(self.center).div_euclid(CAMERA_SCALE));
+        let start = center.saturating_sub(span / 2);
+        let end = center.saturating_add(span / 2);
         TimeRange {
             start: start.max(full.start),
             end: end.min(full.end).max(full.start.saturating_add(1)),
         }
     }
 
-    fn zoom(&mut self, factor: f64) {
-        self.span = (self.span * factor).clamp(0.05, 1.0);
+    fn zoom(&mut self, numerator: i64, denominator: i64) {
+        let denominator = denominator.max(1);
+        self.span = self
+            .span
+            .saturating_mul(numerator)
+            .div_euclid(denominator)
+            .clamp(MIN_CAMERA_SPAN, CAMERA_SCALE);
     }
 
-    fn pan(&mut self, delta: f64) {
-        self.center = (self.center + delta).clamp(0.0, 1.0);
+    fn pan(&mut self, delta: i64) {
+        self.center = self.center.saturating_add(delta).clamp(0, CAMERA_SCALE);
     }
 
     fn reset(&mut self) {
@@ -347,11 +388,11 @@ impl ScriptedInteraction {
     fn apply(self, camera: &mut Camera, items: &[PaintItem], frame_index: u32) -> &'static str {
         match self {
             Self::ZoomIn => {
-                camera.zoom(0.82);
+                camera.zoom(82, 100);
                 "zoom_in"
             }
             Self::PanForward => {
-                camera.pan(0.08);
+                camera.pan(POINTER_PAN_STEP);
                 "pan_forward"
             }
             Self::SelectNext => {
@@ -361,7 +402,7 @@ impl ScriptedInteraction {
                 "select_next"
             }
             Self::ZoomOut => {
-                camera.zoom(1.20);
+                camera.zoom(120, 100);
                 "zoom_out"
             }
             Self::Reset => {
@@ -373,10 +414,7 @@ impl ScriptedInteraction {
 }
 
 fn duration_ns(duration: Duration) -> u64 {
-    match u64::try_from(duration.as_nanos()) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -387,7 +425,7 @@ mod tests {
     #[test]
     fn dense_fixture_becomes_ten_thousand_paint_only_items() {
         let fixture = Scenario::Dense10000IntervalRange.generate(2_026_030);
-        let items = PaintItem::from_fixture(&fixture);
+        let items = PaintItem::from_fixture(fixture);
         assert_eq!(items.len(), 10_000);
         assert!(items.windows(2).all(|pair| pair[0].start <= pair[1].start));
     }
@@ -395,7 +433,7 @@ mod tests {
     #[test]
     fn representative_segmented_fixture_keeps_independent_bands() {
         let fixture = Scenario::ThreeSegmentedBands.generate(2_026_030);
-        let items = PaintItem::from_fixture(&fixture);
+        let items = PaintItem::from_fixture(fixture);
         assert_eq!(items.len(), 12);
         assert_eq!(items.iter().filter(|item| item.lane == 1).count(), 3);
         assert_eq!(items.iter().filter(|item| item.lane == 2).count(), 4);
@@ -415,7 +453,7 @@ mod tests {
             ScriptedInteraction::ZoomIn.apply(&mut camera, &items, 0),
             "zoom_in"
         );
-        assert!(camera.span < 1.0);
+        assert!(camera.span < 1_000_000);
         assert_eq!(
             ScriptedInteraction::SelectNext.apply(&mut camera, &items, 0),
             "select_next"
@@ -426,8 +464,8 @@ mod tests {
     #[test]
     fn visible_range_stays_valid_at_camera_edges() {
         let mut camera = Camera::default();
-        camera.pan(-2.0);
-        camera.zoom(0.05);
+        camera.pan(-2_000_000);
+        camera.zoom(5, 100);
         let visible = camera.visible_range(TimeRange {
             start: 10,
             end: 110,
