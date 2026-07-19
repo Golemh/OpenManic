@@ -11,7 +11,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| None | - | - | - | - | - | Awaiting next dispatch |
+| OM-020 | `codex/om-020-xtask` | `C:\Users\abr\AppData\Local\Temp\openmanic-agent-worktrees\om-020` | `0e951cf4f592e1906924f1e8794c3204745ff337` | `tools/xtask/**`, root `Cargo.toml`, `Cargo.lock`, and `.cargo/config.toml` | Workspace tool membership, quality-command contract, cargo-deny `0.20.2` pin | Active; sole writer because OM-030 needs the same root manifest/lockfile |
 
 ## Completed and integrated work
 
