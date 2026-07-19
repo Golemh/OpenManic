@@ -12,6 +12,7 @@ publish = false
 [workspace.dependencies]
 eframe = { version = "=0.35.0", default-features = false }
 egui = { version = "=0.35.0", default-features = false }
+fixture-generator = { path = "tools/fixture-generator" }
 openmanic-application = { path = "crates/openmanic-application" }
 openmanic-domain = { path = "crates/openmanic-domain" }
 openmanic-platform = { path = "crates/openmanic-platform", default-features = false }
