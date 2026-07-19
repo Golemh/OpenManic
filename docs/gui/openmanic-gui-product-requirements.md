@@ -18,6 +18,16 @@ It is written as a product requirements document for engineers and future planni
 
 The framework choice is settled for planning purposes: OpenManic will use egui through eframe. Future architecture work should start from that decision unless implementation evidence shows that a required behavior cannot be delivered acceptably.
 
+### 1.1 Document boundary
+
+This document owns user-visible behavior: screen and widget responsibilities, interaction rules, visual state mappings, loading/error/progress behavior, theme requirements, layout editing, and the foreground contract required to keep the interface responsive.
+
+It intentionally records a small amount of architecture where that architecture constrains the GUI, especially the rule that egui renderers consume presentation snapshots and do not perform tracking, persistence, or expensive calculation. That contract belongs here because it is necessary to verify responsiveness and widget modularity; the detailed implementation does not.
+
+The future data-model document will be canonical for entities, IDs, interval/state enums, the one-category-per-application relationship, future tags, recurrence rules and occurrences, time-zone/daylight-saving behavior, validation invariants, and persistence representation. The future application-architecture document will be canonical for crate/module boundaries, commands and events, snapshot construction, threads/async runtimes, queues and backpressure, shutdown/recovery, storage coordination, and performance instrumentation.
+
+If those documents refine an implementation detail, this GUI document should retain only the user-visible requirement and the cross-layer contract, then link to the canonical technical definition. The documents must not silently define conflicting state names or behavior.
+
 ## 2. Requirement language
 
 - **MUST** means required for the release scope named in the surrounding section. An unqualified MUST applies to the MVP defined below.
@@ -137,7 +147,7 @@ Advanced options MUST not make the basic workflow harder to discover, and simpli
 
 OpenManic SHOULD prefer direct visual explanation when spatial, temporal, proportional, or categorical relationships are easier to understand graphically. Timeline intervals, schedule brackets, proportional usage, calendar placement, tracking state, and selected ranges are strong visual candidates.
 
-The app MUST NOT force information into a graph when a list, table, form, text label, or conventional control is clearer. Visual design is a product emphasis, not a requirement that every concept become a chart. Essential graphical information MUST have a textual or structured equivalent for accessibility, precision, and technical inspection.
+The app MUST NOT force information into a graph when a list, table, form, text label, or conventional control is clearer. Visual design is a product emphasis, not a requirement that every concept become a chart. Graphical information SHOULD expose precise values through hover, selection details, forms, exports, or structured views as appropriate; complete non-visual equivalence is post-MVP under Section 26.
 
 ## 6. Settled decisions and open design space
 
@@ -154,6 +164,11 @@ The app MUST NOT force information into a graph when a list, table, form, text l
 - Widget layout uses a constrained responsive grid with serializable placements.
 - Foreground rendering and background work are separate.
 - The MVP supports first-party widget types compiled with the application.
+- Each application has zero or one category; future tags are a separate concept.
+- Powered Off is an explicit activity state, even when it is drawn without a colored fill.
+- The MVP rejects overlapping personal schedule intervals and permits intervals that cross midnight.
+- Editing a repeated schedule asks whether the change applies only to the selected date, to that date and future dates, or to every occurrence.
+- The initial Windows release is mouse-first; custom-graph keyboard navigation and full screen-reader support are post-MVP.
 
 ### 6.2 Intentionally unresolved
 
@@ -162,8 +177,7 @@ The app MUST NOT force information into a graph when a list, table, form, text l
 - Final name and iconography.
 - Whether the default distribution visualization is a ring, stacked bar, or another compact form.
 - Exact default placement of the Pomodoro widget.
-- Whether categories expose one primary category or multiple categories in the first UI.
-- Whether dashboard reordering uses direct drag-and-drop, handles, keyboard actions, or a combination.
+- Whether dashboard reordering uses direct drag-and-drop, visible handles/commands, or a combination.
 
 These unresolved items MUST be explored with visual design work rather than inferred from the earlier scaffold.
 
@@ -196,8 +210,8 @@ The initial product MUST expose four primary destinations:
 
 1. **Today** - current or selected day's dashboard.
 2. **Overview** - statistics over configurable date ranges and saved views.
-3. **Categories** - application categorization, filters, and assignment rules.
-4. **Calendar** - chronological day review, with focus sessions overlaid on activity.
+3. **Categories** - application categorization, filtering, and assignment.
+4. **Calendar** - chronological day review with focus sessions and personal schedules overlaid on recorded activity.
 
 Settings MAY be a fifth destination or a separate window/dialog. It MUST include tracking, privacy, storage, appearance, startup, and platform-permission controls.
 
@@ -253,7 +267,13 @@ Before timeline implementation, the domain/tracker contract MUST define distinct
 - Adapter outage, permission loss, and recovery.
 - Local time-zone or daylight-saving changes.
 
-The UI MUST receive explicit causes for Active, Idle/Away, Paused, Excluded, Unavailable, and Unknown/Missing intervals. It MUST NOT infer these meanings from a gap alone. Wall-clock timestamps are used for history and display; monotonic elapsed time SHOULD be used where available to avoid incorrect durations during clock changes.
+The UI MUST receive explicit causes for Active, Idle/Away, Paused, Excluded, Unavailable, Powered Off, and Unknown/Missing intervals. It MUST NOT infer these meanings from a gap alone. Wall-clock timestamps are used for history and display; monotonic elapsed time SHOULD be used where available to avoid incorrect durations during clock changes.
+
+### 9.5 First-launch explanation
+
+Before tracking begins for the first time, OpenManic MUST explain in plain language that it records the foreground application locally, where the data is stored, whether window titles will be collected, and how tracking can be paused or disabled. The user MUST be able to accept the clearly shown defaults or review the relevant settings. First launch MUST NOT require an account, organization, workspace, or technical configuration.
+
+If required operating-system access is unavailable, the app MUST explain what is missing and provide a direct recovery path where the platform permits one. It MUST not present tracking as active until the tracker confirms that it is operating.
 
 ## 10. Today dashboard requirements
 
@@ -281,7 +301,9 @@ The timeline is the primary widget and SHOULD receive the largest default area. 
 
 Selecting a timeline interval or range MUST produce a shared dashboard selection. Widgets that support the selection MUST recompute their displayed values from that same range.
 
-The UI MUST show that a filter or selection is active, identify its range, and provide a clear action to remove it. A selection must not silently remain active after the user navigates to an incompatible date or range.
+Application/category filters and a timeline selection are combined by intersection: compatible widgets show only data that satisfies both. The UI MUST identify every active filter and the selected range, and it MUST provide clear actions to remove the selection, individual filters, or all narrowing criteria. If the combination has no matching activity, widgets MUST show an empty-result explanation rather than appearing broken.
+
+A selection must not silently remain active after the user navigates to an incompatible date or range. Date navigation clears an incompatible selection and preserves compatible explicit filters unless the user clears them.
 
 ### 10.4 Empty, partial, and live days
 
@@ -301,20 +323,22 @@ The timeline is the core explanation and planning surface for a day. It maps rec
 The timeline MUST be rendered as one continuous graph with three vertically stacked bands and no visual gaps between adjacent time segments:
 
 1. **Category band** - the dominant and tallest band. It shows the categorized breakdown of time, such as Productive, Entertainment, Communication, or Uncategorized.
-2. **Activity-state band** - a thin band immediately below the category band. It shows states currently described as `active`, `inactive`, and `powered_off`. These labels are provisional and MAY be renamed after the state model is finalized.
+2. **Activity-state band** - a thin band immediately below the category band. It distinguishes `Active`, `Idle`, `PausedByUser`, `Excluded`, `Unavailable`, `PoweredOff`, and `UnknownMissing`. These are presentation-contract names pending confirmation by the data-model document. User-facing labels MAY use simpler language such as Active, Inactive, Paused, Excluded, Powered off, or Missing data.
 3. **Application band** - a thin band immediately below the activity-state band. It shows the actual application identity for recorded time, such as Discord or a browser.
 
-All three bands MUST share the same horizontal time coordinate, zoom, pan offset, visible range, segment boundaries, cursor, and selection. There MUST be no whitespace gutter between time segments and no separate per-application lanes. At every visible time position, each band MUST render either its known value or an explicit visual value for Unknown, No Application, Uncategorized, or Unavailable. Missing information MUST not be represented as accidental blank chart space.
+All three bands MUST share the same horizontal time coordinate, zoom, pan offset, visible range, cursor, and selection. Each band retains its own value-change boundaries; those boundaries need not occur at the same times in the other bands. There MUST be no whitespace gutter between adjacent segments and no separate per-application lanes. At every visible time position, each band MUST represent either its known value or an explicit state such as Unknown, No Application, Uncategorized, or Unavailable. Missing information MUST not appear as accidental blank chart space. Powered Off is the one intentionally unfilled treatment, and its hoverable segment remains present in the data and hit-testing geometry.
 
-The three bands MUST contain no text labels inside their colored segments. Application names, category names, state labels, start/end times, and durations appear through the single hover information box, selection details, or an accessible equivalent. Time-axis ticks and external controls are not considered text inside a band.
+The three bands MUST contain no text labels inside their colored segments. Application names, category names, state labels, start/end times, and durations appear through the single hover information box or selection details. Time-axis ticks and external controls are not considered text inside a band.
 
-The Category band is visually primary. The Activity-state and Application bands remain thin enough to read as supporting strips while still allowing reliable pointer targeting and keyboard/accessibility inspection.
+The Category band is visually primary. The Activity-state and Application bands remain thin enough to read as supporting strips while still allowing reliable pointer targeting.
+
+`PoweredOff` is a real state, not merely absent data. It represents a period for which OpenManic has reliable evidence that the computer was off, bounded by shutdown/off and subsequent startup information. Its intended visual treatment is an unfilled or background-colored section of the Activity-state band so the lack of color communicates that the computer was off. The underlying segment MUST still exist explicitly so hover details, duration calculations, exports, and future textual views can distinguish it from `UnknownMissing` or `Unavailable`. If the app cannot establish that the computer was off, it MUST use `UnknownMissing` or another appropriate state rather than guess.
 
 ### 11.3 Segment identity and hover information
 
 Each band is segmented independently when its value changes. For example, several application changes may occur inside one continuous Productive category segment.
 
-Hovering any colored segment MUST open one shared information box positioned near the pointer without obscuring the segment more than necessary. Only one timeline hover box is visible at a time. Its content depends on the hovered band:
+Hovering any segment, including an unfilled Powered Off segment, MUST open one shared information box positioned near the pointer without obscuring the segment more than necessary. Only one timeline hover box is visible at a time. It MUST appear promptly, update when the pointer crosses into another segment, and close when the pointer leaves the timeline unless the segment has been selected. Persistent selected details MUST be visually distinct from transient hover information. Content depends on the hovered band:
 
 - Category segment: category name, exact start, exact end, and segment duration.
 - Activity-state segment: state name, exact start, exact end, and duration.
@@ -322,11 +346,22 @@ Hovering any colored segment MUST open one shared information box positioned nea
 
 The hover box MAY include relevant secondary information such as executable identity or whether a segment is ongoing, but it MUST remain concise. It MUST follow the segment under the pointer rather than showing aggregate all-day duration unless aggregate context is explicitly labeled.
 
-Color provides compact identity but MUST not be the only representation available. Hover, selection details, accessible metadata, and optional legends/settings MUST allow the user to determine each value without relying solely on color.
+Color provides compact identity but MUST not be the only visible explanation available. Hover, selection details, and optional legends/settings MUST allow the user to determine each value without relying solely on color.
+
+Timeline colors are interactive representations of data, not decorative pixels. Clicking a colored or intentionally unfilled segment MUST select the represented category, application, or activity state and open persistent details with the actions that are valid for that type. Selection MUST be visibly distinct from hover, and selection alone MUST NOT change data.
+
+For a Category segment, persistent details MUST provide an **Edit category** action. The category editor MUST allow supported category properties such as name, color, icon, description, or productivity classification to be changed. Because a category definition is shared, the editor MUST explain that changing its name or appearance updates every place where that category is shown.
+
+For an Application segment, persistent details MUST provide an **Assign category** or **Change category** action and a route to application details. Under the MVP's zero-or-one category model, changing an application's category changes its assignment globally and causes all compatible historical and live category projections for that application to refresh.
+
+Changing the category of only one historical time section is a different feature from assigning an application to a category. It would require a time-bounded category override in the data model. That capability is not an MVP requirement and MUST NOT be implied by the Timeline until its ownership, totals, editing, and removal behavior are designed explicitly.
+
+Activity-state segments MAY expose relevant actions such as resuming paused tracking or opening diagnostics, but the interface MUST not claim that authoritative states such as Powered Off or Unavailable are directly editable when they are not. Unsupported actions are omitted rather than shown as misleading disabled editing controls.
 
 ### 11.4 Navigation and selection interactions
 
 - Clicking a segment MUST select it.
+- A selected segment MUST retain persistent details and type-appropriate actions until the user clears it, selects another segment, or navigates to incompatible context.
 - Clicking empty timeline space SHOULD clear the selection.
 - Dragging across time MUST support range selection in the MVP.
 - Horizontal panning and continuous zooming MUST be supported.
@@ -335,7 +370,6 @@ Color provides compact identity but MUST not be the only representation availabl
 - Zooming in MUST reveal the original boundaries and more precise time ticks.
 - Panning and zooming MUST move all three bands and schedule overlays together.
 - A Reset View action MUST restore the default day range.
-- Keyboard users MUST be able to move between meaningful segments or an equivalent accessible list.
 - Selection MUST remain visually obvious at supported zoom levels.
 
 Normal range selection and schedule creation MUST be distinguishable. The interface MUST provide an explicit Create Schedule action/mode or an equivalent unambiguous gesture so an ordinary drag does not unexpectedly create a schedule rule.
@@ -350,9 +384,9 @@ Each schedule interval MUST appear as a bracket-like enclosure aligned precisely
 - Each vertical boundary extends slightly above and below the timeline bands or the overlay's enclosed region.
 - Each boundary has a short inward-facing horizontal cap at its top and bottom, producing the feeling of square brackets enclosing the scheduled range.
 - The interior SHOULD remain transparent or minimally treated so all three activity bands stay readable beneath it.
-- Selected, hovered, conflicting, and keyboard-focused schedule intervals MUST remain distinguishable without depending only on color.
+- Selected and hovered schedule intervals MUST remain distinguishable without depending only on color.
 
-At normal zoom, the bracket boundary MUST make the exact start and end visually clear. At high density, overlapping schedule intervals MAY be stacked into multiple overlay rows or use another non-destructive conflict treatment, but no interval may silently disappear.
+At normal zoom, the bracket boundary MUST make the exact start and end visually clear. Closely adjacent intervals MUST retain distinguishable boundaries at supported zoom levels. The MVP does not permit personal schedule intervals to overlap.
 
 ### 11.6 Creating and editing schedule intervals
 
@@ -373,7 +407,22 @@ Recurrence behavior is:
 - **Specific weekday** - the same local start/end time on the chosen weekday, with an optional effective start date and end date.
 - **Custom** - a recurrence editor capable of selecting multiple weekdays and an effective date range. More advanced recurrence grammar is post-MVP unless separately approved.
 
-The popup MUST provide Save and Cancel. Editing an existing bracket MUST open the same popup with current values and additionally provide Delete. Cancel MUST leave the schedule unchanged. Save MUST validate that end is after start and show inline errors without dismissing the popup.
+The schedule editor uses the following concepts:
+
+- A **one-time interval** is a standalone schedule entry on one selected date.
+- A **repeating rule** is the saved instruction that creates a schedule on multiple dates, such as Productive Time every Monday from 9:00 AM to 11:00 AM.
+- An **occurrence** is one dated instance produced by a repeating rule. Monday, July 20 from 9:00 AM to 11:00 AM is one occurrence; the following Monday is another occurrence of the same rule.
+- An **occurrence-only change** changes or skips one dated instance without changing the other dates produced by its rule.
+- An **overnight interval** starts on one date and finishes after midnight on the next date, such as Gaming from Friday 11:00 PM to Saturday 1:00 AM. It remains one schedule interval internally, but Timeline and Calendar show the appropriate portion on each date.
+- An **overlap** means that two personal schedule intervals claim some of the same time, such as Productive Time from 9:00 AM to noon and Exercise from 10:00 AM to 11:00 AM. It is unrelated to time zones. The MVP rejects this situation and identifies the conflicting interval so the user can adjust either schedule.
+
+These terms make the product behavior precise for design and engineering. The interface does not need to expose the words "rule" or "occurrence" to the user when plain labels such as "Repeats every Monday" and "Only this date" communicate the choice more clearly.
+
+When the user edits or deletes an occurrence generated by a repeating rule, the app MUST ask whether the action applies to **Only this date**, **This and future dates**, or **Every occurrence**. The confirmation MUST show the affected rule and date range in ordinary language. Editing a one-time interval does not show these choices.
+
+The data-model document must define how repeating rules, occurrence-only changes, overnight intervals, time zones, and daylight-saving transitions are stored and expanded. The GUI is responsible for presenting the resulting dates, validation, conflicts, and edit scope in plain language.
+
+The popup MUST provide Save and Cancel. Editing an existing bracket MUST open the same popup with current values and additionally provide Delete. Cancel MUST leave the schedule unchanged. Save MUST validate that the interval has a positive duration and does not overlap another personal schedule interval. A clock time earlier than the start is interpreted as an end on the following date and MUST be labeled clearly as such. Validation errors appear inline without dismissing the popup.
 
 Start and end times SHOULD snap to a configurable or product-defined increment during dragging while allowing exact typed adjustment in the popup. The graph MUST show the provisional bracket and exact start/end feedback during creation so the user understands where the interval begins and ends before saving.
 
@@ -401,7 +450,7 @@ Timeline and Calendar MUST edit the same authoritative schedule intervals and re
 
 ### 11.10 Timeline accessibility
 
-Custom painting MUST be accompanied by accessible metadata or an equivalent structured activity list. At minimum, a selected segment MUST expose its band, value, start, end, and duration to assistive technology. Schedule brackets MUST expose label, start, end, recurrence, category association, selection state, and Edit/Delete actions.
+For the initial mouse-first release, custom painting MUST provide normal visible hover and selection details containing the band/value, start, end, and duration. A complete keyboard-only timeline/calendar interaction model, screen-reader semantic tree, and synchronized structured activity list are post-MVP accessibility work. The custom widget and snapshot contracts SHOULD preserve stable identities and descriptive data so those capabilities can be added without replacing the underlying model.
 
 ## 12. Application usage widget
 
@@ -466,6 +515,15 @@ The widget MUST show:
 - A focus session MUST continue when the main window is hidden unless the user cancels it.
 - Timer state MUST be recoverable after an application restart where practical.
 
+The MVP focus policy is:
+
+- Only one focus or break session may be active at a time.
+- Every focus or break session requires an explicit Start action.
+- System sleep time counts toward the session's wall-clock deadline.
+- Completing a focus session does not start a break automatically.
+- If the app restarts after a running session's deadline, that session is reconciled to Completed.
+- If the app restarts before the deadline, the session resumes from its authoritative deadline.
+
 Long breaks and automatic multi-session cadence are post-MVP candidates. The MVP MAY let a user manually select another focus or short-break duration after completion.
 
 ### 14.4 Relationship to tracked activity
@@ -476,7 +534,7 @@ Focus sessions are intentional overlays, not replacements for application tracki
 
 ### 15.1 Normal mode
 
-In normal mode, pointer and keyboard input MUST operate the widgets themselves. Resize and reorder controls MUST not intercept chart selection accidentally.
+In normal mode, pointer input and standard control input MUST operate the widgets themselves. Resize and reorder controls MUST not intercept chart selection accidentally.
 
 ### 15.2 Layout-edit mode
 
@@ -531,7 +589,7 @@ Every registered `WidgetDefinition` MUST declare:
 - Configuration schema, defaults, validation, and migration behavior.
 - Required snapshot/data dependencies.
 - Actions the renderer is permitted to produce.
-- Accessible name/value/action strategy and non-visual fallback.
+- Stable descriptive metadata that can support later structured and non-visual presentations.
 - Optional appearance-override schema.
 
 If a saved layout references a missing, disabled, or incompatible renderer, the dashboard MUST show a recoverable placeholder that identifies the widget and offers Remove or Reset. A missing renderer MUST NOT prevent the remaining layout or application from opening.
@@ -620,7 +678,7 @@ The Categories screen MUST provide a searchable list of known applications with:
 - Application icon where available.
 - Display name.
 - Executable identity or path in secondary details.
-- Assigned category or categories.
+- Assigned category, if any.
 - Recent or total usage where useful.
 - Whether the app is excluded from tracking.
 
@@ -642,17 +700,19 @@ The interface SHOULD make the common task, assigning several uncategorized apps,
 
 A category MUST have a stable ID and display name. It MAY have a color, icon, description, and productivity classification. Renaming a category MUST preserve assignments.
 
-The domain model SHOULD support many-to-many assignments even if the first interface emphasizes one primary category.
+Each application MUST have zero or one category. No application may belong to more than one category. `Uncategorized` is the display state for an application with no category assignment; it is not a second assignment and does not need to be stored as a category record.
+
+Category totals MUST partition included application time without duplication and MUST sum to the included tracked total, subject only to explicitly excluded/non-application states. Tags MAY be introduced later as a separate many-to-many concept and MUST NOT change category totals unless a future allocation model is deliberately designed.
 
 ### 18.4 Rules
 
-Automatic category rules MAY be added after basic manual assignment. Candidate match inputs include executable path, process name, window-title pattern, and application identity. Rule priority and conflict behavior MUST be explicit before release.
+Automatic category assignment rules are post-MVP. If introduced, candidate match inputs include executable path, process name, window-title pattern, and application identity. Their priority and conflict behavior MUST be defined before that feature is released.
 
 ## 19. Calendar requirements
 
 ### 19.1 MVP scope
 
-The MVP Calendar MUST provide a day view with a vertical time axis. A week view MAY follow after overlap and density behavior are validated.
+The MVP Calendar MUST provide a day view with a vertical time axis. A week view MAY follow after its density and navigation behavior are validated.
 
 ### 19.2 Content
 
@@ -666,6 +726,7 @@ The day view MUST be able to show:
 
 ### 19.3 Interaction
 
+- The Calendar MUST show its selected date and provide Previous day, Next day, date-picker, and Today actions consistent with the Today screen.
 - Selecting a calendar block MUST reveal its time range and source.
 - The user SHOULD be able to navigate to the corresponding timeline selection.
 - Overlapping focus and activity data MUST remain distinguishable.
@@ -675,6 +736,8 @@ The day view MUST be able to show:
 - Existing schedule intervals MUST be selectable, editable, and deletable from Calendar.
 - Calendar schedule boundaries MUST use a bracket-like enclosure adapted to the vertical time axis and MUST not obscure the recorded activity or focus data beneath them.
 - Exact start/end feedback and snapping behavior MUST match the Timeline.
+- An overnight schedule MUST appear as the portion belonging to the selected date, with a clear continuation treatment at midnight and details identifying its complete start and end.
+- Attempting to create or extend a personal schedule across another personal schedule MUST show the conflict and prevent saving until it is resolved.
 
 The calendar must not fabricate narrative summaries from raw application names unless a separate summarization feature is designed and clearly labeled.
 
@@ -785,7 +848,7 @@ Motion SHOULD communicate state change, not decorate idle screens. Animations MU
 - Advanced controls MUST be labeled and grouped; they MUST not be mixed unpredictably into primary actions.
 - Exact numeric values and time ranges MUST remain available even when a graphical summary is primary.
 - Icons without obvious universal meaning MUST have text labels or accessible names.
-- A visualization MUST not be the only way to perform an essential corrective or configuration action when precise keyboard/form entry is more appropriate.
+- A visualization MUST not be the only way to perform an essential corrective or configuration action when precise form entry is more appropriate.
 
 ## 22. Foreground and background separation
 
@@ -892,7 +955,7 @@ Force termination by the operating system cannot be guaranteed, so periodic chec
 
 ### 23.1 Interaction targets
 
-- Pointer and keyboard actions MUST receive visible acknowledgement by the next rendered frame under normal conditions.
+- User actions MUST receive visible acknowledgement by the next rendered frame under normal conditions.
 - Routine UI updates SHOULD complete within the frame budget: 16.7 ms at 60 Hz and preferably under 8.3 ms on 120 Hz displays.
 - No intentional operation on the UI thread SHOULD exceed 4 ms without profiling and justification.
 - Progress SHOULD update approximately 10-30 times per second at most unless the visual specifically benefits from higher frequency.
@@ -1010,18 +1073,22 @@ openmanic-ui-egui
 
 The UI crate MAY depend on domain-level types and read-only snapshot types. Domain, tracker, storage, analytics, focus, and schedule modules MUST NOT depend on `egui`.
 
-## 26. Accessibility requirements
+## 26. Initial input and accessibility scope
 
-- All essential actions MUST be keyboard reachable.
-- Focus order MUST be predictable and visible.
-- Custom widgets MUST publish accessible roles, names, values, and actions where supported by egui/AccessKit.
-- Custom-painted charts MUST provide an equivalent textual or structured representation for essential data.
-- Color MUST not be the only indicator of tracking state, selection, category, error, or progress.
-- Text and controls MUST remain usable at 125%, 150%, 175%, and 200% scaling.
-- Tooltips MUST not contain the only available version of essential information.
-- Reduced motion and high-contrast needs SHOULD be considered in the theme system.
+The MVP is a mouse-first Windows desktop application. Full keyboard-only operation of the custom Timeline, Calendar, schedule brackets, and dashboard layout editor is not an MVP requirement. Full screen-reader semantics, touch-specific interaction, and formal WCAG/WCAG2ICT conformance are also post-MVP work.
 
-Accessibility acceptance MUST include manual keyboard review and platform screen-reader smoke testing, not only visual inspection.
+WCAG was created for web content, but W3C's WCAG2ICT guidance applies its principles to non-web software. Deferring this work is therefore a product-scope decision, not a claim that accessibility guidance is technically irrelevant to a local desktop application.
+
+The MVP still MUST provide:
+
+- Clear visible hover and selected details for graphical intervals.
+- Conventional editable fields in schedule/category/settings dialogs where precise values are required.
+- Text and controls that remain usable at 125%, 150%, 175%, and 200% scaling.
+- Visible textual error, progress, tracking-state, and confirmation messages.
+- Standard keyboard behavior for ordinary egui text fields, buttons, menus, and dialogs where the framework provides it without a separate custom interaction system.
+- Stable segment, schedule, widget, and action identities so later AccessKit and structured-list work does not require a data-model rewrite.
+
+The MVP SHOULD avoid color as the only available explanation by providing hover/selection details and clear state treatment, but it does not claim complete non-visual equivalence. Reduced motion, Windows high-contrast optimization, a synchronized structured Timeline/Calendar view, custom-graph keyboard navigation, Narrator testing, and complete screen-reader roles/actions are explicitly tracked as post-MVP accessibility improvements.
 
 ## 27. Loading, empty, error, and recovery states
 
@@ -1068,12 +1135,12 @@ Logs MUST avoid recording sensitive window titles unless the user explicitly ena
 
 - Pomodoro state transitions and time calculations.
 - Date-range navigation.
-- Category assignment rules.
+- The zero-or-one category-assignment invariant and category-total calculations.
 - Layout validation and migration.
 - Time-to-pixel and pixel-to-time transforms.
 - Cross-band boundary alignment and schedule-bracket time transforms.
 - Once, Specific weekday, and Custom schedule recurrence expansion across date and daylight-saving boundaries.
-- Schedule overlap and conflict validation.
+- Schedule overlap rejection and conflict reporting.
 - Widget projection results for known filters, ranges, revisions, and configuration.
 - ThemeSpec parsing, semantic-reference resolution, validation, and migration.
 - Conversion from resolved semantic/component styles into egui and custom-renderer styles.
@@ -1095,13 +1162,14 @@ Logs MUST avoid recording sensitive window titles unless the user explicitly ena
 ### 30.3 GUI tests
 
 - Navigation and retained screen state.
-- Non-technical usability review of first launch, tracking status, timeline hover, categorization, schedule creation, and Pomodoro start.
-- Progressive-disclosure review confirming that technical details are discoverable without appearing in the default workflow.
+- Task-flow review of first launch, tracking status, timeline hover, categorization, schedule creation, and Pomodoro start; formal participant studies are not an MVP release gate.
+- Progressive-disclosure inspection confirming that technical details are discoverable without appearing in the default workflow.
 - Timeline hover/selection and shared filtering.
+- Persistent Timeline selection actions: editing a shared category definition and assigning or changing an application's single category.
 - Continuous three-band rendering without internal segment labels or accidental blank gaps.
 - Band-specific hover information for Category, Activity-state, and Application strips.
-- Bracket overlay creation, exact start/end feedback, popup validation, and keyboard editing.
-- Keyboard focus traversal.
+- Bracket overlay creation, exact start/end feedback, popup validation, and mouse-based editing.
+- Standard keyboard behavior of ordinary egui text fields, buttons, menus, and dialogs.
 - Compact and expanded widget presentations.
 - Empty/loading/error states.
 - Theme token application.
@@ -1113,7 +1181,7 @@ Logs MUST avoid recording sensitive window titles unless the user explicitly ena
 - 10,000-interval timeline interaction.
 - Large application/category lists.
 - Rapid foreground-app changes.
-- Three independently segmented timeline bands plus overlapping schedule brackets.
+- Three independently segmented timeline bands plus dense adjacent schedule brackets and simultaneous focus/activity overlays.
 - Concurrent tracking, import, and overview query.
 - Event coalescing when the UI is deliberately slowed.
 
@@ -1185,7 +1253,7 @@ Exit criteria: layouts survive restart and scaling changes; all default widgets 
 
 ### Phase 5: hardening and release
 
-- Accessibility review.
+- Review of the initial input and accessibility scope defined in Section 26.
 - Performance profiling and regression budgets.
 - Import/export and recovery testing.
 - Installer, autostart, permissions, update strategy, and release diagnostics.
@@ -1198,12 +1266,12 @@ The MVP is acceptable when all of the following are true:
 
 1. OpenManic records foreground application intervals on Windows while the main window is visible, hidden, or minimized.
 2. Pausing and resuming tracking is immediate, visible, and reliable.
-3. The Today timeline is one continuous graph containing aligned Category, Activity-state, and Application bands with no text inside colored segments and no accidental gaps between adjacent time sections.
-4. Hovering a section in any band opens one concise pointer-adjacent information box with the correct band value, exact start/end, and duration.
+3. The Today timeline is one continuous graph containing aligned Category, Activity-state, and Application bands with no text inside colored segments and no accidental gaps between adjacent time sections. A known Powered Off section is intentionally unfilled but remains an explicit, inspectable state.
+4. Hovering a section in any band, including Powered Off, opens one concise pointer-adjacent information box with the correct band value, exact start/end, and duration.
 5. The timeline displays live and historical intervals and supports pan, pointer-anchored zoom, reset, hover, click selection, and drag range selection across all three aligned bands.
-6. The user can create a schedule interval from Timeline, see precise provisional start/end feedback and a bracket-style overlay, and save it as Once, Specific weekday, or Custom through the schedule popup.
-7. The same authoritative schedule interval appears in Calendar and can be edited or deleted from either Timeline or Calendar without modifying recorded activity.
-8. Selecting a timeline segment or range updates compatible summary widgets consistently.
+6. The user can create a schedule interval from Timeline, see precise provisional start/end feedback and a bracket-style overlay, and save it as Once, Specific weekday, or Custom through the schedule popup. The MVP rejects overlaps and accepts a clearly labeled positive-duration interval that crosses midnight.
+7. The same authoritative schedule interval appears in Calendar and can be edited or deleted from either Timeline or Calendar without modifying recorded activity. Editing or deleting a repeated occurrence offers Only this date, This and future dates, and Every occurrence scopes.
+8. Selecting a timeline segment or range updates compatible summary widgets consistently. Selecting a Category segment exposes category editing, while selecting an Application segment exposes its category assignment, without changing data on selection alone.
 9. The application usage widget reports correct totals and percentages for the active range.
 10. The user can search applications and assign categories individually and in bulk.
 11. Overview supports Day, Week, Month, Year, and Custom ranges; its shared selection updates supporting data and saved views restore their defined range, grouping, filters, sort, and configuration.
@@ -1214,13 +1282,13 @@ The MVP is acceptable when all of the following are true:
 16. In explicit Today layout-edit mode, users can add, remove, reorder, and resize supported widget instances; Save persists the edited layout, Cancel restores the prior layout, and Reset restores defaults.
 17. The dashboard reflows at 720, 1024, and 1440 logical pixels and at 125%, 150%, 175%, and 200% scaling without losing the saved desktop arrangement.
 18. Layout configuration is versioned; invalid layouts and missing widget renderers fall back safely without preventing startup.
-19. Essential functions are keyboard accessible and custom visuals have accessible equivalents.
-20. The app clearly communicates active, paused, unavailable, excluded, idle, and missing tracking states.
+19. Ordinary text fields, buttons, menus, and dialogs retain standard egui keyboard behavior; custom graphical keyboard-only and screen-reader equivalence remains post-MVP as defined in Section 26.
+20. The app clearly communicates active, paused, unavailable, excluded, idle, powered-off, and missing tracking states without treating an unexplained data gap as Powered Off.
 21. A 10,000-raw-interval test range meets the approved p95 budget for three-band timeline pan, zoom, hover, selection, drag-range selection, and schedule-overlay rendering.
 22. No storage, tracking, schedule persistence/recurrence expansion, import, or full-history aggregation work blocks the egui thread.
 23. Hiding the window leaves tracking and focus services active, while explicit Quit follows the checkpoint-and-flush shutdown lifecycle.
 24. The MVP contains no team, organization, administrator, manager, shared-dashboard, or employee-monitoring workflow.
-25. A non-technical user can complete first launch, understand whether tracking is active, inspect an interval, categorize an application, create a one-time schedule interval, and start a Pomodoro without needing implementation terminology or technical setup.
+25. First launch, tracking status, interval inspection, application categorization, one-time schedule creation, and Pomodoro start use ordinary product language and require no implementation terminology, account, organization, or technical setup.
 26. A technical user can discover supported exact timestamps, executable identity, data location, export, advanced settings, and diagnostics without those details overwhelming the default interface.
 27. Temporal, proportional, and schedule relationships use graphical presentation where it materially improves understanding, while every essential value and action remains available through clear text, structured data, or conventional controls where appropriate.
 28. Data-driven widgets render from immutable, correlated snapshots produced outside the egui frame path; widget renderers perform no database query, full-range aggregation, recurrence expansion, or other background calculation.
@@ -1238,16 +1306,16 @@ The next architecture discussion should resolve these questions without reopenin
 6. What are the SQLite schema and migration boundaries?
 7. What is the exact responsive grid and placement algorithm?
 8. How are widget renderer registrations, versions, minimum sizes, and configuration migrations represented?
-9. How are custom-painted timeline elements exposed through AccessKit or an equivalent structured view?
+9. Post-MVP: how are custom-painted timeline elements exposed through AccessKit or an equivalent structured view without changing stable segment/schedule identities?
 10. What caches exist, who owns them, and what invalidates them?
 11. How is platform sleep/resume handled for tracking and focus timers?
 12. Which privacy-sensitive values are collected, persisted, exported, and logged?
-13. What are the exact `ScheduleRule`, `ScheduleOccurrence`, recurrence, exception, and migration schemas?
+13. What are the exact schemas for repeating schedule rules, dated occurrences, occurrence-only changes, overnight intervals, and migrations?
 14. How are local-time schedule rules expanded across daylight-saving changes, time-zone changes, and effective date boundaries?
 15. How are the independently segmented Category, Activity-state, and Application bands projected onto one gap-free shared time range?
-16. What final domain names replace or confirm `active`, `inactive`, and `powered_off`, and how do they map to Paused, Excluded, Unavailable, and Unknown/Missing states?
+16. What final domain names replace or confirm the activity-state presentation names, and how do they map to Active, Idle, Paused, Excluded, Unavailable, Powered Off, and Unknown/Missing?
 17. How do normal range selection, schedule creation, schedule editing, pan, and zoom gestures arbitrate without ambiguity?
-18. Which technical details belong in default, secondary, advanced, and diagnostic presentation layers, and what user research validates that division?
+18. Which technical details belong in default, secondary, advanced, and diagnostic presentation layers, and what task-flow and product review validates that division?
 19. Which external theme syntax is selected, and what are the exact ThemeSpec versioning, reference-resolution, component-state, asset, validation, and migration rules?
 20. What is the exact WidgetProjection request/snapshot contract, including instance identity, filters, range, configuration revision, cancellation, stale-result rejection, and cache keys?
 
@@ -1276,3 +1344,5 @@ Remaining open items are deliberate architecture or visual-design decisions list
 Subsequent product-owner clarifications added the individual-only scope, non-technical primary audience, progressive disclosure for technical users, purposeful graphics-first emphasis, continuous three-band timeline, pointer-adjacent hover behavior, bracket-style schedule overlays, recurrence popup, and shared Timeline/Calendar scheduling requirements. These additions are captured in Sections 3-5, 7, 11, 19, 21-25, and 30-34.
 
 The widget architecture was subsequently clarified as canonical model -> background projection -> immutable widget snapshot -> egui renderer, with the renderer limited to visual, interaction, and cheap rectangle-dependent work. The theme architecture was clarified as an OpenManic-owned external declarative schema that resolves into both egui styles and custom-renderer styles rather than native CSS/QSS or serialized egui internals. These decisions are captured in Sections 16, 21-22, 25, and 30-34.
+
+The final product-owner pass made Powered Off an explicit but intentionally unfilled activity state, fixed category assignment at zero or one category per application, separated future tags from categories, defined repeating rules and dated occurrences in plain language, allowed overnight schedules, rejected overlapping personal schedules for the MVP, and defined the three edit scopes for repeated schedules. It also clarified first launch, shared selection/filter behavior, Calendar navigation, hover lifecycle, and the boundary between this GUI document and future data-model/application-architecture documents.

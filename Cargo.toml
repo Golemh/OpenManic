@@ -1,0 +1,52 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+default-members = ["crates/openmanic"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+
+[workspace.dependencies]
+eframe = { version = "=0.35.0", default-features = false }
+egui = { version = "=0.35.0", default-features = false }
+crossbeam-channel = "=0.5.15"
+fixture-generator = { path = "tools/fixture-generator" }
+openmanic-application = { path = "crates/openmanic-application" }
+openmanic-domain = { path = "crates/openmanic-domain" }
+openmanic-platform = { path = "crates/openmanic-platform", default-features = false }
+openmanic-storage-sqlite = { path = "crates/openmanic-storage-sqlite" }
+openmanic-ui-egui = { path = "crates/openmanic-ui-egui", default-features = false }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["backup", "bundled"] }
+thiserror = "=1.0.69"
+windows = { version = "=0.62.2", default-features = false }
+
+[workspace.lints.rust]
+rust_2018_idioms = { level = "warn", priority = -1 }
+missing_docs = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+wildcard_imports = "warn"
+excessive_nesting = "warn"
+cognitive_complexity = "warn"
+too_many_lines = "warn"

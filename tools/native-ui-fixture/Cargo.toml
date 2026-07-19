@@ -1,0 +1,18 @@
+[package]
+name = "native-ui-fixture"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = ["renderer-wgpu"]
+renderer-wgpu = ["dep:eframe", "eframe/wgpu"]
+renderer-glow = ["dep:eframe", "eframe/glow"]
+
+[dependencies]
+eframe = { workspace = true, optional = true, features = ["default_fonts"] }
+fixture-generator.workspace = true
+
+[lints]
+workspace = true

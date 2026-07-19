@@ -1,0 +1,22 @@
+allow-expect-in-consts = false
+allow-expect-in-tests = true
+allow-unwrap-in-consts = false
+allow-unwrap-in-tests = false
+allow-dbg-in-tests = false
+cognitive-complexity-threshold = 20
+too-many-lines-threshold = 80
+type-complexity-threshold = 200
+excessive-nesting-threshold = 4
+doc-valid-idents = [
+    "OpenManic",
+    "egui",
+    "eframe",
+    "SQLite",
+    "Win32",
+    "Wayland",
+    "Sway",
+    "AUMID",
+    "WGPU",
+    "Jiff",
+    "..",
+]
