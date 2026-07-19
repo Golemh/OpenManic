@@ -13,11 +13,11 @@ mod ids;
 mod ports;
 mod projection;
 mod runtime;
+mod timeline_projection;
 mod tracking;
 
 // Platform adapters consume only this crate's facade. Re-export the domain values
 // already present in normalized tracking evidence so that boundary remains intact.
-pub use openmanic_domain::{ApplicationId, PowerTransitionEvidence, UtcMicros};
 pub use commands::{CommandEnvelope, CommandReceipt, TrackingCommand, TrackingEvidence};
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
 pub use events::{
@@ -28,6 +28,7 @@ pub use ids::{
     CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
     ProjectionSlot, RequestId, SchemaRevision,
 };
+pub use openmanic_domain::{ApplicationId, PowerTransitionEvidence, UtcMicros};
 pub use ports::{
     CommandPort, ProjectionPort, TrackingPersistencePort, TrackingPersistenceRetentionReason,
     TrackingPersistenceSubmit,
@@ -40,6 +41,12 @@ pub use runtime::{
     RuntimeSupervisor, RuntimeWorker, ShutdownAdvance, ShutdownCoordinator, ShutdownError,
     ShutdownPhase, ShutdownStep, ThreadRoot, WorkLane, WorkerEscalation, WorkerFailure,
     WorkerHealth, WorkerHealthState, bounded_runtime_lanes, latest_mailbox,
+};
+pub use timeline_projection::{
+    ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,
+    TIMELINE_SNAPSHOT_SCHEMA_REVISION, TimelineApplication, TimelineContext, TimelineInterval,
+    TimelineProjectionError, TimelineProjectionSource, TimelineProjector, TimelineRawFragment,
+    TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TimelineTotals,
 };
 pub use tracking::{
     TRACKING_CHECKPOINT_INTERVAL_US, TrackingCheckpoint, TrackingCheckpointError,
