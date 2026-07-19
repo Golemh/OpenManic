@@ -10,9 +10,9 @@
 
 This document is the self-contained implementation handover for continuing the OpenManic Windows MVP outside the current Codex task. Read it completely before editing.
 
-The immediate objective is to continue Phase 0 with OM-040 and OM-050. Do not proceed into Phase 1 until the Phase 0 measurements, user-facing design decisions, acceptance trace, and G0 review have been returned for independent verification.
+The immediate objective is to implement the complete remaining plan, OM-040 through OM-740, in dependency order. Do not stop at OM-050 or at a phase gate solely because independent verification is pending.
 
-The user intends to run full review and integration checks after the implementation is handed back. Terra still runs focused checks for every milestone; it must not return knowingly uncompilable or untested code.
+The user intends to implement first and run full review, integration, platform, performance, recovery, and release checks after the complete implementation is handed back. Mark every completed task `implemented, unverified` until that review. During implementation, use narrowly targeted compiler or test feedback only when it is needed to keep work moving; recurring comprehensive checks are deliberately deferred.
 
 ## 2. Canonical sources and precedence
 
@@ -165,33 +165,31 @@ $env:RUSTUP_TOOLCHAIN = '1.97.1-x86_64-pc-windows-msvc'
 
 The warning about denied access to `C:\Users\abr\.config\git\ignore` is environmental and non-blocking. Do not change global Git configuration to suppress it.
 
-## 7. Faster implementation cadence
+## 7. Implementation-first cadence
 
 Use these rules to avoid the delays seen in earlier large assignments:
 
 1. Work in milestones with one coherent outcome and normally no more than a few related modules.
 2. Send or record a heartbeat immediately after repository preflight.
-3. Begin with focused checks for the changed package; do not run the full workspace gate after every small edit.
-4. Commit each green milestone separately with the task ID.
+3. Implement the milestone before considering checks. Do not run a full gate per task or phase.
+4. Commit each coherent milestone separately with the task ID, even though its verification remains deferred.
 5. Review the actual base-to-head diff before starting the next milestone.
-6. Run the complete workspace gate once at the task handoff boundary, if practical. The user and Codex will rerun it independently.
+6. Record the task as `implemented, unverified`, list checks as deferred, and continue to the next dependency-ready task.
 7. Do not wait silently on a blocked edit or command. Report the exact failure and current clean/dirty state.
 
-Task worktrees use separate `target` directories by default. A cold full workspace gate took about 98 seconds, while the warm integration checkout took about 10 seconds. When there is exactly one active writer and the user approves it, a shared Cargo target directory may be used to reuse compiled dependencies. Do not share it between simultaneous Cargo processes.
+Do not routinely run `cargo xtask quality`, workspace-wide formatting, Clippy, tests, documentation tests, dependency or release checks, renderer matrices, or full measurement campaigns during this implementation pass. Those checks belong to the later review led by the user and Codex.
 
-Minimum checks for a Rust milestone are:
+When compiler feedback is necessary to continue safely, prefer the smallest relevant command, for example:
 
 ```text
-cargo fmt --all -- --check
 cargo check -p <owned-package> --all-targets --locked
-cargo clippy -p <owned-package> --all-targets --locked -- -D warnings
-cargo test -p <owned-package> --locked
-git diff --check <milestone-base>...HEAD
+cargo test -p <owned-package> <specific-test> --locked
+cargo fmt -p <owned-package>
 ```
 
-Do not represent focused checks as a full workspace or release pass.
+These commands are optional diagnostics, not mandatory task gates. Do not represent them as a full workspace, platform, performance, recovery, or release pass.
 
-## 8. Immediate task order
+## 8. Full implementation order
 
 ### 8.1 OM-040 native renderer and measurement fixture
 
@@ -223,7 +221,7 @@ Expected milestone split:
 2. Deterministic dense paint/input workload using OM-030 fixtures.
 3. Instrumentation and structured measurement output.
 4. Documented Windows measurement procedure and diagnostic run.
-5. Focused checks and task evidence manifest.
+5. Implementation evidence manifest with all unrun checks marked deferred.
 
 ### 8.2 OM-050 low-fidelity UI and interaction direction
 
@@ -244,7 +242,7 @@ tools/ui-direction-spike/**
 fixtures/ui-direction/**
 ```
 
-The time-distribution presentation, visual direction, and any product-level interaction ambiguity require a user decision. Present clear alternatives and stop at the decision boundary. Do not encode an unapproved choice into production architecture.
+The time-distribution presentation, visual direction, and any product-level interaction ambiguity still require later user review. Present clear alternatives and a recommendation. If no explicit decision is available, use the documented recommendation as a provisional choice behind a replaceable OpenManic-owned abstraction, record it clearly, and continue unaffected implementation. Do not hard-code an unapproved choice into an external or difficult-to-replace contract.
 
 Expected milestone split:
 
@@ -252,21 +250,44 @@ Expected milestone split:
 2. Five screen flows and required non-happy states.
 3. Timeline/widget/layout interaction spikes at required widths.
 4. Distribution-presentation alternatives and review captures.
-5. Focused checks and task evidence manifest.
+5. Implementation evidence manifest with all unrun checks marked deferred.
 
-### 8.3 OM-060 and G0 stop gate
+### 8.3 OM-060 and provisional G0 record
 
 OM-060 is primary-owned acceptance-trace work. Terra may prepare a candidate mapping report, but it must not silently assign previously unowned product requirements or change the canonical specifications.
 
-Stop and hand back before Phase 1 unless all of the following are true:
+For this continuation pass, Terra may prepare the candidate mapping and continue into Phase 1, but it must not change canonical requirements or claim that G0 was independently reviewed. Record all of the following as provisional implementation inputs:
 
-- OM-040 evidence is complete and accurately labeled diagnostic versus release evidence.
-- The user has selected the renderer and approved provisional performance budgets.
-- The user has selected the UI/interaction direction and time-distribution presentation.
-- OM-060 maps every product acceptance criterion and detailed MUST to an owning task and evidence case.
-- G0 is independently reviewed against the exact continuation SHA.
+- whether OM-040 evidence is diagnostic or release evidence;
+- the renderer and performance budgets used, including their source and provisional status;
+- the UI direction and time-distribution presentation used;
+- the candidate OM-060 mappings from product criteria and detailed MUST requirements to tasks and evidence cases;
+- that independent G0 verification is deferred.
 
-Do not begin OM-100 domain contracts while these decisions are unsettled.
+When an explicit user choice is absent, prefer the documented recommendation and isolate it behind an OpenManic-owned type, adapter, or configuration boundary so it remains replaceable. If there is no safe provisional implementation, record the blocker and continue every unaffected task instead of stopping the entire effort.
+
+### 8.4 Phases 1 through 7
+
+Continue through the complete task graph in the implementation plan:
+
+- Phase 1: OM-100 through OM-151.
+- Phase 2: OM-200 through OM-299.
+- Phase 3: OM-300 through OM-332.
+- Phase 4: OM-400 through OM-412.
+- Phase 5: OM-500 through OM-520.
+- Phase 6: OM-600 through OM-643.
+- Phase 7: OM-700 through OM-740.
+
+For every task:
+
+1. Read its exact plan row, dependencies, canonical specification sections, owned paths, and evidence contract.
+2. Implement in dependency order without duplicating public contracts, shared types, migrations, or generated formats owned by another task.
+3. Keep one writer active and serialize work that can touch the same file, manifest, lockfile, migration sequence, or shared contract.
+4. Commit a coherent change with the task ID.
+5. Update the continuation record to `implemented, unverified`, list checks as deferred, and note provisional decisions or blockers.
+6. Continue to the next dependency-ready task without waiting at a phase gate.
+
+The plan's original gate criteria remain eventual acceptance requirements. This handover changes when they are verified, not what the product must satisfy.
 
 ## 9. Architecture guardrails
 
@@ -318,7 +339,7 @@ Rules:
 
 ## 12. Required handback package
 
-Return all of the following to the user:
+After implementing the complete remaining plan, return all of the following to the user:
 
 ```yaml
 baseline_sha: a3d5d9ffebca59bb5eba9d8718a78ba668a8aa61
@@ -340,6 +361,7 @@ commands:
     exit_code:
     result:
 tests_added:
+checks_deferred:
 known_limitations:
 remaining_risks:
 git_status:
@@ -351,7 +373,7 @@ Also provide:
 2. Exact generated evidence paths and whether each is committed or temporary.
 3. Screenshots or measurement reports only when their environment and method are recorded.
 4. Every unresolved product, renderer, dependency, performance-budget, or ownership decision.
-5. A statement that full independent verification is still pending.
+5. A statement that task, phase, integration, platform, performance, recovery, and release verification are all still pending.
 
 Do not say the MVP, a gate, or a task is accepted. Terra implements and reports evidence; the user and primary Codex reviewer make the final decision.
 
@@ -365,7 +387,7 @@ Before the first edit:
 - [ ] Choose OM-040 first and freeze exact writable paths.
 - [ ] Record whether root manifest/lockfile ownership is transferred exclusively.
 - [ ] Map every OM-040 requirement to a milestone and evidence case.
-- [ ] Run the focused baseline check for the package or create a compile-safe scaffold first.
-- [ ] Report any missing user decision before encoding it.
+- [ ] Record checks as deferred and use targeted compiler feedback only when needed to continue.
+- [ ] Record provisional choices and keep them replaceable rather than stopping unaffected work.
 
-Begin with OM-040 milestone 1. Stop immediately if the baseline, ownership, or specification state differs from this handover.
+Begin with OM-040 milestone 1, then continue through OM-740 in dependency order. Stop immediately only if the baseline or ownership state differs, there is a data-safety risk, or a missing decision makes all remaining work impossible.
