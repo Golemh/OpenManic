@@ -7,6 +7,7 @@
 use crate::{ManualClock, MonotonicTicks, SeededPrng, UtcMicros};
 
 const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
+const MICROSECONDS_PER_SECOND_I64: i64 = 1_000_000;
 const TITLE_RETAINED_LIMIT: usize = 16;
 const DENSE_INTERVAL_COUNT: usize = 10_000;
 const LARGE_LIST_COUNT: usize = 1_000;
@@ -215,6 +216,12 @@ pub struct ScheduleOccurrence {
     pub end: UtcMicros,
     /// Calendar edge case represented by this occurrence.
     pub marker: ScheduleMarker,
+    /// Explicit synthetic named zone used to interpret the local evidence.
+    pub zone_name: String,
+    /// Synthetic local start date-time including its UTC offset.
+    pub local_start: String,
+    /// Synthetic local end date-time including its UTC offset.
+    pub local_end: String,
 }
 /// Schedule characteristics deliberately represented in the fixture.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -273,7 +280,7 @@ pub struct JobRecord {
     pub sequence: u32,
 }
 /// Job category.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum JobKind {
     /// Foreground tracking write.
     TrackingWrite,
@@ -333,13 +340,26 @@ fn dense_range(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
     }
 }
 fn segmented_bands(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
-    fixture.category_band = bands(clock, 100, ["planning", "coding", "review"]);
-    fixture.state_band = bands(clock, 200, ["active", "idle", "active", "away"]);
-    fixture.application_band = bands(
-        clock,
+    let start = clock.utc_micros();
+    let end = after_seconds(start, 120);
+    fixture.category_band =
+        band_with_boundaries(start, end, 100, ["planning", "coding", "review"], &[20, 70]);
+    fixture.state_band = band_with_boundaries(
+        start,
+        end,
+        200,
+        ["active", "idle", "active", "away"],
+        &[35, 90, 105],
+    );
+    fixture.application_band = band_with_boundaries(
+        start,
+        end,
         300,
         ["editor", "browser", "terminal", "editor", "chat"],
+        &[10, 40, 80, 110],
     );
+    clock.set_utc_micros(end);
+    clock.advance_monotonic_ticks(120);
 }
 fn rapid_switches(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
     for (index, (app, window)) in [
@@ -366,25 +386,61 @@ fn rapid_switches(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
     }
 }
 fn schedules(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
-    fixture.schedules = Vec::with_capacity(4);
-    for (index, marker) in [
-        ScheduleMarker::Adjacent,
-        ScheduleMarker::Overnight,
-        ScheduleMarker::DstBoundary,
-        ScheduleMarker::RecurrenceException,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let start = clock.utc_micros();
-        clock.advance_utc_micros(60 * MICROSECONDS_PER_SECOND);
-        fixture.schedules.push(ScheduleOccurrence {
-            id: index as u64,
-            start,
-            end: clock.utc_micros(),
-            marker,
-        });
-    }
+    let first_start = clock.utc_micros();
+    let adjacent_end = after_seconds(first_start, 30 * 60);
+    let overnight_end = after_seconds(adjacent_end, 2 * 60 * 60);
+    let dst_start = after_seconds(overnight_end, 60 * 60);
+    let dst_end = after_seconds(dst_start, 60 * 60);
+    let exception_end = after_seconds(dst_end, 45 * 60);
+    fixture.schedules = vec![
+        schedule(
+            0,
+            first_start,
+            adjacent_end,
+            ScheduleMarker::Adjacent,
+            "Fixture/Standard",
+            "2026-02-02T09:00:00+00:00",
+            "2026-02-02T09:30:00+00:00",
+        ),
+        schedule(
+            1,
+            adjacent_end,
+            overnight_end,
+            ScheduleMarker::Adjacent,
+            "Fixture/Standard",
+            "2026-02-02T09:30:00+00:00",
+            "2026-02-02T11:30:00+00:00",
+        ),
+        schedule(
+            2,
+            adjacent_end,
+            overnight_end,
+            ScheduleMarker::Overnight,
+            "Fixture/Standard",
+            "2026-02-02T23:30:00+00:00",
+            "2026-02-03T01:30:00+00:00",
+        ),
+        schedule(
+            3,
+            dst_start,
+            dst_end,
+            ScheduleMarker::DstBoundary,
+            "Fixture/Example-DST",
+            "2026-03-08T01:30:00-05:00",
+            "2026-03-08T03:30:00-04:00",
+        ),
+        schedule(
+            4,
+            dst_end,
+            exception_end,
+            ScheduleMarker::RecurrenceException,
+            "Fixture/Standard",
+            "2026-03-10T09:00:00+00:00",
+            "2026-03-10T09:45:00+00:00",
+        ),
+    ];
+    clock.set_utc_micros(exception_end);
+    clock.advance_monotonic_ticks(5 * 60 * 60 + 15 * 60);
 }
 fn overlays(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
     let start = clock.utc_micros();
@@ -428,23 +484,26 @@ fn title_churn(fixture: &mut ScenarioFixture, random: &mut SeededPrng) {
         .collect();
 }
 fn concurrent_jobs(fixture: &mut ScenarioFixture) {
-    fixture.jobs = vec![
-        JobRecord {
-            job_id: 10,
-            kind: JobKind::TrackingWrite,
-            sequence: 1,
-        },
-        JobRecord {
-            job_id: 20,
-            kind: JobKind::ImportBatch,
-            sequence: 1,
-        },
-        JobRecord {
-            job_id: 30,
-            kind: JobKind::OverviewProjection,
-            sequence: 1,
-        },
-    ];
+    fixture.jobs = Vec::with_capacity(9);
+    for sequence in 1..=3 {
+        fixture.jobs.extend([
+            JobRecord {
+                job_id: 10,
+                kind: JobKind::TrackingWrite,
+                sequence,
+            },
+            JobRecord {
+                job_id: 20,
+                kind: JobKind::ImportBatch,
+                sequence,
+            },
+            JobRecord {
+                job_id: 30,
+                kind: JobKind::OverviewProjection,
+                sequence,
+            },
+        ]);
+    }
 }
 fn slowed_ui(fixture: &mut ScenarioFixture) {
     fixture.slowed_ui = Some(SlowedUiMetadata {
@@ -452,7 +511,7 @@ fn slowed_ui(fixture: &mut ScenarioFixture) {
         high_water_mark: 8,
         submitted_snapshots: 24,
         delivered_snapshot_id: 24,
-        coalesced_snapshots: 23,
+        coalesced_snapshots: 16,
     });
 }
 
@@ -493,25 +552,59 @@ impl ActivityLabels {
         }
     }
 }
-fn bands(
-    clock: &mut ManualClock,
+fn band_with_boundaries(
+    start: UtcMicros,
+    end: UtcMicros,
     first_id: u64,
     labels: impl IntoIterator<Item = &'static str>,
+    boundary_seconds: &[u64],
 ) -> Vec<BandSegment> {
+    let labels = labels.into_iter().collect::<Vec<_>>();
+    let mut boundaries = Vec::with_capacity(labels.len() + 1);
+    boundaries.push(start);
+    boundaries.extend(
+        boundary_seconds
+            .iter()
+            .map(|seconds| after_seconds(start, *seconds)),
+    );
+    boundaries.push(end);
     labels
         .into_iter()
         .enumerate()
-        .map(|(index, label)| {
-            let start = clock.utc_micros();
-            clock.advance_utc_micros(10 * MICROSECONDS_PER_SECOND);
-            BandSegment {
-                id: first_id + index as u64,
-                start,
-                end: clock.utc_micros(),
-                label: label.to_owned(),
-            }
+        .map(|(index, label)| BandSegment {
+            id: first_id + index as u64,
+            start: boundaries[index],
+            end: boundaries[index + 1],
+            label: label.to_owned(),
         })
         .collect()
+}
+fn after_seconds(start: UtcMicros, seconds: u64) -> UtcMicros {
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    UtcMicros::new(
+        start
+            .get()
+            .saturating_add(seconds.saturating_mul(MICROSECONDS_PER_SECOND_I64)),
+    )
+}
+fn schedule(
+    id: u64,
+    start: UtcMicros,
+    end: UtcMicros,
+    marker: ScheduleMarker,
+    zone_name: &str,
+    local_start: &str,
+    local_end: &str,
+) -> ScheduleOccurrence {
+    ScheduleOccurrence {
+        id,
+        start,
+        end,
+        marker,
+        zone_name: zone_name.to_owned(),
+        local_start: local_start.to_owned(),
+        local_end: local_end.to_owned(),
+    }
 }
 fn names(prefix: &str, count: usize) -> Vec<String> {
     (0..count)
@@ -541,7 +634,7 @@ mod tests {
         );
     }
     #[test]
-    fn each_scenario_has_its_required_invariant() {
+    fn activity_band_and_switch_scenarios_have_concrete_records() {
         let seed = 7;
         assert_eq!(
             Scenario::NormalWorkday
@@ -558,7 +651,15 @@ mod tests {
                 >= DENSE_INTERVAL_COUNT
         );
         let bands = Scenario::ThreeSegmentedBands.generate(seed);
-        assert_ne!(bands.category_band.len(), bands.application_band.len());
+        let category_boundaries = boundaries(&bands.category_band);
+        let state_boundaries = boundaries(&bands.state_band);
+        let application_boundaries = boundaries(&bands.application_band);
+        assert_eq!(category_boundaries.first(), state_boundaries.first());
+        assert_eq!(category_boundaries.last(), state_boundaries.last());
+        assert_eq!(category_boundaries.first(), application_boundaries.first());
+        assert_eq!(category_boundaries.last(), application_boundaries.last());
+        assert_ne!(category_boundaries, state_boundaries);
+        assert_ne!(state_boundaries, application_boundaries);
         let rapid = Scenario::RapidABa.generate(seed);
         assert_eq!(
             rapid.activity_intervals[0].application_id,
@@ -568,24 +669,48 @@ mod tests {
             rapid.activity_intervals[2].window_id,
             rapid.activity_intervals[3].window_id
         );
-        let schedule = Scenario::ScheduleDstOvernight.generate(seed);
-        assert!(
-            schedule
-                .schedules
-                .iter()
-                .any(|item| item.marker == ScheduleMarker::Adjacent)
+    }
+    #[test]
+    fn schedule_scenario_has_concrete_calendar_evidence() {
+        let schedule = Scenario::ScheduleDstOvernight.generate(7);
+        let adjacent = schedule
+            .schedules
+            .iter()
+            .filter(|item| item.marker == ScheduleMarker::Adjacent)
+            .collect::<Vec<_>>();
+        assert_eq!(adjacent.len(), 2);
+        assert_eq!(adjacent[0].end, adjacent[1].start);
+        let overnight = schedule
+            .schedules
+            .iter()
+            .find(|item| item.marker == ScheduleMarker::Overnight);
+        assert_eq!(
+            overnight.map(|item| item.local_start.starts_with("2026-02-02")),
+            Some(true)
         );
-        assert!(
-            schedule
-                .schedules
-                .iter()
-                .any(|item| item.marker == ScheduleMarker::Overnight)
+        assert_eq!(
+            overnight.map(|item| item.local_end.starts_with("2026-02-03")),
+            Some(true)
         );
-        assert!(
-            schedule
-                .schedules
-                .iter()
-                .any(|item| item.marker == ScheduleMarker::DstBoundary)
+        let dst = schedule
+            .schedules
+            .iter()
+            .find(|item| item.marker == ScheduleMarker::DstBoundary);
+        assert_eq!(
+            dst.map(|item| item.zone_name.as_str()),
+            Some("Fixture/Example-DST")
+        );
+        assert_eq!(
+            dst.map(|item| item.end.get() - item.start.get()),
+            Some(60 * 60 * MICROSECONDS_PER_SECOND_I64)
+        );
+        assert_eq!(
+            dst.map(|item| item.local_start.as_str()),
+            Some("2026-03-08T01:30:00-05:00")
+        );
+        assert_eq!(
+            dst.map(|item| item.local_end.as_str()),
+            Some("2026-03-08T03:30:00-04:00")
         );
         assert!(
             schedule
@@ -593,6 +718,10 @@ mod tests {
                 .iter()
                 .any(|item| item.marker == ScheduleMarker::RecurrenceException)
         );
+    }
+    #[test]
+    fn overlay_and_large_list_scenarios_have_required_scale() {
+        let seed = 7;
         assert_eq!(
             Scenario::SimultaneousOverlays.generate(seed).overlays.len(),
             3
@@ -624,7 +753,13 @@ mod tests {
         let jobs = Scenario::ConcurrentJobs.generate(1).jobs;
         assert_eq!(
             jobs.iter().map(|job| job.job_id).collect::<Vec<_>>(),
-            vec![10, 20, 30]
+            vec![10, 20, 30, 10, 20, 30, 10, 20, 30]
+        );
+        assert_eq!(job_sequences(&jobs, JobKind::TrackingWrite), vec![1, 2, 3]);
+        assert_eq!(job_sequences(&jobs, JobKind::ImportBatch), vec![1, 2, 3]);
+        assert_eq!(
+            job_sequences(&jobs, JobKind::OverviewProjection),
+            vec![1, 2, 3]
         );
         let slowed_ui = Scenario::SlowedUi.generate(1).slowed_ui;
         assert!(slowed_ui.is_some());
@@ -633,6 +768,10 @@ mod tests {
         };
         assert_eq!(ui.high_water_mark, ui.queue_capacity);
         assert_eq!(ui.delivered_snapshot_id, ui.submitted_snapshots as u64);
+        assert_eq!(
+            ui.submitted_snapshots,
+            ui.high_water_mark + ui.coalesced_snapshots
+        );
     }
     #[test]
     fn identical_seeds_repeat_and_distinct_seeds_vary() {
@@ -644,5 +783,20 @@ mod tests {
             Scenario::NormalWorkday.generate(4),
             Scenario::NormalWorkday.generate(5)
         );
+    }
+    fn boundaries(segments: &[BandSegment]) -> Vec<UtcMicros> {
+        let Some(first) = segments.first() else {
+            return Vec::new();
+        };
+        let mut values = Vec::with_capacity(segments.len() + 1);
+        values.push(first.start);
+        values.extend(segments.iter().map(|segment| segment.end));
+        values
+    }
+    fn job_sequences(jobs: &[JobRecord], kind: JobKind) -> Vec<u32> {
+        jobs.iter()
+            .filter(|job| job.kind == kind)
+            .map(|job| job.sequence)
+            .collect()
     }
 }
