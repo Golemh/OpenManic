@@ -11,7 +11,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| OM-010 | `codex/om-010-workspace-foundation` | Assigned after this ledger is committed | Ledger commit SHA | Root workspace/toolchain/quality files and compile-safe crate roots named in its brief | Workspace manifest, lint and target-feature baseline | Queued; runs alone |
+| OM-010 | `codex/om-010-workspace-foundation` | `C:\Users\abr\AppData\Local\Temp\openmanic-agent-worktrees\om-010` | `cdacd3cf183027fe26415a488d83ccbc97178c32` | Root workspace/toolchain/quality files and compile-safe crate roots named in its brief | Workspace manifest, lint and target-feature baseline | Active; sole writer |
 
 ## Completed and integrated work
 
@@ -46,4 +46,3 @@ Primary decision:
 Integration SHA:
 Remaining risk or waiver:
 ```
-
