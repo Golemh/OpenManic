@@ -13,6 +13,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 | --- | --- | --- | --- | --- | --- | --- |
 | OM-040 | `codex/om040-native-ui-fixture` | `F:\\claude\\projects\\OpenManic\\.agents\\om040-native-ui-fixture` | `df085bd32f402a2e3eade28e0ff487e79a57b8d8` | `Cargo.toml`, `Cargo.lock`, `tools/native-ui-fixture/**`, `fixtures/performance/native-ui/**` | Root manifest and lockfile transfer released after integration `ab1b40b6e80767538d14a04cbd70f54a73ecfe39`; scoped repairs integrated through `cfbeaf2650443158a1b6de9c2e3483368b817b7d` | Implemented and Phase 0 code-quality verified |
 | OM-050 | `codex/om050-ui-direction-spike` | `F:\\claude\\projects\\OpenManic\\.agents\\om050-ui-direction-spike` | `719497c6209b33a4c146467567b4fc2463a7938e` | `Cargo.lock`, `tools/ui-direction-spike/**`, `fixtures/ui-direction/**` | Lockfile transfer released after integration `c213601f2649eb86e8b4704a89c7367844d517f8`; scoped repairs integrated through `9361d818be8febe4a3723c6f95d55fa015849482` | Implemented and Phase 0 code-quality verified |
+| OM-100 | `codex/om100-domain-foundation` | `F:\\claude\\projects\\OpenManic\\.agents\\om100-domain-foundation` | _recorded at activation commit_ | `crates/openmanic-domain/**` | Domain crate exclusively transferred; no dependencies, application contracts, schema, or specifications | Active; Phase 1 task checks pending handoff |
 
 ## Completed and integrated work
 
