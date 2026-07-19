@@ -1,7 +1,15 @@
-//! Immutable SQL migration registry and ledger verification.
+//! Immutable SQL migration registry, validation, and recovery-safe execution.
+//!
+//! Initial-store creation does not need a backup because no user data exists.
+//! Every later migration validates the existing ledger first, then creates and
+//! verifies an online backup before its transaction begins. If that transaction
+//! fails, the retained backup is restored before the error leaves this crate.
 
-use rusqlite::{Connection, TransactionBehavior, params};
+use std::path::Path;
 
+use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+
+use crate::backup::{VerifiedBackup, create_verified_backup, restore_verified_backup};
 use crate::{StorageError, StoreOpenOptions};
 
 /// The newest migration version compiled into this storage crate.
@@ -9,14 +17,26 @@ pub const LATEST_SCHEMA_VERSION: u32 = 1;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const INITIAL_CHECKSUM: [u8; 8] = migration_checksum(INITIAL_SCHEMA);
+const MIGRATIONS: [Migration; 1] = [Migration {
+    version: LATEST_SCHEMA_VERSION,
+    source: INITIAL_SCHEMA,
+    checksum: INITIAL_CHECKSUM,
+}];
+
+#[derive(Clone, Copy)]
+struct Migration {
+    version: u32,
+    source: &'static str,
+    checksum: [u8; 8],
+}
 
 pub(crate) fn apply_all(
     connection: &mut Connection,
+    database_path: &Path,
     options: &StoreOpenOptions,
 ) -> Result<(), StorageError> {
     if table_exists(connection, "schema_migration")? {
-        verify_existing(connection)?;
-        verify_store_identity(connection, options)?;
+        migrate_existing(connection, database_path, options)?;
         update_last_opened_version(connection, options)
     } else if has_user_tables(connection)? {
         Err(StorageError::MigrationLedgerMissing)
@@ -25,20 +45,27 @@ pub(crate) fn apply_all(
     }
 }
 
-pub(crate) fn verify_existing(connection: &Connection) -> Result<(), StorageError> {
+pub(crate) fn verify_existing(connection: &Connection) -> Result<u32, StorageError> {
+    verify_existing_with(connection, &MIGRATIONS)
+}
+
+fn verify_existing_with(
+    connection: &Connection,
+    migrations: &[Migration],
+) -> Result<u32, StorageError> {
     if !table_exists(connection, "schema_migration")? {
         return Err(StorageError::MigrationLedgerMissing);
     }
 
+    let supported_version = latest_version(migrations)?;
     let user_version = read_pragma_user_version(connection)?;
-    if user_version > LATEST_SCHEMA_VERSION {
+    if user_version > supported_version {
         return Err(StorageError::DatabaseNewerThanBinary {
             database_version: user_version,
-            supported_version: LATEST_SCHEMA_VERSION,
+            supported_version,
         });
     }
 
-    let mut found_initial = false;
     let mut statement = connection
         .prepare("SELECT version, checksum FROM schema_migration ORDER BY version")
         .map_err(|_| StorageError::DatabaseOperation {
@@ -51,40 +78,168 @@ pub(crate) fn verify_existing(connection: &Connection) -> Result<(), StorageErro
         .map_err(|_| StorageError::DatabaseOperation {
             operation: "read migration ledger",
         })?;
+    let mut applied_version = 0_u32;
     for row in rows {
         let (version, checksum) = row.map_err(|_| StorageError::DatabaseOperation {
             operation: "read migration ledger",
         })?;
         let version = u32::try_from(version).map_err(|_| StorageError::MigrationLedgerMissing)?;
-        if version > LATEST_SCHEMA_VERSION {
+        if version > supported_version {
             return Err(StorageError::DatabaseNewerThanBinary {
                 database_version: version,
-                supported_version: LATEST_SCHEMA_VERSION,
+                supported_version,
             });
         }
-        if version != 1 {
+        let expected_version = applied_version
+            .checked_add(1)
+            .ok_or(StorageError::MigrationLedgerMissing)?;
+        if version != expected_version {
             return Err(StorageError::MigrationLedgerMissing);
         }
-        if checksum.as_slice() != INITIAL_CHECKSUM {
+        let Some(compiled) = migrations
+            .iter()
+            .find(|migration| migration.version == version)
+        else {
+            return Err(StorageError::MigrationLedgerMissing);
+        };
+        if checksum.as_slice() != compiled.checksum {
             return Err(StorageError::MigrationChecksumMismatch { version });
         }
-        found_initial = true;
+        applied_version = version;
     }
-    if !found_initial {
+    if applied_version == 0 {
         return Err(StorageError::MigrationLedgerMissing);
     }
 
-    let schema_version = metadata_schema_version(connection)?;
-    if schema_version > LATEST_SCHEMA_VERSION {
+    let metadata_version = metadata_schema_version(connection)?;
+    if metadata_version > supported_version {
         return Err(StorageError::DatabaseNewerThanBinary {
-            database_version: schema_version,
-            supported_version: LATEST_SCHEMA_VERSION,
+            database_version: metadata_version,
+            supported_version,
         });
     }
-    if schema_version != LATEST_SCHEMA_VERSION || user_version != schema_version {
+    if metadata_version != applied_version || user_version != applied_version {
         return Err(StorageError::MetadataInvalid);
     }
+    Ok(applied_version)
+}
+
+fn latest_version(migrations: &[Migration]) -> Result<u32, StorageError> {
+    migrations
+        .last()
+        .map(|migration| migration.version)
+        .ok_or(StorageError::MigrationLedgerMissing)
+}
+
+fn migrate_existing(
+    connection: &mut Connection,
+    database_path: &Path,
+    options: &StoreOpenOptions,
+) -> Result<(), StorageError> {
+    migrate_existing_with(
+        connection,
+        database_path,
+        options,
+        &MIGRATIONS,
+        apply_migration_sql,
+    )
+}
+
+fn migrate_existing_with<F>(
+    connection: &mut Connection,
+    database_path: &Path,
+    options: &StoreOpenOptions,
+    migrations: &[Migration],
+    apply: F,
+) -> Result<(), StorageError>
+where
+    F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+{
+    // Ledger, checksum, schema-version, and store-identity failures must not
+    // create a backup or begin migration work.
+    let current_version = verify_existing_with(connection, migrations)?;
+    verify_store_identity(connection, options)?;
+    apply_pending_migrations_with(
+        connection,
+        database_path,
+        options,
+        current_version,
+        migrations,
+        apply,
+    )
+}
+
+fn apply_pending_migrations_with<F>(
+    connection: &mut Connection,
+    database_path: &Path,
+    options: &StoreOpenOptions,
+    current_version: u32,
+    migrations: &[Migration],
+    mut apply: F,
+) -> Result<(), StorageError>
+where
+    F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+{
+    let mut applied_version = current_version;
+    for migration in migrations {
+        if migration.version <= applied_version {
+            continue;
+        }
+
+        let backup = create_verified_backup(
+            connection,
+            database_path,
+            applied_version,
+            migration.version,
+        )?;
+        let result =
+            apply_migration_transactionally(connection, options, *migration, &backup, &mut apply);
+        if result.is_err() {
+            restore_verified_backup(connection, &backup)?;
+            return Err(StorageError::MigrationFailed {
+                version: migration.version,
+            });
+        }
+        applied_version = migration.version;
+    }
     Ok(())
+}
+
+fn apply_migration_transactionally<F>(
+    connection: &mut Connection,
+    options: &StoreOpenOptions,
+    migration: Migration,
+    backup: &VerifiedBackup,
+    apply: &mut F,
+) -> Result<(), StorageError>
+where
+    F: FnMut(&Transaction<'_>, Migration, &VerifiedBackup) -> Result<(), StorageError>,
+{
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| StorageError::DatabaseOperation {
+            operation: "begin migration",
+        })?;
+    apply(&transaction, migration, backup)?;
+    record_migration(&transaction, options, migration)?;
+    update_schema_version(&transaction, migration.version)?;
+    transaction
+        .commit()
+        .map_err(|_| StorageError::DatabaseOperation {
+            operation: "commit migration",
+        })
+}
+
+fn apply_migration_sql(
+    transaction: &Transaction<'_>,
+    migration: Migration,
+    _: &VerifiedBackup,
+) -> Result<(), StorageError> {
+    transaction
+        .execute_batch(migration.source)
+        .map_err(|_| StorageError::DatabaseOperation {
+            operation: "apply migration",
+        })
 }
 
 pub(crate) fn metadata_schema_version(connection: &Connection) -> Result<u32, StorageError> {
@@ -96,6 +251,48 @@ pub(crate) fn metadata_schema_version(connection: &Connection) -> Result<u32, St
         )
         .map_err(|_| StorageError::MetadataInvalid)?;
     u32::try_from(version).map_err(|_| StorageError::MetadataInvalid)
+}
+
+fn record_migration(
+    transaction: &Transaction<'_>,
+    options: &StoreOpenOptions,
+    migration: Migration,
+) -> Result<(), StorageError> {
+    transaction
+        .execute(
+            "INSERT INTO schema_migration(version, checksum, applied_utc_us, app_version)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                i64::from(migration.version),
+                migration.checksum.as_slice(),
+                options.opened_utc_us(),
+                options.app_version(),
+            ],
+        )
+        .map_err(|_| StorageError::DatabaseOperation {
+            operation: "record migration",
+        })?;
+    Ok(())
+}
+
+fn update_schema_version(transaction: &Transaction<'_>, version: u32) -> Result<(), StorageError> {
+    let changed = transaction
+        .execute(
+            "UPDATE store_metadata SET schema_version = ?1 WHERE singleton_id = 1",
+            [i64::from(version)],
+        )
+        .map_err(|_| StorageError::DatabaseOperation {
+            operation: "update schema metadata",
+        })?;
+    if changed != 1 {
+        return Err(StorageError::MetadataInvalid);
+    }
+    transaction
+        .pragma_update(None, "user_version", i64::from(version))
+        .map_err(|_| StorageError::DatabaseOperation {
+            operation: "set SQLite user version",
+        })?;
+    Ok(())
 }
 
 fn apply_initial_schema(
@@ -123,20 +320,7 @@ fn apply_initial_schema(
         .map_err(|_| StorageError::DatabaseOperation {
             operation: "apply initial migration",
         })?;
-    transaction
-        .execute(
-            "INSERT INTO schema_migration(version, checksum, applied_utc_us, app_version)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                i64::from(LATEST_SCHEMA_VERSION),
-                INITIAL_CHECKSUM.as_slice(),
-                options.opened_utc_us(),
-                options.app_version(),
-            ],
-        )
-        .map_err(|_| StorageError::DatabaseOperation {
-            operation: "record initial migration",
-        })?;
+    record_migration(&transaction, options, MIGRATIONS[0])?;
     transaction
         .execute(
             "INSERT INTO store_metadata(
@@ -251,4 +435,345 @@ const fn migration_checksum(source: &str) -> [u8; 8] {
         index += 1;
     }
     hash.to_le_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use rusqlite::Connection;
+
+    use crate::{StorageError, StoreOpenOptions};
+
+    use super::{
+        MIGRATIONS, Migration, create_verified_backup, migrate_existing_with,
+        restore_verified_backup,
+    };
+
+    static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    const TEST_MIGRATION_SOURCE: &str =
+        "CREATE TABLE migration_safety_probe (id INTEGER PRIMARY KEY) STRICT;";
+
+    struct TemporaryDatabase {
+        path: PathBuf,
+    }
+
+    impl TemporaryDatabase {
+        fn new(case_name: &str) -> Self {
+            let identifier = NEXT_DATABASE_ID.fetch_add(1, Ordering::Relaxed);
+            let filename = format!(
+                "openmanic-om151-{case_name}-{}-{identifier}.sqlite3",
+                std::process::id()
+            );
+            let path = std::env::temp_dir().join(filename);
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(sidecar_path(&path, "-shm"));
+            let _ = fs::remove_file(sidecar_path(&path, "-wal"));
+            remove_retained_backups(&path);
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TemporaryDatabase {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.path);
+            let _ = fs::remove_file(sidecar_path(&self.path, "-shm"));
+            let _ = fs::remove_file(sidecar_path(&self.path, "-wal"));
+            remove_retained_backups(&self.path);
+        }
+    }
+
+    fn sidecar_path(database_path: &Path, suffix: &str) -> PathBuf {
+        let mut sidecar = OsString::from(database_path.as_os_str());
+        sidecar.push(suffix);
+        PathBuf::from(sidecar)
+    }
+
+    fn remove_retained_backups(database_path: &Path) {
+        let Some(directory) = database_path.parent() else {
+            return;
+        };
+        let Some(filename) = database_path.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        let prefix = format!("{filename}.pre-migration-");
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with(&prefix) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    fn open_options(store_byte: u8) -> StoreOpenOptions {
+        StoreOpenOptions::new([store_byte; 16], 1_725_000_000_000_000, "0.1.0-test")
+    }
+
+    fn initialized_connection(
+        database: &TemporaryDatabase,
+        options: &StoreOpenOptions,
+    ) -> Connection {
+        let mut connection =
+            Connection::open(database.path()).expect("the isolated SQLite fixture should open");
+        connection
+            .execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
+            .expect("the isolated SQLite fixture should configure WAL and foreign keys");
+        super::apply_initial_schema(&mut connection, options)
+            .expect("the isolated SQLite fixture should apply migration 0001");
+        connection
+    }
+
+    fn test_migrations() -> [Migration; 2] {
+        [
+            MIGRATIONS[0],
+            Migration {
+                version: 2,
+                source: TEST_MIGRATION_SOURCE,
+                checksum: super::migration_checksum(TEST_MIGRATION_SOURCE),
+            },
+        ]
+    }
+
+    fn retained_backup_count(database_path: &Path) -> usize {
+        let Some(directory) = database_path.parent() else {
+            return 0;
+        };
+        let Some(filename) = database_path.file_name().and_then(|name| name.to_str()) else {
+            return 0;
+        };
+        let prefix = format!("{filename}.pre-migration-");
+        fs::read_dir(directory)
+            .expect("the temporary directory should remain readable")
+            .flatten()
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().starts_with(&prefix)
+                    && entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "sqlite3")
+            })
+            .count()
+    }
+
+    #[test]
+    fn verified_backup_exists_before_an_injected_migration_failure() {
+        let database = TemporaryDatabase::new("backup-before-failure");
+        let options = open_options(1);
+        let mut connection = initialized_connection(&database, &options);
+        let migrations = test_migrations();
+        let mut migration_started = false;
+        let mut verified_backup_path = None;
+
+        let error = migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &migrations,
+            |transaction, migration, backup| {
+                migration_started = true;
+                verified_backup_path = Some(backup.path().to_path_buf());
+                let revision: i64 = Connection::open(backup.path())
+                    .expect("the verified backup should be independently readable")
+                    .query_row(
+                        "SELECT data_revision FROM store_metadata WHERE singleton_id = 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .expect("the verified backup should contain initial metadata");
+                assert_eq!(revision, 0);
+                transaction
+                    .execute(
+                        "UPDATE store_metadata SET data_revision = 99 WHERE singleton_id = 1",
+                        [],
+                    )
+                    .expect("the injected migration can modify its transaction before failing");
+                assert_eq!(migration.version, 2);
+                Err(StorageError::DatabaseOperation {
+                    operation: "forced migration failure",
+                })
+            },
+        )
+        .expect_err("the injected migration failure must be reported");
+
+        assert_eq!(error, StorageError::MigrationFailed { version: 2 });
+        assert!(migration_started);
+        let backup_path =
+            verified_backup_path.expect("migration must observe a verified backup first");
+        assert!(backup_path.is_file());
+        assert!(!sidecar_path(&backup_path, "-shm").exists());
+        assert!(!sidecar_path(&backup_path, "-wal").exists());
+        assert_eq!(retained_backup_count(database.path()), 1);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT data_revision FROM store_metadata WHERE singleton_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the original database must remain usable after restoration"),
+            0
+        );
+        let reopened = Connection::open(database.path())
+            .expect("the restored database must remain reopenable");
+        assert_eq!(
+            reopened
+                .query_row(
+                    "SELECT data_revision FROM store_metadata WHERE singleton_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the reopened original database must retain its prior state"),
+            0
+        );
+    }
+
+    #[test]
+    fn retained_backup_can_restore_mutated_original_database() {
+        let database = TemporaryDatabase::new("backup-restore");
+        let options = open_options(2);
+        let mut connection = initialized_connection(&database, &options);
+        let backup = create_verified_backup(&connection, database.path(), 1, 2)
+            .expect("the initial database should produce a verified online backup");
+        let retained_path = backup.path().to_path_buf();
+
+        connection
+            .execute(
+                "UPDATE store_metadata SET data_revision = 77 WHERE singleton_id = 1",
+                [],
+            )
+            .expect("the source mutation should persist before restore");
+        restore_verified_backup(&mut connection, &backup)
+            .expect("the verified backup should restore the original state");
+
+        assert!(retained_path.is_file());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT data_revision FROM store_metadata WHERE singleton_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the restored database should remain queryable"),
+            0
+        );
+    }
+
+    #[test]
+    fn newer_database_is_refused_without_creating_a_backup_or_starting_migration() {
+        let database = TemporaryDatabase::new("newer-no-backup");
+        let options = open_options(3);
+        let mut connection = initialized_connection(&database, &options);
+        connection
+            .execute(
+                "UPDATE store_metadata SET schema_version = 3 WHERE singleton_id = 1",
+                [],
+            )
+            .expect("the fixture can represent a newer database");
+        connection
+            .pragma_update(None, "user_version", 3_i64)
+            .expect("the fixture can represent a newer SQLite user version");
+        let mut migration_started = false;
+
+        let error = migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &test_migrations(),
+            |_, _, _| {
+                migration_started = true;
+                Ok(())
+            },
+        )
+        .expect_err("a newer database must be refused before migration work");
+
+        assert_eq!(
+            error,
+            StorageError::DatabaseNewerThanBinary {
+                database_version: 3,
+                supported_version: 2,
+            }
+        );
+        assert!(!migration_started);
+        assert_eq!(retained_backup_count(database.path()), 0);
+    }
+
+    #[test]
+    fn checksum_mismatch_is_refused_without_creating_a_backup_or_starting_migration() {
+        let database = TemporaryDatabase::new("checksum-no-backup");
+        let options = open_options(4);
+        let mut connection = initialized_connection(&database, &options);
+        connection
+            .execute(
+                "UPDATE schema_migration SET checksum = ?1 WHERE version = 1",
+                [vec![0_u8; 8]],
+            )
+            .expect("the fixture can represent a ledger checksum mismatch");
+        let mut migration_started = false;
+
+        let error = migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &test_migrations(),
+            |_, _, _| {
+                migration_started = true;
+                Ok(())
+            },
+        )
+        .expect_err("a checksum mismatch must be refused before migration work");
+
+        assert_eq!(
+            error,
+            StorageError::MigrationChecksumMismatch { version: 1 }
+        );
+        assert!(!migration_started);
+        assert_eq!(retained_backup_count(database.path()), 0);
+    }
+
+    #[test]
+    fn backup_foreign_key_verification_failure_prevents_migration() {
+        let database = TemporaryDatabase::new("verification-no-migration");
+        let options = open_options(5);
+        let mut connection = initialized_connection(&database, &options);
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;")
+            .expect("the fixture can create intentionally invalid foreign-key data");
+        connection
+            .execute(
+                "INSERT INTO application(
+                     public_id, display_name, category_id, exclusion_policy,
+                     first_seen_utc_us, last_seen_utc_us
+                 ) VALUES (?1, 'invalid reference', 999, 0, 0, 0)",
+                [vec![5_u8; 16]],
+            )
+            .expect("foreign-key enforcement is disabled only for this corrupt fixture");
+        let mut migration_started = false;
+
+        let error = migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &test_migrations(),
+            |_, _, _| {
+                migration_started = true;
+                Ok(())
+            },
+        )
+        .expect_err("an unverifiable backup must prevent migration");
+
+        assert_eq!(error, StorageError::BackupForeignKeyCheckFailed);
+        assert!(!migration_started);
+        assert_eq!(retained_backup_count(database.path()), 1);
+    }
 }

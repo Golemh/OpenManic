@@ -95,7 +95,7 @@ impl SqliteWriter {
 
         let mut connection = Connection::open(path).map_err(|_| StorageError::OpenFailed)?;
         let configuration = configure_writer(&connection)?;
-        migration::apply_all(&mut connection, options)?;
+        migration::apply_all(&mut connection, path, options)?;
         Ok(Self {
             connection,
             configuration,
@@ -141,7 +141,13 @@ impl SqliteReader {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
             .map_err(|_| StorageError::OpenFailed)?;
         let configuration = configure_reader(&connection)?;
-        migration::verify_existing(&connection)?;
+        let schema_version = migration::verify_existing(&connection)?;
+        if schema_version != migration::LATEST_SCHEMA_VERSION {
+            return Err(StorageError::DatabaseRequiresMigration {
+                database_version: schema_version,
+                supported_version: migration::LATEST_SCHEMA_VERSION,
+            });
+        }
         Ok(Self {
             connection,
             configuration,

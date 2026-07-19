@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod backup;
 mod connection;
 mod errors;
 mod migration;

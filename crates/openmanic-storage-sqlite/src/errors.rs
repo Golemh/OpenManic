@@ -51,6 +51,40 @@ pub enum StorageError {
     /// The caller supplied a store identity that does not match the existing database.
     #[error("SQLite store identity does not match the requested store")]
     StoreIdentityMismatch,
+    /// A reader encountered a database that requires a writer to apply known migrations first.
+    #[error(
+        "SQLite schema version {database_version} requires migration before this binary can read version {supported_version}"
+    )]
+    DatabaseRequiresMigration {
+        /// The highest schema version currently recorded by the database.
+        database_version: u32,
+        /// The newest schema version supported by this binary.
+        supported_version: u32,
+    },
+    /// No recoverable path could be reserved for a pre-migration backup.
+    #[error("could not reserve a retained SQLite pre-migration backup path")]
+    BackupPathUnavailable,
+    /// SQLite could not create the required online pre-migration backup.
+    #[error("could not create the required SQLite online pre-migration backup")]
+    BackupCreationFailed,
+    /// SQLite could not open a created backup for independent verification.
+    #[error("could not open the SQLite pre-migration backup for verification")]
+    BackupVerificationOpenFailed,
+    /// SQLite's quick check rejected the pre-migration backup.
+    #[error("SQLite quick check rejected the pre-migration backup")]
+    BackupQuickCheckFailed,
+    /// SQLite's foreign-key check rejected the pre-migration backup.
+    #[error("SQLite foreign-key check rejected the pre-migration backup")]
+    BackupForeignKeyCheckFailed,
+    /// A post-initial migration failed after its verified backup was retained and restored.
+    #[error("SQLite migration {version} failed; the retained pre-migration backup was restored")]
+    MigrationFailed {
+        /// The migration version that failed.
+        version: u32,
+    },
+    /// The backup API could not restore a retained recovery snapshot after migration failure.
+    #[error("SQLite migration failed and the retained pre-migration backup could not be restored")]
+    BackupRestoreFailed,
 }
 
 /// A connection setting whose failure prevents safe storage operation.
@@ -89,7 +123,7 @@ mod tests {
     use super::{ConnectionSetting, StorageError};
 
     #[test]
-    fn storage_errors_preserve_messages_and_clone_equality() {
+    fn established_storage_errors_preserve_messages_and_clone_equality() {
         let cases = [
             (
                 StorageError::InvalidOpenOption { field: "store_id" },
@@ -136,9 +170,57 @@ mod tests {
             ),
         ];
 
+        assert_error_messages(&cases);
+    }
+
+    #[test]
+    fn migration_safety_errors_preserve_messages_and_clone_equality() {
+        let cases = [
+            (
+                StorageError::DatabaseRequiresMigration {
+                    database_version: 1,
+                    supported_version: 2,
+                },
+                "SQLite schema version 1 requires migration before this binary can read version 2",
+            ),
+            (
+                StorageError::BackupPathUnavailable,
+                "could not reserve a retained SQLite pre-migration backup path",
+            ),
+            (
+                StorageError::BackupCreationFailed,
+                "could not create the required SQLite online pre-migration backup",
+            ),
+            (
+                StorageError::BackupVerificationOpenFailed,
+                "could not open the SQLite pre-migration backup for verification",
+            ),
+            (
+                StorageError::BackupQuickCheckFailed,
+                "SQLite quick check rejected the pre-migration backup",
+            ),
+            (
+                StorageError::BackupForeignKeyCheckFailed,
+                "SQLite foreign-key check rejected the pre-migration backup",
+            ),
+            (
+                StorageError::MigrationFailed { version: 2 },
+                "SQLite migration 2 failed; the retained pre-migration backup was restored",
+            ),
+            (
+                StorageError::BackupRestoreFailed,
+                "SQLite migration failed and the retained pre-migration backup could not be restored",
+            ),
+        ];
+
+        assert_error_messages(&cases);
+    }
+
+    fn assert_error_messages(cases: &[(StorageError, &str)]) {
         for (error, expected) in cases {
-            assert_eq!(error.to_string(), expected);
-            assert_eq!(error, error.clone());
+            assert_eq!(error.to_string(), *expected);
+            let cloned = error.clone();
+            assert_eq!(error, &cloned);
         }
     }
 }
