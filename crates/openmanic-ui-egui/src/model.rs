@@ -1,13 +1,18 @@
 //! UI-owned state for navigation, presentation states, and correlation-safe updates.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use openmanic_application::{
     AppEvent, ApplicationError, CommandId, DataRevision, EventEnvelope, JobId, JobState,
     MutationOutcome, MutationRejectionReason, ProjectionRequest, ProjectionSlot,
     ProjectionSlotState, SnapshotEnvelope, SnapshotRejection,
 };
-use openmanic_domain::HalfOpenInterval;
+use openmanic_domain::{ActivityState, ApplicationId, CategoryId, HalfOpenInterval};
+
+use crate::today::TodayAction;
 
 /// A primary destination in the OpenManic shell.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -87,6 +92,248 @@ impl RouteLocalState {
     #[must_use]
     pub const fn scroll_anchor(&self) -> Option<u32> {
         self.scroll_anchor
+    }
+}
+
+/// One category-oriented narrowing criterion for the Today dashboard.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum TodayCategoryFilter {
+    /// Retains activity associated with this stable category identity.
+    Category(CategoryId),
+    /// Retains activity whose application has no category assignment.
+    Uncategorized,
+}
+
+/// Identifies one independently removable Today narrowing criterion.
+///
+/// A criterion changes only the UI's projection context. It never mutates
+/// recorded activity, application assignments, or categories.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TodayNarrowingCriterion {
+    /// The shared range selected from the timeline.
+    TimelineSelection,
+    /// One application identity filter.
+    Application(ApplicationId),
+    /// One category or uncategorized filter.
+    Category(TodayCategoryFilter),
+    /// One activity-state filter.
+    ActivityState(ActivityState),
+}
+
+/// Shared immutable input for every Today dashboard widget in one frame.
+///
+/// The selected date is represented as an offset from the composition root's
+/// current local day. Resolving civil dates and time zones is deliberately an
+/// application-boundary concern; the UI never reads a clock or time-zone API.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TodayViewContext {
+    selected_day_offset: i32,
+    selected_range: Option<HalfOpenInterval>,
+    timeline_selection: Option<HalfOpenInterval>,
+    application_filter: BTreeSet<ApplicationId>,
+    category_filter: BTreeSet<TodayCategoryFilter>,
+    activity_state_filter: Vec<ActivityState>,
+    revision: u64,
+}
+
+impl TodayViewContext {
+    /// Returns the selected local-day offset relative to the supplied current day.
+    #[must_use]
+    pub const fn selected_day_offset(&self) -> i32 {
+        self.selected_day_offset
+    }
+
+    /// Returns the shared explicit range, when another controller supplied one.
+    #[must_use]
+    pub const fn selected_range(&self) -> Option<HalfOpenInterval> {
+        self.selected_range
+    }
+
+    /// Returns the selected timeline range, if any.
+    #[must_use]
+    pub const fn timeline_selection(&self) -> Option<HalfOpenInterval> {
+        self.timeline_selection
+    }
+
+    /// Returns the selected application identities in deterministic order.
+    #[must_use]
+    pub fn application_filter(&self) -> &BTreeSet<ApplicationId> {
+        &self.application_filter
+    }
+
+    /// Returns the selected categories in deterministic order.
+    #[must_use]
+    pub fn category_filter(&self) -> &BTreeSet<TodayCategoryFilter> {
+        &self.category_filter
+    }
+
+    /// Returns the selected activity states in controller insertion order.
+    #[must_use]
+    pub fn activity_state_filter(&self) -> &[ActivityState] {
+        &self.activity_state_filter
+    }
+
+    /// Returns the UI-local revision incremented when this projection context changes.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Returns whether no timeline selection or explicit filters currently narrow widgets.
+    #[must_use]
+    pub fn has_no_narrowing(&self) -> bool {
+        self.timeline_selection.is_none()
+            && self.application_filter.is_empty()
+            && self.category_filter.is_empty()
+            && self.activity_state_filter.is_empty()
+    }
+
+    /// Returns every active narrowing criterion in stable display order.
+    #[must_use]
+    pub fn active_narrowing_criteria(&self) -> Vec<TodayNarrowingCriterion> {
+        let mut criteria = Vec::with_capacity(
+            usize::from(self.timeline_selection.is_some())
+                + self.application_filter.len()
+                + self.category_filter.len()
+                + self.activity_state_filter.len(),
+        );
+        if self.timeline_selection.is_some() {
+            criteria.push(TodayNarrowingCriterion::TimelineSelection);
+        }
+        criteria.extend(
+            self.application_filter
+                .iter()
+                .copied()
+                .map(TodayNarrowingCriterion::Application),
+        );
+        criteria.extend(
+            self.category_filter
+                .iter()
+                .copied()
+                .map(TodayNarrowingCriterion::Category),
+        );
+        criteria.extend(
+            self.activity_state_filter
+                .iter()
+                .copied()
+                .map(TodayNarrowingCriterion::ActivityState),
+        );
+        criteria
+    }
+
+    pub(crate) fn set_selected_day_offset(&mut self, offset: i32) -> bool {
+        let normalized = offset.min(0);
+        if self.selected_day_offset == normalized {
+            return false;
+        }
+        self.selected_day_offset = normalized;
+        // A selection belongs to the previously selected day/range. Until an
+        // application-provided civil-date mapping exists, clearing it is the
+        // safe compatibility decision on every day change.
+        self.timeline_selection = None;
+        self.touch();
+        true
+    }
+
+    pub(crate) fn set_selected_range(&mut self, range: Option<HalfOpenInterval>) -> bool {
+        if self.selected_range == range {
+            return false;
+        }
+        self.selected_range = range;
+        self.touch();
+        true
+    }
+
+    pub(crate) fn set_timeline_selection(&mut self, selection: Option<HalfOpenInterval>) -> bool {
+        if self.timeline_selection == selection {
+            return false;
+        }
+        self.timeline_selection = selection;
+        self.touch();
+        true
+    }
+
+    pub(crate) fn add_application_filter(&mut self, application_id: ApplicationId) -> bool {
+        if !self.application_filter.insert(application_id) {
+            return false;
+        }
+        self.touch();
+        true
+    }
+
+    pub(crate) fn remove_application_filter(&mut self, application_id: ApplicationId) -> bool {
+        if !self.application_filter.remove(&application_id) {
+            return false;
+        }
+        self.touch();
+        true
+    }
+
+    pub(crate) fn add_category_filter(&mut self, filter: TodayCategoryFilter) -> bool {
+        if !self.category_filter.insert(filter) {
+            return false;
+        }
+        self.touch();
+        true
+    }
+
+    pub(crate) fn remove_category_filter(&mut self, filter: TodayCategoryFilter) -> bool {
+        if !self.category_filter.remove(&filter) {
+            return false;
+        }
+        self.touch();
+        true
+    }
+
+    pub(crate) fn add_activity_state_filter(&mut self, state: ActivityState) -> bool {
+        if self.activity_state_filter.contains(&state) {
+            return false;
+        }
+        self.activity_state_filter.push(state);
+        self.touch();
+        true
+    }
+
+    pub(crate) fn remove_activity_state_filter(&mut self, state: ActivityState) -> bool {
+        let Some(index) = self
+            .activity_state_filter
+            .iter()
+            .position(|item| *item == state)
+        else {
+            return false;
+        };
+        self.activity_state_filter.remove(index);
+        self.touch();
+        true
+    }
+
+    pub(crate) fn clear_narrowing(&mut self, criterion: TodayNarrowingCriterion) -> bool {
+        match criterion {
+            TodayNarrowingCriterion::TimelineSelection => self.set_timeline_selection(None),
+            TodayNarrowingCriterion::Application(application_id) => {
+                self.remove_application_filter(application_id)
+            }
+            TodayNarrowingCriterion::Category(filter) => self.remove_category_filter(filter),
+            TodayNarrowingCriterion::ActivityState(state) => {
+                self.remove_activity_state_filter(state)
+            }
+        }
+    }
+
+    pub(crate) fn clear_all_narrowing(&mut self) -> bool {
+        if self.has_no_narrowing() {
+            return false;
+        }
+        self.timeline_selection = None;
+        self.application_filter.clear();
+        self.category_filter.clear();
+        self.activity_state_filter.clear();
+        self.touch();
+        true
+    }
+
+    fn touch(&mut self) {
+        self.revision = self.revision.saturating_add(1);
     }
 }
 
@@ -284,6 +531,7 @@ struct SnapshotTarget<T> {
 pub struct UiModel<T> {
     route: Route,
     route_state: RouteStateStore,
+    today_view_context: TodayViewContext,
     data: PresentableData<T>,
     mutations: BTreeMap<CommandId, MutationStatus>,
     jobs: BTreeMap<JobId, JobState>,
@@ -296,6 +544,7 @@ impl<T> Default for UiModel<T> {
         Self {
             route: Route::Today,
             route_state: RouteStateStore::default(),
+            today_view_context: TodayViewContext::default(),
             data: PresentableData::InitialLoading,
             mutations: BTreeMap::new(),
             jobs: BTreeMap::new(),
@@ -316,6 +565,12 @@ impl<T> UiModel<T> {
     #[must_use]
     pub fn route_state(&self, route: Route) -> &RouteLocalState {
         self.route_state.get(route)
+    }
+
+    /// Returns the shared context consumed by all Today dashboard widgets.
+    #[must_use]
+    pub const fn today_view_context(&self) -> &TodayViewContext {
+        &self.today_view_context
     }
 
     /// Returns the presentation state for the shell's currently selected data target.
@@ -400,14 +655,25 @@ impl<T> UiModel<T> {
         match action {
             UiAction::Navigate(route) => self.route = route,
             UiAction::MoveRouteDate { route, days } => {
-                let next_offset = self
-                    .route_state(route)
-                    .date_offset_days
-                    .saturating_add(days);
-                self.route_state_mut(route).date_offset_days = next_offset;
+                if route == Route::Today {
+                    let next_offset = self
+                        .today_view_context
+                        .selected_day_offset()
+                        .saturating_add(days);
+                    self.set_today_day_offset(next_offset);
+                } else {
+                    let next_offset = self
+                        .route_state(route)
+                        .date_offset_days
+                        .saturating_add(days);
+                    self.route_state_mut(route).date_offset_days = next_offset;
+                }
             }
             UiAction::SetRouteRange { route, range } => {
                 self.route_state_mut(route).selected_range = range;
+                if route == Route::Today {
+                    let _ = self.today_view_context.set_selected_range(range);
+                }
             }
             UiAction::SetRouteFilter { route, filter } => {
                 self.route_state_mut(route).filter_text = filter;
@@ -415,6 +681,7 @@ impl<T> UiModel<T> {
             UiAction::SetRouteScrollAnchor { route, anchor } => {
                 self.route_state_mut(route).scroll_anchor = anchor;
             }
+            UiAction::Today(action) => self.reduce_today(action),
         }
     }
 
@@ -429,7 +696,10 @@ impl<T> UiModel<T> {
 
         let causation_command_id = event.causation_command_id();
         match event.into_payload() {
-            AppEvent::Mutation(outcome) => self.reconcile_mutation(causation_command_id, outcome),
+            AppEvent::Mutation(outcome)
+            | AppEvent::Tracking(openmanic_application::TrackingEvent::Mutation {
+                outcome, ..
+            }) => self.reconcile_mutation(causation_command_id, outcome),
             AppEvent::Job(job) => {
                 self.jobs.insert(job.job_id(), job.state().clone());
                 EventReception::Applied
@@ -466,6 +736,70 @@ impl<T> UiModel<T> {
 
     fn route_state_mut(&mut self, route: Route) -> &mut RouteLocalState {
         self.route_state.get_mut(route)
+    }
+
+    fn reduce_today(&mut self, action: TodayAction) {
+        match action {
+            TodayAction::PreviousDay => {
+                let previous = self
+                    .today_view_context
+                    .selected_day_offset()
+                    .saturating_sub(1);
+                self.set_today_day_offset(previous);
+            }
+            TodayAction::NextDay => {
+                let next = self
+                    .today_view_context
+                    .selected_day_offset()
+                    .saturating_add(1);
+                self.set_today_day_offset(next);
+            }
+            TodayAction::SelectDateOffset { day_offset } => self.set_today_day_offset(day_offset),
+            TodayAction::ReturnToToday => self.set_today_day_offset(0),
+            TodayAction::SetSharedRange { range } => {
+                if self.today_view_context.set_selected_range(range) {
+                    self.route_state_mut(Route::Today).selected_range = range;
+                }
+            }
+            TodayAction::SetTimelineSelection { selection } => {
+                let _ = self.today_view_context.set_timeline_selection(selection);
+            }
+            TodayAction::AddApplicationFilter { application_id } => {
+                let _ = self
+                    .today_view_context
+                    .add_application_filter(application_id);
+            }
+            TodayAction::RemoveApplicationFilter { application_id } => {
+                let _ = self
+                    .today_view_context
+                    .remove_application_filter(application_id);
+            }
+            TodayAction::AddCategoryFilter { filter } => {
+                let _ = self.today_view_context.add_category_filter(filter);
+            }
+            TodayAction::RemoveCategoryFilter { filter } => {
+                let _ = self.today_view_context.remove_category_filter(filter);
+            }
+            TodayAction::AddActivityStateFilter { state } => {
+                let _ = self.today_view_context.add_activity_state_filter(state);
+            }
+            TodayAction::RemoveActivityStateFilter { state } => {
+                let _ = self.today_view_context.remove_activity_state_filter(state);
+            }
+            TodayAction::ClearNarrowing { criterion } => {
+                let _ = self.today_view_context.clear_narrowing(criterion);
+            }
+            TodayAction::ClearAllNarrowing => {
+                let _ = self.today_view_context.clear_all_narrowing();
+            }
+        }
+    }
+
+    fn set_today_day_offset(&mut self, offset: i32) {
+        if self.today_view_context.set_selected_day_offset(offset) {
+            self.route_state_mut(Route::Today).date_offset_days =
+                self.today_view_context.selected_day_offset();
+        }
     }
 }
 
@@ -533,6 +867,8 @@ pub enum UiAction {
         /// A logical position supplied by the route controller, if known.
         anchor: Option<u32>,
     },
+    /// Applies one Today controller action to shared dashboard state.
+    Today(TodayAction),
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ mod reducer;
 mod repaint;
 mod shell;
 pub mod timeline;
+mod today;
 
 pub use app::OpenManicApp;
 pub use controller::{
@@ -27,10 +28,16 @@ pub use controller::{
 };
 pub use model::{
     DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
-    SnapshotReception, UiAction, UiModel, UserFacingError,
+    SnapshotReception, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext, UiAction,
+    UiModel, UserFacingError,
 };
 pub use timeline::{
     AdaptiveTickLayout, BandSegmentGeometry, PixelRange, ScheduleBracketGeometry, TickGeneration,
     TickLayoutError, TimelineHit, TimelineRangeGeometry, TimelineTick, TimelineTransform,
     TimelineTransformError, band_geometry, hit_test,
+};
+pub use today::{
+    TodayAction, TodayController, TodayTrackingRequest, TodayWidgetBinding, TodayWidgetBindings,
+    TodayWidgetInstance, TodayWidgetInstanceId, TodayWidgetKind, TodayWidgetRegistry,
+    TrackingControlAcknowledgement, TrackingControlAction,
 };
