@@ -149,9 +149,26 @@ pub enum FocusSessionIdKind {}
 /// Stable opaque identifier for one focus session.
 pub type FocusSessionId = OpaqueId<FocusSessionIdKind>;
 
+/// Marker for a stable repeating-schedule series identifier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ScheduleSeriesIdKind {}
+
+/// Stable opaque identifier for one recurring schedule lineage.
+pub type ScheduleSeriesId = OpaqueId<ScheduleSeriesIdKind>;
+
+/// Marker for a stable one-time schedule identifier.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum OneTimeScheduleIdKind {}
+
+/// Stable opaque identifier for one one-time schedule item.
+pub type OneTimeScheduleId = OpaqueId<OneTimeScheduleIdKind>;
+
 #[cfg(test)]
 mod tests {
-    use super::{ApplicationId, CategoryId, FocusSessionId, OpaqueIdParseError, TrackerRunId};
+    use super::{
+        ApplicationId, CategoryId, FocusSessionId, OneTimeScheduleId, OpaqueIdParseError,
+        ScheduleSeriesId, TrackerRunId,
+    };
 
     #[test]
     fn stable_ids_round_trip_exact_bytes_with_lowercase_encoding() {
@@ -159,6 +176,8 @@ mod tests {
         let application = ApplicationId::from_bytes([0xf0; 16]);
         let tracker_run = TrackerRunId::from_bytes([0x12; 16]);
         let focus_session = FocusSessionId::from_bytes([0x21; 16]);
+        let schedule_series = ScheduleSeriesId::from_bytes([0x32; 16]);
+        let one_time_schedule = OneTimeScheduleId::from_bytes([0x23; 16]);
 
         assert_eq!(
             category.to_lowercase_hex(),
@@ -170,6 +189,8 @@ mod tests {
         );
         assert_eq!(tracker_run.as_bytes(), [0x12; 16]);
         assert_eq!(focus_session.as_bytes(), [0x21; 16]);
+        assert_eq!(schedule_series.as_bytes(), [0x32; 16]);
+        assert_eq!(one_time_schedule.as_bytes(), [0x23; 16]);
         assert_eq!(
             CategoryId::parse_lowercase_hex(&category.to_lowercase_hex()),
             Ok(category)

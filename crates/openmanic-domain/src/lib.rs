@@ -25,7 +25,8 @@ pub use documents::{LayoutDocument, SavedViewDocument, SettingsDocument, ThemeSe
 pub use focus::{FocusSession, FocusSessionError, FocusSessionState};
 pub use ids::{
     ApplicationId, ApplicationIdKind, CategoryId, CategoryIdKind, FocusSessionId,
-    FocusSessionIdKind, OpaqueId, OpaqueIdParseError, TrackerRunId, TrackerRunIdKind,
+    FocusSessionIdKind, OneTimeScheduleId, OneTimeScheduleIdKind, OpaqueId, OpaqueIdParseError,
+    ScheduleSeriesId, ScheduleSeriesIdKind, TrackerRunId, TrackerRunIdKind,
 };
 pub use schedule::{ScheduleEditScope, ScheduleRule, ScheduleValidationError};
 pub use time::{HalfOpenInterval, HalfOpenIntervalError, UtcMicros, UtcMicrosArithmeticError};
