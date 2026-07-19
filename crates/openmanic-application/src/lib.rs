@@ -12,6 +12,7 @@ mod events;
 mod ids;
 mod ports;
 mod projection;
+mod runtime;
 
 pub use commands::{CommandEnvelope, CommandReceipt};
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
@@ -25,6 +26,14 @@ pub use ids::{
 };
 pub use ports::{CommandPort, ProjectionPort};
 pub use projection::{ProjectionRequest, ProjectionSlotState, SnapshotEnvelope, SnapshotRejection};
+pub use runtime::{
+    CancellationRequest, CancellationSource, CancellationToken, LaneCapacities,
+    LaneConfigurationError, LaneReceive, LaneRetentionReason, LaneSubmit, LatestMailbox,
+    LatestMailboxReceiver, MailboxPublish, MailboxReceive, RuntimeLaneReceiver, RuntimeLanes,
+    RuntimeSupervisor, RuntimeWorker, ShutdownAdvance, ShutdownCoordinator, ShutdownError,
+    ShutdownPhase, ShutdownStep, ThreadRoot, WorkLane, WorkerEscalation, WorkerFailure,
+    WorkerHealth, WorkerHealthState, bounded_runtime_lanes, latest_mailbox,
+};
 
 #[cfg(test)]
 mod tests {
