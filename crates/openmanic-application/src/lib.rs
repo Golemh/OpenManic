@@ -16,6 +16,7 @@ mod ports;
 mod projection;
 mod runtime;
 mod schedule;
+mod schedule_time;
 mod timeline_projection;
 mod tracking;
 
@@ -57,6 +58,10 @@ pub use runtime::{
 pub use schedule::{
     ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
     ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
+};
+pub use schedule_time::{
+    ResolvedScheduleBoundary, SCHEDULE_CIVIL_EPOCH, ScheduleBoundaryResolution, ScheduleTimeError,
+    resolve_schedule_boundary,
 };
 pub use timeline_projection::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,

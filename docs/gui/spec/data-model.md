@@ -462,7 +462,7 @@ An end clock earlier than the start maps to the following day. Equal start/end i
 | --- | --- | --- |
 | `id` | INTEGER | Primary key |
 | `series_id` | INTEGER | Required FK |
-| `effective_start_date` | INTEGER | Local date encoded as days from civil epoch |
+| `effective_start_date` | INTEGER | Local date encoded as days from the Unix civil epoch (1970-01-01) |
 | `effective_end_date` | INTEGER NULL | Inclusive local date, absent means open future |
 | `weekday_mask` | INTEGER | Nonzero 7-bit mask |
 | `start_second_of_day` | INTEGER | `0..86399` |
