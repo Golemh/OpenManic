@@ -5,8 +5,7 @@
 //! after callback work has completed. Publishing is one nonblocking attempt per evidence value;
 //! a full or closed sink records explicit loss and requires fresh reconciliation.
 
-use openmanic_application::TrackingEvidence;
-use openmanic_domain::{ApplicationId, UtcMicros};
+use openmanic_application::{ApplicationId, TrackingEvidence, UtcMicros};
 
 use crate::{AdapterAvailability, AvailabilityTransition, PlatformCapabilities};
 
@@ -263,7 +262,7 @@ impl PlatformEventNormalizer {
         self.last_source_order = Some(observation.source_order());
 
         let availability_transition = self.apply_availability(observation.kind());
-        if self.is_unchanged_availability(observation.kind(), availability_transition) {
+        if Self::is_unchanged_availability(observation.kind(), availability_transition) {
             return self.result(
                 AdapterPublishStatus::Ignored {
                     reason: ObservationIgnoredReason::AvailabilityUnchanged,
@@ -280,7 +279,8 @@ impl PlatformEventNormalizer {
             );
         }
 
-        let evidence_count = match self.flush_evidence_loss(observation.observed_at_utc(), sink) {
+        let mut evidence_count = match self.flush_evidence_loss(observation.observed_at_utc(), sink)
+        {
             LossFlush::NotPending => 0,
             LossFlush::Published => 1,
             LossFlush::Backpressured => {
@@ -312,7 +312,7 @@ impl PlatformEventNormalizer {
                 );
             }
         };
-        match self.publish(evidence, sink) {
+        match Self::publish(evidence, sink) {
             PublicationAttempt::Accepted => {
                 self.last_published_kind = Some(observation.kind());
                 evidence_count += 1;
@@ -329,10 +329,6 @@ impl PlatformEventNormalizer {
                 self.mark_evidence_loss();
                 self.result(AdapterPublishStatus::SinkClosed, availability_transition)
             }
-            PublicationAttempt::SequenceExhausted => self.result(
-                AdapterPublishStatus::SequenceExhausted,
-                availability_transition,
-            ),
         }
     }
 
@@ -361,7 +357,6 @@ impl PlatformEventNormalizer {
     }
 
     fn is_unchanged_availability(
-        &self,
         kind: AdapterObservationKind,
         transition: Option<AvailabilityTransition>,
     ) -> bool {
@@ -515,26 +510,24 @@ impl PlatformEventNormalizer {
     fn next_evidence(
         &mut self,
         create: impl FnOnce(u64) -> TrackingEvidence,
-    ) -> Result<TrackingEvidence, ()> {
+    ) -> Result<TrackingEvidence, SequenceAllocationError> {
         let Some(sequence) = self.next_sequence else {
-            return Err(());
+            return Err(SequenceAllocationError::Exhausted);
         };
         self.next_sequence = sequence.checked_add(1);
         Ok(create(sequence))
     }
 
-    fn from_next_evidence(result: Result<TrackingEvidence, ()>) -> EvidenceCreation {
+    fn from_next_evidence(
+        result: Result<TrackingEvidence, SequenceAllocationError>,
+    ) -> EvidenceCreation {
         match result {
             Ok(evidence) => EvidenceCreation::Evidence(evidence),
-            Err(()) => EvidenceCreation::SequenceExhausted,
+            Err(SequenceAllocationError::Exhausted) => EvidenceCreation::SequenceExhausted,
         }
     }
 
-    fn publish(
-        &mut self,
-        evidence: TrackingEvidence,
-        sink: &dyn TrackingEvidenceSink,
-    ) -> PublicationAttempt {
+    fn publish(evidence: TrackingEvidence, sink: &dyn TrackingEvidenceSink) -> PublicationAttempt {
         match sink.try_publish(evidence) {
             EvidencePublishResult::Accepted => PublicationAttempt::Accepted,
             EvidencePublishResult::Full => PublicationAttempt::Backpressured,
@@ -593,10 +586,14 @@ enum EvidenceCreation {
     SequenceExhausted,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SequenceAllocationError {
+    Exhausted,
+}
+
 #[cfg(test)]
 mod tests {
-    use openmanic_application::TrackingEvidence;
-    use openmanic_domain::{ApplicationId, UtcMicros};
+    use openmanic_application::{ApplicationId, TrackingEvidence, UtcMicros};
 
     use crate::{
         AdapterAvailability, AdapterObservation, AdapterObservationKind, AdapterPublishStatus,
@@ -639,18 +636,27 @@ mod tests {
 
     impl TrackingEvidenceSink for RecordingSink {
         fn try_publish(&self, evidence: TrackingEvidence) -> EvidencePublishResult {
-            match self.evidence.try_lock() {
-                Ok(mut stored) => {
-                    if stored.len() == self.capacity.load(std::sync::atomic::Ordering::Relaxed) {
-                        EvidencePublishResult::Full
-                    } else {
-                        stored.push(evidence);
-                        EvidencePublishResult::Accepted
-                    }
-                }
-                Err(std::sync::TryLockError::WouldBlock) => EvidencePublishResult::Full,
-                Err(std::sync::TryLockError::Poisoned(_)) => EvidencePublishResult::Closed,
+            let mut stored = match self.evidence.try_lock() {
+                Ok(stored) => stored,
+                Err(std::sync::TryLockError::WouldBlock) => return EvidencePublishResult::Full,
+                Err(std::sync::TryLockError::Poisoned(_)) => return EvidencePublishResult::Closed,
+            };
+            self.try_store(&mut stored, evidence)
+        }
+    }
+
+    impl RecordingSink {
+        fn try_store(
+            &self,
+            stored: &mut Vec<TrackingEvidence>,
+            evidence: TrackingEvidence,
+        ) -> EvidencePublishResult {
+            let capacity = self.capacity.load(std::sync::atomic::Ordering::Relaxed);
+            if stored.len() >= capacity {
+                return EvidencePublishResult::Full;
             }
+            stored.push(evidence);
+            EvidencePublishResult::Accepted
         }
     }
 
@@ -689,7 +695,7 @@ mod tests {
                 sequence: 4,
                 application_id,
                 ..
-            } if application_id == ApplicationId::new(8)
+            } if application_id == app_id(8)
         ));
     }
 
@@ -703,7 +709,7 @@ mod tests {
         assert_eq!(
             starting
                 .availability_transition()
-                .map(|transition| transition.previous()),
+                .map(crate::AvailabilityTransition::previous),
             Some(None)
         );
         assert_eq!(
@@ -724,7 +730,7 @@ mod tests {
         assert_eq!(
             unavailable
                 .availability_transition()
-                .map(|transition| transition.current()),
+                .map(crate::AvailabilityTransition::current),
             Some(AdapterAvailability::TemporarilyUnavailable)
         );
         assert!(matches!(
@@ -738,11 +744,11 @@ mod tests {
         let mut normalizer = PlatformEventNormalizer::new();
         let sink = RecordingSink::with_capacity(4);
 
-        normalizer.normalize_and_publish(foreground(10, 10, 1), &sink);
+        let _ = normalizer.normalize_and_publish(foreground(10, 10, 1), &sink);
         let duplicate = normalizer.normalize_and_publish(foreground(11, 20, 1), &sink);
         let reordered = normalizer.normalize_and_publish(foreground(9, 30, 2), &sink);
-        normalizer.normalize_and_publish(foreground(12, 40, 2), &sink);
-        normalizer.normalize_and_publish(foreground(13, 50, 1), &sink);
+        let _ = normalizer.normalize_and_publish(foreground(12, 40, 2), &sink);
+        let _ = normalizer.normalize_and_publish(foreground(13, 50, 1), &sink);
 
         assert!(matches!(
             duplicate.status(),
@@ -758,17 +764,17 @@ mod tests {
                 TrackingEvidence::Foreground {
                     sequence: 1,
                     observed_at_utc: UtcMicros::new(10),
-                    application_id: ApplicationId::new(1),
+                    application_id: app_id(1),
                 },
                 TrackingEvidence::Foreground {
                     sequence: 2,
                     observed_at_utc: UtcMicros::new(40),
-                    application_id: ApplicationId::new(2),
+                    application_id: app_id(2),
                 },
                 TrackingEvidence::Foreground {
                     sequence: 3,
                     observed_at_utc: UtcMicros::new(50),
-                    application_id: ApplicationId::new(1),
+                    application_id: app_id(1),
                 },
             ]
         );
@@ -777,15 +783,21 @@ mod tests {
     fn foreground(
         source_order: u64,
         observed_at_utc: i64,
-        application_id: u64,
+        application_key: u64,
     ) -> AdapterObservation {
         AdapterObservation::new(
             source_order,
             UtcMicros::new(observed_at_utc),
             AdapterObservationKind::Foreground {
-                application_id: ApplicationId::new(application_id),
+                application_id: app_id(application_key),
             },
         )
+    }
+
+    fn app_id(value: u64) -> ApplicationId {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&value.to_be_bytes());
+        ApplicationId::from_bytes(bytes)
     }
 
     fn availability(

@@ -182,12 +182,11 @@ impl TrackingEvidenceSink for FakeEvidenceSink {
 
 #[cfg(test)]
 mod tests {
-    use openmanic_application::TrackingEvidence;
-    use openmanic_domain::{ApplicationId, UtcMicros};
+    use openmanic_application::{ApplicationId, TrackingEvidence, UtcMicros};
 
     use crate::{
         AdapterObservation, AdapterObservationKind, AdapterPublishStatus, FakeEvidenceSink,
-        FakePlatformAdapter, PlatformActivityAdapter, PlatformCapabilities,
+        FakePlatformAdapter, PlatformCapabilities,
     };
 
     #[test]
@@ -209,7 +208,7 @@ mod tests {
             Ok(vec![TrackingEvidence::Foreground {
                 sequence: 1,
                 observed_at_utc: UtcMicros::new(10),
-                application_id: ApplicationId::new(3),
+                application_id: app_id(3),
             }])
         );
     }
@@ -240,14 +239,20 @@ mod tests {
     fn foreground(
         source_order: u64,
         observed_at_utc: i64,
-        application_id: u64,
+        application_key: u64,
     ) -> AdapterObservation {
         AdapterObservation::new(
             source_order,
             UtcMicros::new(observed_at_utc),
             AdapterObservationKind::Foreground {
-                application_id: ApplicationId::new(application_id),
+                application_id: app_id(application_key),
             },
         )
+    }
+
+    fn app_id(value: u64) -> ApplicationId {
+        let mut bytes = [0; 16];
+        bytes[8..].copy_from_slice(&value.to_be_bytes());
+        ApplicationId::from_bytes(bytes)
     }
 }
