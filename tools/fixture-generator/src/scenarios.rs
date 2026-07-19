@@ -386,61 +386,54 @@ fn rapid_switches(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
     }
 }
 fn schedules(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
-    let first_start = clock.utc_micros();
-    let adjacent_end = after_seconds(first_start, 30 * 60);
-    let overnight_end = after_seconds(adjacent_end, 2 * 60 * 60);
-    let dst_start = after_seconds(overnight_end, 60 * 60);
-    let dst_end = after_seconds(dst_start, 60 * 60);
-    let exception_end = after_seconds(dst_end, 45 * 60);
     fixture.schedules = vec![
         schedule(
             0,
-            first_start,
-            adjacent_end,
+            UtcMicros::new(1_770_022_800_000_000),
+            UtcMicros::new(1_770_024_600_000_000),
             ScheduleMarker::Adjacent,
-            "Fixture/Standard",
-            "2026-02-02T09:00:00+00:00",
-            "2026-02-02T09:30:00+00:00",
+            "UTC",
+            "2026-02-02T09:00:00Z",
+            "2026-02-02T09:30:00Z",
         ),
         schedule(
             1,
-            adjacent_end,
-            overnight_end,
+            UtcMicros::new(1_770_024_600_000_000),
+            UtcMicros::new(1_770_031_800_000_000),
             ScheduleMarker::Adjacent,
-            "Fixture/Standard",
-            "2026-02-02T09:30:00+00:00",
-            "2026-02-02T11:30:00+00:00",
+            "UTC",
+            "2026-02-02T09:30:00Z",
+            "2026-02-02T11:30:00Z",
         ),
         schedule(
             2,
-            adjacent_end,
-            overnight_end,
+            UtcMicros::new(1_770_075_000_000_000),
+            UtcMicros::new(1_770_082_200_000_000),
             ScheduleMarker::Overnight,
-            "Fixture/Standard",
-            "2026-02-02T23:30:00+00:00",
-            "2026-02-03T01:30:00+00:00",
+            "UTC",
+            "2026-02-02T23:30:00Z",
+            "2026-02-03T01:30:00Z",
         ),
         schedule(
             3,
-            dst_start,
-            dst_end,
+            UtcMicros::new(1_772_951_400_000_000),
+            UtcMicros::new(1_772_955_000_000_000),
             ScheduleMarker::DstBoundary,
-            "Fixture/Example-DST",
+            "America/New_York",
             "2026-03-08T01:30:00-05:00",
             "2026-03-08T03:30:00-04:00",
         ),
         schedule(
             4,
-            dst_end,
-            exception_end,
+            UtcMicros::new(1_773_133_200_000_000),
+            UtcMicros::new(1_773_135_900_000_000),
             ScheduleMarker::RecurrenceException,
-            "Fixture/Standard",
-            "2026-03-10T09:00:00+00:00",
-            "2026-03-10T09:45:00+00:00",
+            "UTC",
+            "2026-03-10T09:00:00Z",
+            "2026-03-10T09:45:00Z",
         ),
     ];
-    clock.set_utc_micros(exception_end);
-    clock.advance_monotonic_ticks(5 * 60 * 60 + 15 * 60);
+    clock.set_utc_micros(UtcMicros::new(1_773_135_900_000_000));
 }
 fn overlays(fixture: &mut ScenarioFixture, clock: &mut ManualClock) {
     let start = clock.utc_micros();
@@ -679,6 +672,11 @@ mod tests {
             .filter(|item| item.marker == ScheduleMarker::Adjacent)
             .collect::<Vec<_>>();
         assert_eq!(adjacent.len(), 2);
+        assert_eq!(adjacent[0].start.get(), 1_770_022_800_000_000);
+        assert_eq!(adjacent[0].end.get(), 1_770_024_600_000_000);
+        assert_eq!(adjacent[0].local_start, "2026-02-02T09:00:00Z");
+        assert_eq!(adjacent[1].end.get(), 1_770_031_800_000_000);
+        assert_eq!(adjacent[1].local_end, "2026-02-02T11:30:00Z");
         assert_eq!(adjacent[0].end, adjacent[1].start);
         let overnight = schedule
             .schedules
@@ -689,17 +687,50 @@ mod tests {
             Some(true)
         );
         assert_eq!(
+            overnight.map(|item| item.start.get()),
+            Some(1_770_075_000_000_000)
+        );
+        assert_eq!(
+            overnight.map(|item| item.end.get()),
+            Some(1_770_082_200_000_000)
+        );
+        assert_eq!(
             overnight.map(|item| item.local_end.starts_with("2026-02-03")),
             Some(true)
         );
+        let exception = schedule
+            .schedules
+            .iter()
+            .find(|item| item.marker == ScheduleMarker::RecurrenceException);
+        assert_eq!(
+            exception.map(|item| item.start.get()),
+            Some(1_773_133_200_000_000)
+        );
+        assert_eq!(
+            exception.map(|item| item.end.get()),
+            Some(1_773_135_900_000_000)
+        );
+        assert_eq!(
+            exception.map(|item| item.local_end.as_str()),
+            Some("2026-03-10T09:45:00Z")
+        );
+    }
+    #[test]
+    fn dst_schedule_evidence_uses_matching_utc_and_real_zone() {
+        let schedule = Scenario::ScheduleDstOvernight.generate(7);
         let dst = schedule
             .schedules
             .iter()
             .find(|item| item.marker == ScheduleMarker::DstBoundary);
         assert_eq!(
             dst.map(|item| item.zone_name.as_str()),
-            Some("Fixture/Example-DST")
+            Some("America/New_York")
         );
+        assert_eq!(
+            dst.map(|item| item.start.get()),
+            Some(1_772_951_400_000_000)
+        );
+        assert_eq!(dst.map(|item| item.end.get()), Some(1_772_955_000_000_000));
         assert_eq!(
             dst.map(|item| item.end.get() - item.start.get()),
             Some(60 * 60 * MICROSECONDS_PER_SECOND_I64)
@@ -712,11 +743,13 @@ mod tests {
             dst.map(|item| item.local_end.as_str()),
             Some("2026-03-08T03:30:00-04:00")
         );
-        assert!(
-            schedule
-                .schedules
-                .iter()
-                .any(|item| item.marker == ScheduleMarker::RecurrenceException)
+        assert_eq!(
+            schedule.metadata.generated_at_utc_micros.get(),
+            1_773_135_900_000_000
+        );
+        assert_eq!(
+            schedule.metadata.generated_at_monotonic_ticks,
+            MonotonicTicks::new(0)
         );
     }
     #[test]
