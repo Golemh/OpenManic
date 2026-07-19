@@ -18,6 +18,7 @@ openmanic-domain = { path = "crates/openmanic-domain" }
 openmanic-platform = { path = "crates/openmanic-platform", default-features = false }
 openmanic-storage-sqlite = { path = "crates/openmanic-storage-sqlite" }
 openmanic-ui-egui = { path = "crates/openmanic-ui-egui", default-features = false }
+rusqlite = { version = "=0.40.1", default-features = false, features = ["bundled"] }
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
