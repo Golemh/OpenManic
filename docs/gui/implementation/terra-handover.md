@@ -7,6 +7,17 @@
 - The implementation ledger at `docs/gui/implementation/task-ledger.md` is the ownership and integration record.
 - The canonical next-work authority is `docs/gui/spec/implementation-plan.md`.
 
+## User-directed execution cadence
+
+Prioritize implementation throughput over per-task ceremony.
+
+- Batch adjacent plan rows that share a crate/layer and have no unresolved dependency; keep the plan's ordering and product requirements intact.
+- Use at most three implementation agents at once, normally one each for independent domain/application-storage, platform, and UI streams.
+- Keep a small stable set of worktrees for a batch. Do not create a new worktree, ledger commit, verifier, or full review for every plan row.
+- Run only focused compile/tests needed to unblock an author while work is in progress. Run one consolidated `cargo xtask quality` and one targeted read-only review at the end of a phase/gate.
+- Windows-only/manual evidence belongs to the applicable phase gate. Do not turn it into repetitive task-level checks.
+- Update the ledger at the start/end of a batch or phase, with the current integration SHA and any real limitation. Preserve its ownership record, but keep entries concise.
+
 ## Current state
 
 Phase 0 and Phase 1 are accepted. Phase 2 component tasks OM-200 through OM-296 are integrated, including the runtime, storage, Windows adapters, timeline projection/interaction/rendering, Today controller, and summary presentation models.

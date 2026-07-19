@@ -105,7 +105,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 - No two active writing tasks may own the same file or directory.
 - Root manifests, lockfiles, public contracts, migrations, dependency policy, packaging, and specifications are primary-owned unless a task explicitly transfers them.
 - Authors do not merge, rebase, push, change branches, or edit outside their allowlist.
-- High-risk changes receive an independent read-only verifier before primary integration.
+- The normal cadence is batch-level: authors run only focused unblock checks while implementing; one consolidated quality run and targeted read-only review occur at the applicable phase/gate. Escalate to an earlier review only for a concrete failure, conflict, or newly discovered high-risk boundary.
 - The primary records author evidence, verifier findings, and the final integration decision here.
 
 ## Task record template
