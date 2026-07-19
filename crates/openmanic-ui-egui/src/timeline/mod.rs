@@ -5,6 +5,8 @@
 
 pub mod geometry;
 pub mod hit_test;
+pub mod interaction;
+pub mod paint;
 pub mod ticks;
 
 pub use geometry::{
@@ -12,4 +14,11 @@ pub use geometry::{
     TimelineTransform, TimelineTransformError, band_geometry,
 };
 pub use hit_test::{TimelineHit, hit_test};
+pub use interaction::{
+    TimelineGesture, TimelineGestureEvent, TimelineInteraction, TimelineInteractionResponse,
+};
+pub use paint::{
+    ActivityPaintBand, PaintBand, PaintPrimitive, ScheduleOverlayGeometry, TimelinePaintPlan,
+    prepare_schedule_overlays,
+};
 pub use ticks::{AdaptiveTickLayout, TickGeneration, TickLayoutError, TimelineTick};
