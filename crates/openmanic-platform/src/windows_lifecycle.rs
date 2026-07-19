@@ -217,10 +217,21 @@ impl LifecycleObservation {
 pub(crate) struct LifecycleNormalization {
     observation: Option<LifecycleObservation>,
     idle_boundary: Option<IdleBoundary>,
-    checkpoint_requested: bool,
-    final_flush_permitted: bool,
-    foreground_reconciliation_required: bool,
-    time_base_rebaseline_required: bool,
+    follow_up: LifecycleFollowUp,
+}
+
+/// The one bounded follow-up action selected by a lifecycle transition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LifecycleFollowUp {
+    /// The transition needs no asynchronous follow-up.
+    #[default]
+    None,
+    /// Queue a high-priority checkpoint without delaying `WM_QUERYENDSESSION`.
+    HighPriorityCheckpoint,
+    /// Permit only the bounded final flush after `WM_ENDSESSION(TRUE)`.
+    BoundedFinalFlush,
+    /// Obtain fresh foreground evidence and sample time bases again before active attribution.
+    ReconcileForegroundAndRebaselineTime,
 }
 
 impl LifecycleNormalization {
@@ -238,26 +249,26 @@ impl LifecycleNormalization {
 
     /// Returns whether a high-priority checkpoint should be queued without delaying the message.
     #[must_use]
-    pub(crate) const fn checkpoint_requested(self) -> bool {
-        self.checkpoint_requested
+    pub(crate) fn checkpoint_requested(self) -> bool {
+        self.follow_up == LifecycleFollowUp::HighPriorityCheckpoint
     }
 
     /// Returns whether the caller may attempt only its bounded final flush path.
     #[must_use]
-    pub(crate) const fn final_flush_permitted(self) -> bool {
-        self.final_flush_permitted
+    pub(crate) fn final_flush_permitted(self) -> bool {
+        self.follow_up == LifecycleFollowUp::BoundedFinalFlush
     }
 
     /// Returns whether a fresh foreground observation is required before active attribution.
     #[must_use]
-    pub(crate) const fn foreground_reconciliation_required(self) -> bool {
-        self.foreground_reconciliation_required
+    pub(crate) fn foreground_reconciliation_required(self) -> bool {
+        self.follow_up == LifecycleFollowUp::ReconcileForegroundAndRebaselineTime
     }
 
     /// Returns whether wall/monotonic bases must be sampled again before trusting them.
     #[must_use]
-    pub(crate) const fn time_base_rebaseline_required(self) -> bool {
-        self.time_base_rebaseline_required
+    pub(crate) fn time_base_rebaseline_required(self) -> bool {
+        self.follow_up == LifecycleFollowUp::ReconcileForegroundAndRebaselineTime
     }
 
     fn adapter(observed_at_utc: UtcMicros, kind: AdapterObservationKind) -> Self {
@@ -272,16 +283,14 @@ impl LifecycleNormalization {
 
     fn clock_discontinuity(observed_at_utc: UtcMicros) -> Self {
         Self {
-            foreground_reconciliation_required: true,
-            time_base_rebaseline_required: true,
+            follow_up: LifecycleFollowUp::ReconcileForegroundAndRebaselineTime,
             ..Self::adapter(observed_at_utc, AdapterObservationKind::ClockDiscontinuity)
         }
     }
 
     fn requires_reconciliation_and_rebaseline() -> Self {
         Self {
-            foreground_reconciliation_required: true,
-            time_base_rebaseline_required: true,
+            follow_up: LifecycleFollowUp::ReconcileForegroundAndRebaselineTime,
             ..Self::default()
         }
     }
@@ -457,8 +466,7 @@ impl WindowsLifecycleNormalizer {
                 self.idle.reset();
                 self.time_base = None;
                 LifecycleNormalization {
-                    foreground_reconciliation_required: true,
-                    time_base_rebaseline_required: true,
+                    follow_up: LifecycleFollowUp::ReconcileForegroundAndRebaselineTime,
                     ..LifecycleNormalization::adapter(
                         observed_at_utc,
                         AdapterObservationKind::SystemSuspended,
@@ -485,8 +493,7 @@ impl WindowsLifecycleNormalizer {
             self.end_session = EndSessionState::None;
             self.idle.reset();
             return LifecycleNormalization {
-                foreground_reconciliation_required: true,
-                time_base_rebaseline_required: true,
+                follow_up: LifecycleFollowUp::ReconcileForegroundAndRebaselineTime,
                 ..LifecycleNormalization::adapter(
                     current.observed_at_utc(),
                     AdapterObservationKind::SystemSuspended,
@@ -507,7 +514,7 @@ impl WindowsLifecycleNormalizer {
         if matches!(self.end_session, EndSessionState::None) {
             self.end_session = EndSessionState::Proposed { observed_at_utc };
             return LifecycleNormalization {
-                checkpoint_requested: true,
+                follow_up: LifecycleFollowUp::HighPriorityCheckpoint,
                 ..LifecycleNormalization::default()
             };
         }
@@ -526,7 +533,7 @@ impl WindowsLifecycleNormalizer {
         self.end_session = EndSessionState::Confirmed { observed_at_utc };
         self.idle.reset();
         LifecycleNormalization {
-            final_flush_permitted: true,
+            follow_up: LifecycleFollowUp::BoundedFinalFlush,
             ..LifecycleNormalization::default()
         }
     }
@@ -546,8 +553,7 @@ impl WindowsLifecycleNormalizer {
                 shutdown_at_utc,
                 startup_at_utc,
             }),
-            foreground_reconciliation_required: true,
-            time_base_rebaseline_required: true,
+            follow_up: LifecycleFollowUp::ReconcileForegroundAndRebaselineTime,
             ..LifecycleNormalization::default()
         }
     }
@@ -651,37 +657,34 @@ impl EndSessionState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TimeBaseComparison {
-    wall_elapsed_us: Option<i64>,
-    monotonic_elapsed_us: Option<u64>,
-    unbiased_elapsed_us: Option<u64>,
+    wall: Option<i64>,
+    monotonic: Option<u64>,
+    unbiased: Option<u64>,
 }
 
 impl TimeBaseComparison {
     fn between(previous: WindowsTimeBaseSample, current: WindowsTimeBaseSample) -> Self {
         Self {
-            wall_elapsed_us: current
+            wall: current
                 .observed_at_utc
                 .checked_difference(previous.observed_at_utc)
                 .ok(),
-            monotonic_elapsed_us: current.monotonic_us.checked_sub(previous.monotonic_us),
-            unbiased_elapsed_us: current
+            monotonic: current.monotonic_us.checked_sub(previous.monotonic_us),
+            unbiased: current
                 .unbiased_interrupt_us
                 .checked_sub(previous.unbiased_interrupt_us),
         }
     }
 
     fn indicates_missed_low_power(self) -> bool {
-        let (Some(monotonic), Some(unbiased)) =
-            (self.monotonic_elapsed_us, self.unbiased_elapsed_us)
-        else {
+        let (Some(monotonic), Some(unbiased)) = (self.monotonic, self.unbiased) else {
             return false;
         };
         monotonic.saturating_sub(unbiased) > TIME_BASE_TOLERANCE_US
     }
 
     fn indicates_clock_discontinuity(self) -> bool {
-        let (Some(wall), Some(monotonic)) = (self.wall_elapsed_us, self.monotonic_elapsed_us)
-        else {
+        let (Some(wall), Some(monotonic)) = (self.wall, self.monotonic) else {
             return true;
         };
         wall < 0 || abs_difference_us(wall, monotonic) > TIME_BASE_TOLERANCE_US
@@ -905,13 +908,13 @@ mod tests {
         assert_eq!(
             crossing
                 .idle_boundary()
-                .map(|boundary| boundary.occurred_at_utc()),
+                .map(super::IdleBoundary::occurred_at_utc),
             Some(time(5_000_000))
         );
         assert_eq!(
             crossing
                 .idle_boundary()
-                .map(|boundary| boundary.confidence()),
+                .map(super::IdleBoundary::confidence),
             Some(IdleBoundaryConfidence::DerivedFromThreshold)
         );
         assert_adapter_kind(
@@ -935,13 +938,13 @@ mod tests {
         assert_eq!(
             crossing
                 .idle_boundary()
-                .map(|boundary| boundary.occurred_at_utc()),
+                .map(super::IdleBoundary::occurred_at_utc),
             Some(time(2_000_000))
         );
         assert_eq!(
             crossing
                 .idle_boundary()
-                .map(|boundary| boundary.confidence()),
+                .map(super::IdleBoundary::confidence),
             Some(IdleBoundaryConfidence::ObservationClamped)
         );
     }
