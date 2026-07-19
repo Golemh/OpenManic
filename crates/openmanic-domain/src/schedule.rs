@@ -21,6 +21,129 @@ pub enum ScheduleEditScope {
     EveryOccurrence,
 }
 
+/// One persistence-safe civil segment of a recurring personal schedule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleSegment {
+    effective_start_date: i32,
+    effective_end_date: Option<i32>,
+    weekday_mask: u8,
+    start_second_of_day: u32,
+    end_second_of_day: u32,
+    time_zone_id: String,
+    label: String,
+    category_id: Option<CategoryId>,
+}
+
+impl ScheduleSegment {
+    /// Validates and creates a civil schedule segment.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScheduleValidationError`] when one of the persisted civil fields is invalid.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The stored civil rule fields stay explicit at their validation boundary."
+    )]
+    pub fn try_new(
+        effective_start_date: i32,
+        effective_end_date: Option<i32>,
+        weekday_mask: u8,
+        start_second_of_day: u32,
+        end_second_of_day: u32,
+        time_zone_id: impl Into<String>,
+        label: impl Into<String>,
+        category_id: Option<CategoryId>,
+    ) -> Result<Self, ScheduleValidationError> {
+        let segment = RuleSegment::try_new(
+            label.into(),
+            category_id,
+            weekday_mask,
+            start_second_of_day,
+            end_second_of_day,
+            effective_start_date,
+            effective_end_date,
+            time_zone_id.into(),
+        )?;
+        Ok(Self::from_rule_segment(&segment))
+    }
+
+    /// Returns the first covered local civil date.
+    #[must_use]
+    pub const fn effective_start_date(&self) -> i32 {
+        self.effective_start_date
+    }
+    /// Returns the inclusive final covered local civil date, when bounded.
+    #[must_use]
+    pub const fn effective_end_date(&self) -> Option<i32> {
+        self.effective_end_date
+    }
+    /// Returns the Monday-first recurrence bit mask.
+    #[must_use]
+    pub const fn weekday_mask(&self) -> u8 {
+        self.weekday_mask
+    }
+    /// Returns seconds after local midnight for the start boundary.
+    #[must_use]
+    pub const fn start_second_of_day(&self) -> u32 {
+        self.start_second_of_day
+    }
+    /// Returns seconds after local midnight for the end boundary.
+    #[must_use]
+    pub const fn end_second_of_day(&self) -> u32 {
+        self.end_second_of_day
+    }
+    /// Returns whether the end clock falls on the following civil day.
+    #[must_use]
+    pub const fn end_day_offset(&self) -> u8 {
+        if self.end_second_of_day < self.start_second_of_day {
+            1
+        } else {
+            0
+        }
+    }
+    /// Returns the retained IANA time-zone identifier.
+    #[must_use]
+    pub fn time_zone_id(&self) -> &str {
+        &self.time_zone_id
+    }
+    /// Returns the user-visible label.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+    /// Returns the optional category association.
+    #[must_use]
+    pub const fn category_id(&self) -> Option<CategoryId> {
+        self.category_id
+    }
+
+    fn from_rule_segment(segment: &RuleSegment) -> Self {
+        Self {
+            effective_start_date: segment.effective_start_date,
+            effective_end_date: segment.effective_end_date,
+            weekday_mask: segment.weekday_mask,
+            start_second_of_day: segment.start_second_of_day,
+            end_second_of_day: segment.end_second_of_day,
+            time_zone_id: segment.time_zone_id.clone(),
+            label: segment.label.clone(),
+            category_id: segment.category_id,
+        }
+    }
+
+    fn into_rule_segment(self) -> Result<RuleSegment, ScheduleValidationError> {
+        RuleSegment::try_new(
+            self.label,
+            self.category_id,
+            self.weekday_mask,
+            self.start_second_of_day,
+            self.end_second_of_day,
+            self.effective_start_date,
+            self.effective_end_date,
+            self.time_zone_id,
+        )
+    }
+}
+
 /// A validated personal one-time schedule or repeating schedule series.
 ///
 /// One-time schedules contain a positive UTC interval. Repeating schedules retain their civil
@@ -150,6 +273,35 @@ impl ScheduleRule {
         })
     }
 
+    /// Restores a recurring rule from validated persistence-safe civil segments.
+    ///
+    /// Exceptions are deliberately restored by the application/storage boundary after its
+    /// resolved UTC values have been decoded; this constructor establishes the non-overlapping
+    /// series lineage first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScheduleValidationError`] when the segments are empty, malformed, or overlap in
+    /// effective civil-date coverage.
+    pub fn try_restore_repeating(
+        segments: impl IntoIterator<Item = ScheduleSegment>,
+    ) -> Result<Self, ScheduleValidationError> {
+        let segments = segments
+            .into_iter()
+            .map(ScheduleSegment::into_rule_segment)
+            .collect::<Result<Vec<_>, _>>()?;
+        if segments.is_empty() {
+            return Err(ScheduleValidationError::MissingRuleSegment);
+        }
+        validate_segment_coverage(&segments)?;
+        Ok(Self {
+            kind: ScheduleKind::Repeating(RepeatingSchedule {
+                segments,
+                exceptions: BTreeMap::new(),
+            }),
+        })
+    }
+
     /// Creates a positive resolved UTC range from adapter-provided instants.
     ///
     /// The caller applies IANA gap/fold rules, then passes the resolved instants and boundary
@@ -251,6 +403,18 @@ impl ScheduleRule {
     pub fn segment_count(&self) -> usize {
         self.recurring()
             .map_or(0, |schedule| schedule.segments.len())
+    }
+
+    /// Returns persistence-safe copies of every recurring civil segment in effective-date order.
+    #[must_use]
+    pub fn segments(&self) -> Vec<ScheduleSegment> {
+        self.recurring().map_or_else(Vec::new, |schedule| {
+            schedule
+                .segments
+                .iter()
+                .map(ScheduleSegment::from_rule_segment)
+                .collect()
+        })
     }
 
     /// Returns the number of occurrence-only exceptions on a repeating schedule.
@@ -917,6 +1081,33 @@ mod tests {
         assert_eq!(rule.time_zone_for_anchor_date(119), Some("Asia/Karachi"));
         assert_eq!(rule.time_zone_for_anchor_date(120), Some("Europe/London"));
         assert!(rule.is_skipped_on(105));
+    }
+
+    #[test]
+    fn persistence_segments_round_trip_a_future_only_rule_split() {
+        let mut rule = repeating_rule();
+        rule.change_this_and_future(
+            120,
+            "London hours",
+            None,
+            MONDAY,
+            8 * 3_600,
+            10 * 3_600,
+            "Europe/London",
+        )
+        .expect("valid future split");
+
+        let restored = ScheduleRule::try_restore_repeating(rule.segments())
+            .expect("persisted civil segments should restore");
+        assert_eq!(restored.segment_count(), 2);
+        assert_eq!(
+            restored.time_zone_for_anchor_date(119),
+            Some("Asia/Karachi")
+        );
+        assert_eq!(
+            restored.time_zone_for_anchor_date(120),
+            Some("Europe/London")
+        );
     }
 
     #[test]
