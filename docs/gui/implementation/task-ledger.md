@@ -1,6 +1,6 @@
 # OpenManic MVP implementation ledger
 
-- Integration branch: `codex/openmanic-mvp-implementation`
+- Integration branch: `codex/openmanic-mvp-implementation-continuation`
 - Plan commit: `9002482`
 - Integration authority: primary agent only
 - Last updated: 2026-07-19
@@ -18,7 +18,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 | OM-120 | `codex/om120-schedule-domain` | `F:\\claude\\projects\\OpenManic\\.agents\\om120-schedule-domain` | `deda5083905e4f5d22d84721ca0baf56eceb5b6f` | `crates/openmanic-domain/src/schedule.rs` | Module transfer released after integration `ec9efe6` | Implemented and focused-verified |
 | OM-130 | `codex/om130-document-domain` | `F:\\claude\\projects\\OpenManic\\.agents\\om130-document-domain` | `deda5083905e4f5d22d84721ca0baf56eceb5b6f` | `crates/openmanic-domain/src/documents.rs` | Module transfer released after integration `96e5295` | Implemented and focused-verified |
 | OM-140 | `codex/om140-application-contracts` | `F:\\claude\\projects\\OpenManic\\.agents\\om140-application-contracts` | `4188184925a9006a846defb9867ed4eed44cee89` | `crates/openmanic-application/**` | Application crate transfer released after integration `96105c0688d2a0047344ae5e682b1b4b7771f2e7` | Implemented and focused-verified |
-| OM-150 | `codex/om150-sqlite-schema-v2` | `F:\\claude\\projects\\OpenManic\\.agents\\om150-sqlite-schema-v2` | `b4eb766330b3fa97190e6c2ddcbdc926249454e2` | `crates/openmanic-storage-sqlite/**` | Root dependency/lockfile change integrated separately; storage crate and initial migration exclusively transferred; no application/domain/UI/platform contract or specification change | Active; serialized before OM-151 |
+| OM-150 | `codex/om150-sqlite-schema-v2` | `F:\\claude\\projects\\OpenManic\\.agents\\om150-sqlite-schema-v2` | `b4eb766330b3fa97190e6c2ddcbdc926249454e2` | `crates/openmanic-storage-sqlite/**` | Root `rusqlite` dependency/lockfile was integrated separately; `0001` and the storage crate were serialized. The primary also approved direct use of already-locked `thiserror = 1.0.69`; no new package or transitive footprint | Integrated and focused-verified; OM-151 owns online pre-migration backup, restore, and post-migration integrity checks |
 
 ## Completed and integrated work
 
@@ -27,6 +27,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 | OM-010 | `c33ce97085f2b3b44953500bca7dd3f3016f74c1` | PASS; no P0-P3 findings | Accepted after primary checks and Windows newline repair | `2ad86099948a98dbead117f420ec9e04056935c7` | `cargo-deny` execution begins in OM-020; no product behavior exists yet |
 | OM-020 | `554352106120cb8cd520ce9b5c38b269df15e3b6` | PASS; no P0-P3 findings; quality, 10 xtask tests, 13-document check, and missing-tool diagnostic reproduced | Accepted after complete diff review, independent verification, both Windows renderer checks, and integration `cargo xtask quality` | `b3845aadd430e6543e34e265bc6b9131d35d98fa` | Real Windows lifecycle and portable-artifact smoke evidence remains a release-gate prerequisite; `cargo-deny 0.20.2` is intentionally installed by CI/release environments, not xtask |
 | OM-030 | `492bdcdbd31483dd3b70a98c53a79f5a5be3ea3f` | Initial FAIL on one-slot snapshot semantics; focused repair reverified PASS with no remaining findings | Accepted after complete milestone diffs, 25 fixture tests, exact 11-file generation, full workspace quality, and verifier repair pass | `d3a9d748564b54d31433033f3aaba54975773262` | Fixtures are synthetic evidence inputs, not measured performance results; reference-hardware measurements begin in OM-040 |
+| OM-150 | `05fd758b613179ca02e23c631be6678f72797ddd`, repaired by `133714c2bd3598cd429b9914f6e32fb9d1562026` and `56be818b0e35cec181dce3ec6569501c4e948e68` | Initial FAIL: P1 focus-state schema mismatch. Repair PASS with no P0/P1; typed-error dependency repair PASS with no P0-P3 | Accepted after serialized schema repair, two independent verifier passes, primary diff/ownership review, and final offline format, 8-test, and strict Clippy checks | `68ecd784e79b1030abb63cfdca70f2b59d0e17a1` | OM-151 must provide pre-migration online backup, retained recovery/restore, and `quick_check`/`foreign_key_check`; repositories and the serialized writer service are OM-220 |
 
 ## Provisional OM-060 / G0 record
 
