@@ -51,7 +51,7 @@ fn run() -> Result<(), String> {
     let environment = EnvironmentObservation::from_arguments(&arguments);
     let measurements = Arc::new(Mutex::new(RunMeasurements::new(
         FIXTURE_SCHEMA_VERSION,
-        arguments.renderer_name(),
+        Arguments::renderer_name(),
         &arguments,
         fixture.scenario.name(),
         fixture.metadata.raw_interval_count,

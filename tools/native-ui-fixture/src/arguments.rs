@@ -41,19 +41,19 @@ impl Arguments {
                 Some("--scenario") if scenario.is_none() => scenario = Some(parse_scenario(value)?),
                 Some("--seed") if seed.is_none() => seed = Some(parse_u64(value, "seed")?),
                 Some("--frames") if frame_count.is_none() => {
-                    frame_count = Some(parse_u32(value, "frames")?)
+                    frame_count = Some(parse_u32(value, "frames")?);
                 }
                 Some("--warmup-frames") if warmup_frame_count.is_none() => {
-                    warmup_frame_count = Some(parse_u32(value, "warmup frame count")?)
+                    warmup_frame_count = Some(parse_u32(value, "warmup frame count")?);
                 }
                 Some("--git-revision") if git_revision.is_none() => {
-                    git_revision = Some(required_unicode(value, "git revision")?)
+                    git_revision = Some(required_unicode(value, "git revision")?);
                 }
                 Some("--lockfile-hash") if lockfile_hash.is_none() => {
-                    lockfile_hash = Some(required_unicode(value, "lockfile hash")?)
+                    lockfile_hash = Some(required_unicode(value, "lockfile hash")?);
                 }
                 Some("--environment-manifest") if environment_manifest.is_none() => {
-                    environment_manifest = Some(PathBuf::from(value))
+                    environment_manifest = Some(PathBuf::from(value));
                 }
                 Some(
                     "--output"
@@ -95,7 +95,7 @@ impl Arguments {
     }
 
     /// Returns the renderer compiled into this artifact.
-    pub(crate) const fn renderer_name(&self) -> &'static str {
+    pub(crate) const fn renderer_name() -> &'static str {
         #[cfg(feature = "renderer-wgpu")]
         {
             "wgpu"

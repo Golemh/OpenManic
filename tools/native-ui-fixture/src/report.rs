@@ -5,7 +5,7 @@ use std::{
     env,
     fs::{self, OpenOptions},
     io::{self, BufWriter, Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -40,7 +40,7 @@ pub(crate) enum ArtifactObservation {
 impl ArtifactObservation {
     /// Observes the running executable without invoking an external program.
     pub(crate) fn observe_current_executable() -> Self {
-        match env::current_exe().and_then(observe_artifact) {
+        match env::current_exe().and_then(|path| observe_artifact(&path)) {
             Ok(observation) => observation,
             Err(error) => Self::NotCollected {
                 reason: error.to_string(),
@@ -449,12 +449,12 @@ impl MeasurementReport {
     }
 }
 
-fn observe_artifact(path: PathBuf) -> io::Result<ArtifactObservation> {
-    let metadata = fs::metadata(&path)?;
+fn observe_artifact(path: &Path) -> io::Result<ArtifactObservation> {
+    let metadata = fs::metadata(path)?;
     Ok(ArtifactObservation::Available {
-        file_name: file_name(&path).unwrap_or_else(|| "unknown-artifact".to_owned()),
+        file_name: file_name(path).unwrap_or_else(|| "unknown-artifact".to_owned()),
         size_bytes: metadata.len(),
-        content_hash: content_hash(&path)?,
+        content_hash: content_hash(path)?,
     })
 }
 
@@ -503,6 +503,7 @@ fn optional_u64(value: Option<u64>) -> String {
 }
 
 fn json_escape(value: &str) -> String {
+    use std::fmt::Write as _;
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -513,7 +514,7 @@ fn json_escape(value: &str) -> String {
             '\t' => escaped.push_str("\\t"),
             character if character.is_control() => {
                 let code = character as u32;
-                escaped.push_str(&format!("\\u{code:04x}"));
+                let _ = write!(escaped, "\\u{code:04x}");
             }
             character => escaped.push(character),
         }
