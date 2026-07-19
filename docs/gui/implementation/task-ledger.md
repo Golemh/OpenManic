@@ -11,13 +11,14 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| OM-020 | `codex/om-020-xtask` | `C:\Users\abr\AppData\Local\Temp\openmanic-agent-worktrees\om-020` | `0e951cf4f592e1906924f1e8794c3204745ff337` | `tools/xtask/**`, root `Cargo.toml`, `Cargo.lock`, and `.cargo/config.toml` | Workspace tool membership, quality-command contract, cargo-deny `0.20.2` pin | Active; sole writer because OM-030 needs the same root manifest/lockfile |
+| _None_ | - | - | - | - | - | OM-020 integrated; the next task has not been activated yet |
 
 ## Completed and integrated work
 
 | Task | Author head | Verifier verdict | Primary decision | Integration SHA | Remaining risk |
 | --- | --- | --- | --- | --- | --- |
 | OM-010 | `c33ce97085f2b3b44953500bca7dd3f3016f74c1` | PASS; no P0-P3 findings | Accepted after primary checks and Windows newline repair | `2ad86099948a98dbead117f420ec9e04056935c7` | `cargo-deny` execution begins in OM-020; no product behavior exists yet |
+| OM-020 | `554352106120cb8cd520ce9b5c38b269df15e3b6` | PASS; no P0-P3 findings; quality, 10 xtask tests, 13-document check, and missing-tool diagnostic reproduced | Accepted after complete diff review, independent verification, both Windows renderer checks, and integration `cargo xtask quality` | `b3845aadd430e6543e34e265bc6b9131d35d98fa` | Real Windows lifecycle and portable-artifact smoke evidence remains a release-gate prerequisite; `cargo-deny 0.20.2` is intentionally installed by CI/release environments, not xtask |
 
 ## Ownership rules
 
