@@ -7,6 +7,7 @@ publish.workspace = true
 
 [dependencies]
 openmanic-application.workspace = true
+openmanic-domain.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 

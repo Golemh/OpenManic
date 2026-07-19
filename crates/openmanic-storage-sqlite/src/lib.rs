@@ -11,6 +11,8 @@ mod connection;
 mod errors;
 mod migration;
 mod options;
+mod repository;
+mod writer;
 
 pub use connection::{
     ConnectionConfiguration, JournalMode, SqliteReader, SqliteWriter, SynchronousMode,
@@ -18,3 +20,7 @@ pub use connection::{
 pub use errors::{ConnectionSetting, StorageError};
 pub use migration::LATEST_SCHEMA_VERSION;
 pub use options::StoreOpenOptions;
+pub use repository::{
+    ActivityRecord, ApplicationRecord, CategoryRecord, ReadSnapshot, SqliteReadSession,
+};
+pub use writer::{RecoveryOutcome, SqliteStore, StorageWriter, TrackerRunRegistration};

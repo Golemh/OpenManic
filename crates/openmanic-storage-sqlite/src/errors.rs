@@ -26,6 +26,32 @@ pub enum StorageError {
         /// The named persistence operation that failed.
         operation: &'static str,
     },
+    /// SQLite could not obtain a required lock within the configured bounded wait.
+    #[error("SQLite remained busy during {operation}")]
+    Busy {
+        /// The operation that exhausted its bounded busy wait.
+        operation: &'static str,
+    },
+    /// An authoritative mutation would exceed the supported data-revision range.
+    #[error("SQLite data revision cannot advance further")]
+    RevisionOverflow,
+    /// A tracker run required by an activity mutation has not been registered.
+    #[error("SQLite tracker run is not registered")]
+    TrackerRunMissing,
+    /// A recovered checkpoint boundary predates its last trusted confirmation.
+    #[error("SQLite recovery boundary predates the last trusted checkpoint")]
+    RecoveryBoundaryBeforeCheckpoint,
+    /// The supplied post-recovery tracking intent cannot safely start the next tracker run.
+    #[error(
+        "SQLite recovery requires a checkpoint-only intent for its registered next tracker run"
+    )]
+    RecoveryIntentInvalid,
+    /// A stored SQLite value is incompatible with the frozen OpenManic schema.
+    #[error("SQLite contains an invalid stored {field}")]
+    InvalidStoredValue {
+        /// The semantic field whose stored representation was invalid.
+        field: &'static str,
+    },
     /// A database contains schema state but no migration ledger.
     #[error("SQLite schema exists without its required migration ledger")]
     MigrationLedgerMissing,
@@ -162,6 +188,34 @@ mod tests {
                     operation: "apply migration",
                 },
                 "SQLite operation failed: apply migration",
+            ),
+            (
+                StorageError::Busy {
+                    operation: "persist tracking",
+                },
+                "SQLite remained busy during persist tracking",
+            ),
+            (
+                StorageError::RevisionOverflow,
+                "SQLite data revision cannot advance further",
+            ),
+            (
+                StorageError::TrackerRunMissing,
+                "SQLite tracker run is not registered",
+            ),
+            (
+                StorageError::RecoveryBoundaryBeforeCheckpoint,
+                "SQLite recovery boundary predates the last trusted checkpoint",
+            ),
+            (
+                StorageError::RecoveryIntentInvalid,
+                "SQLite recovery requires a checkpoint-only intent for its registered next tracker run",
+            ),
+            (
+                StorageError::InvalidStoredValue {
+                    field: "activity state",
+                },
+                "SQLite contains an invalid stored activity state",
             ),
             (
                 StorageError::MigrationLedgerMissing,

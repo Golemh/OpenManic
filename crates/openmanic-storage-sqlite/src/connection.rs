@@ -123,6 +123,11 @@ impl SqliteWriter {
     pub fn schema_version(&self) -> Result<u32, StorageError> {
         migration::metadata_schema_version(&self.connection)
     }
+
+    /// Borrows the crate-private writer connection for a storage operation.
+    pub(crate) fn connection_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 /// The crate-owned query-only SQLite reader connection.
@@ -174,6 +179,11 @@ impl SqliteReader {
     /// Returns [`StorageError`] if singleton metadata cannot be read safely.
     pub fn schema_version(&self) -> Result<u32, StorageError> {
         migration::metadata_schema_version(&self.connection)
+    }
+
+    /// Borrows the crate-private reader connection for one short read transaction.
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
     }
 }
 
