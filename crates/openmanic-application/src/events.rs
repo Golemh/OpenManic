@@ -4,7 +4,7 @@ use core::fmt;
 
 use openmanic_domain::UtcMicros;
 
-use crate::{ApplicationError, CommandId, DataRevision, JobId, SchemaRevision};
+use crate::{ApplicationError, CommandId, DataRevision, JobId, SchemaRevision, TrackingCheckpoint};
 
 /// An event emitted by an application service with correlation metadata.
 ///
@@ -164,6 +164,38 @@ pub enum MutationRejectionReason {
     ServiceUnavailable,
 }
 
+/// A typed tracking-service event carried by an [`AppEvent`] envelope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TrackingEvent {
+    /// An attempted tracking mutation reached an authoritative outcome.
+    Mutation {
+        /// The result correlated with the submitted command.
+        outcome: MutationOutcome,
+        /// The immutable checkpoint committed with a confirmed outcome.
+        checkpoint: Option<TrackingCheckpoint>,
+    },
+    /// Evidence was deliberately ignored without fabricating an interval.
+    EvidenceIgnored {
+        /// Source sequence supplied by the platform adapter.
+        sequence: u64,
+        /// The reason the observation could not change canonical tracking state.
+        reason: TrackingEvidenceIgnoredReason,
+    },
+    /// A valid command did not require a persistence mutation.
+    NoAuthoritativeChange,
+}
+
+/// Explains why normalized evidence did not change tracking state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrackingEvidenceIgnoredReason {
+    /// The adapter sequence repeated or arrived after a newer sequence.
+    DuplicateOrReordered,
+    /// The evidence time predates the current canonical open interval.
+    TimestampBeforeCurrentState,
+    /// A higher-precedence cause was already observed at the same instant.
+    LowerPrecedenceAtSameInstant,
+}
+
 impl fmt::Display for MutationRejectionReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let description = match self {
@@ -236,4 +268,6 @@ pub enum AppEvent {
     Mutation(MutationOutcome),
     /// A background job lifecycle update.
     Job(JobEvent),
+    /// A platform-neutral tracking outcome or evidence decision.
+    Tracking(TrackingEvent),
 }

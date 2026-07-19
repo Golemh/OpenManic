@@ -13,18 +13,22 @@ mod ids;
 mod ports;
 mod projection;
 mod runtime;
+mod tracking;
 
-pub use commands::{CommandEnvelope, CommandReceipt};
+pub use commands::{CommandEnvelope, CommandReceipt, TrackingCommand, TrackingEvidence};
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
 pub use events::{
     AppEvent, EventEnvelope, JobEvent, JobState, MutationConfirmation, MutationOutcome,
-    MutationRejection, MutationRejectionReason,
+    MutationRejection, MutationRejectionReason, TrackingEvent, TrackingEvidenceIgnoredReason,
 };
 pub use ids::{
     CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
     ProjectionSlot, RequestId, SchemaRevision,
 };
-pub use ports::{CommandPort, ProjectionPort};
+pub use ports::{
+    CommandPort, ProjectionPort, TrackingPersistencePort, TrackingPersistenceRetentionReason,
+    TrackingPersistenceSubmit,
+};
 pub use projection::{ProjectionRequest, ProjectionSlotState, SnapshotEnvelope, SnapshotRejection};
 pub use runtime::{
     CancellationRequest, CancellationSource, CancellationToken, LaneCapacities,
@@ -33,6 +37,10 @@ pub use runtime::{
     RuntimeSupervisor, RuntimeWorker, ShutdownAdvance, ShutdownCoordinator, ShutdownError,
     ShutdownPhase, ShutdownStep, ThreadRoot, WorkLane, WorkerEscalation, WorkerFailure,
     WorkerHealth, WorkerHealthState, bounded_runtime_lanes, latest_mailbox,
+};
+pub use tracking::{
+    TRACKING_CHECKPOINT_INTERVAL_US, TrackingCheckpoint, TrackingCheckpointError,
+    TrackingPersistenceIntent, TrackingPersistenceIntentError, TrackingService,
 };
 
 #[cfg(test)]
