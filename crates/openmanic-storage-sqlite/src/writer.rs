@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use openmanic_application::{
     ApplicationError, ApplicationPort, CatalogPersistence, CatalogPersistenceError, DataRevision,
+    EntityRevision, FocusKind, FocusPersistence, FocusPersistenceError, FocusSnapshot,
     PortFailureReason, TrackingPersistenceIntent, TrackingPersistencePort,
     TrackingPersistenceSubmit,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
-    CategoryId, CategoryName, TrackerRunId, UtcMicros,
+    CategoryId, CategoryName, FocusSessionId, FocusSessionState, TrackerRunId, UtcMicros,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -509,6 +510,366 @@ impl CatalogPersistence for StorageWriter {
     }
 }
 
+impl FocusPersistence for StorageWriter {
+    fn load_focus(
+        &mut self,
+        session_id: FocusSessionId,
+    ) -> Result<Option<FocusSnapshot>, FocusPersistenceError> {
+        load_focus_snapshot(self.writer.connection_mut(), Some(session_id))
+            .map_err(|_| FocusPersistenceError::Failed)
+    }
+
+    fn load_active_focus(&mut self) -> Result<Option<FocusSnapshot>, FocusPersistenceError> {
+        load_focus_snapshot(self.writer.connection_mut(), None)
+            .map_err(|_| FocusPersistenceError::Failed)
+    }
+
+    fn create_focus(
+        &mut self,
+        snapshot: &FocusSnapshot,
+    ) -> Result<DataRevision, FocusPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin focus creation")
+            .map_err(|_| FocusPersistenceError::Failed)?;
+        let revision = next_revision(&transaction).map_err(|_| FocusPersistenceError::Failed)?;
+        insert_focus_snapshot(&transaction, snapshot).map_err(|_| FocusPersistenceError::Failed)?;
+        update_revision(&transaction, revision).map_err(|_| FocusPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| FocusPersistenceError::Failed)?;
+        Ok(revision)
+    }
+
+    fn replace_focus(
+        &mut self,
+        snapshot: &FocusSnapshot,
+    ) -> Result<(DataRevision, EntityRevision), FocusPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin focus replacement")
+            .map_err(|_| FocusPersistenceError::Failed)?;
+        let revision = next_revision(&transaction).map_err(|_| FocusPersistenceError::Failed)?;
+        let entity_revision = snapshot
+            .entity_revision()
+            .get()
+            .checked_add(1)
+            .ok_or(FocusPersistenceError::Failed)?;
+        let changed = replace_focus_snapshot(&transaction, snapshot, entity_revision)
+            .map_err(|_| FocusPersistenceError::Failed)?;
+        if changed != 1 {
+            return Err(FocusPersistenceError::RevisionConflict);
+        }
+        update_revision(&transaction, revision).map_err(|_| FocusPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| FocusPersistenceError::Failed)?;
+        Ok((revision, EntityRevision::new(entity_revision)))
+    }
+}
+
+impl FocusPersistence for &mut StorageWriter {
+    fn load_focus(
+        &mut self,
+        session_id: FocusSessionId,
+    ) -> Result<Option<FocusSnapshot>, FocusPersistenceError> {
+        <StorageWriter as FocusPersistence>::load_focus(*self, session_id)
+    }
+
+    fn load_active_focus(&mut self) -> Result<Option<FocusSnapshot>, FocusPersistenceError> {
+        <StorageWriter as FocusPersistence>::load_active_focus(*self)
+    }
+
+    fn create_focus(
+        &mut self,
+        snapshot: &FocusSnapshot,
+    ) -> Result<DataRevision, FocusPersistenceError> {
+        <StorageWriter as FocusPersistence>::create_focus(*self, snapshot)
+    }
+
+    fn replace_focus(
+        &mut self,
+        snapshot: &FocusSnapshot,
+    ) -> Result<(DataRevision, EntityRevision), FocusPersistenceError> {
+        <StorageWriter as FocusPersistence>::replace_focus(*self, snapshot)
+    }
+}
+
+fn load_focus_snapshot(
+    connection: &mut rusqlite::Connection,
+    session_id: Option<FocusSessionId>,
+) -> Result<Option<FocusSnapshot>, StorageError> {
+    let query = "SELECT focus_session.public_id, focus_session.kind, focus_session.label,
+                        category.public_id, focus_session.intended_duration_us, focus_session.state,
+                        focus_session.planned_start_utc_us, focus_session.planned_end_utc_us,
+                        focus_session.actual_start_utc_us, focus_session.deadline_utc_us,
+                        focus_session.paused_remaining_us, focus_session.completed_utc_us,
+                        focus_session.cancelled_utc_us, focus_session.revision
+                   FROM focus_session LEFT JOIN category ON category.id = focus_session.category_id";
+    let row = match session_id {
+        Some(session_id) => connection
+            .query_row(
+                &format!("{query} WHERE focus_session.public_id = ?1"),
+                [session_id.as_bytes().as_slice()],
+                focus_snapshot_row,
+            )
+            .optional(),
+        None => connection
+            .query_row(
+                &format!(
+                    "{query} WHERE focus_session.state IN (2, 3) ORDER BY focus_session.id LIMIT 1"
+                ),
+                [],
+                focus_snapshot_row,
+            )
+            .optional(),
+    }
+    .map_err(|error| database_error(&error, "load focus snapshot"))?;
+    Ok(row)
+}
+
+fn focus_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FocusSnapshot> {
+    let id = row.get::<_, Vec<u8>>(0)?;
+    let kind = match row.get::<_, i64>(1)? {
+        0 => FocusKind::Focus,
+        1 => FocusKind::ShortBreak,
+        _ => return Err(rusqlite::Error::IntegralValueOutOfRange(1, 0)),
+    };
+    let category_id = row
+        .get::<_, Option<Vec<u8>>>(3)?
+        .map(fixed_focus_id)
+        .transpose()
+        .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(3, 0))?
+        .map(CategoryId::from_bytes);
+    let state = focus_state_from_columns((
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+    ))
+    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, 0))?;
+    FocusSnapshot::try_restore(
+        FocusSessionId::from_bytes(
+            fixed_focus_id(id).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?,
+        ),
+        kind,
+        row.get(2)?,
+        row.get(4)?,
+        category_id,
+        state,
+        EntityRevision::new(
+            u64::try_from(row.get::<_, i64>(13)?)
+                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(13, 0))?,
+        ),
+    )
+    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, 0))
+}
+
+fn fixed_focus_id(value: Vec<u8>) -> Result<[u8; 16], StorageError> {
+    value
+        .try_into()
+        .map_err(|_| StorageError::InvalidStoredValue {
+            field: "focus stable ID",
+        })
+}
+
+fn insert_focus_snapshot(
+    transaction: &Transaction<'_>,
+    snapshot: &FocusSnapshot,
+) -> Result<(), StorageError> {
+    let fields = focus_fields(transaction, snapshot)?;
+    transaction.execute(
+        "INSERT INTO focus_session(public_id, kind, state, label, category_id, planned_start_utc_us, planned_end_utc_us, intended_duration_us, actual_start_utc_us, deadline_utc_us, paused_remaining_us, completed_utc_us, cancelled_utc_us, revision)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![snapshot.session_id().as_bytes().as_slice(), fields.kind, fields.state, snapshot.label(), fields.category_row_id, fields.planned_start, fields.planned_end, snapshot.session().intended_duration_us(), fields.actual_start, fields.deadline, fields.paused_remaining, fields.completed, fields.cancelled, i64::try_from(snapshot.entity_revision().get()).map_err(|_| StorageError::InvalidStoredValue { field: "focus revision" })?],
+    ).map_err(|error| database_error(&error, "create focus session"))?;
+    Ok(())
+}
+
+fn replace_focus_snapshot(
+    transaction: &Transaction<'_>,
+    snapshot: &FocusSnapshot,
+    entity_revision: u64,
+) -> Result<usize, StorageError> {
+    let fields = focus_fields(transaction, snapshot)?;
+    transaction.execute(
+        "UPDATE focus_session SET kind = ?1, state = ?2, label = ?3, category_id = ?4, planned_start_utc_us = ?5, planned_end_utc_us = ?6, intended_duration_us = ?7, actual_start_utc_us = ?8, deadline_utc_us = ?9, paused_remaining_us = ?10, completed_utc_us = ?11, cancelled_utc_us = ?12, revision = ?13 WHERE public_id = ?14 AND revision = ?15",
+        params![fields.kind, fields.state, snapshot.label(), fields.category_row_id, fields.planned_start, fields.planned_end, snapshot.session().intended_duration_us(), fields.actual_start, fields.deadline, fields.paused_remaining, fields.completed, fields.cancelled, i64::try_from(entity_revision).map_err(|_| StorageError::InvalidStoredValue { field: "focus revision" })?, snapshot.session_id().as_bytes().as_slice(), i64::try_from(snapshot.entity_revision().get()).map_err(|_| StorageError::InvalidStoredValue { field: "focus revision" })?],
+    ).map_err(|error| database_error(&error, "replace focus session"))
+}
+
+type FocusStateColumns = (
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+struct FocusFields {
+    kind: i64,
+    state: i64,
+    category_row_id: Option<i64>,
+    planned_start: Option<i64>,
+    planned_end: Option<i64>,
+    actual_start: Option<i64>,
+    deadline: Option<i64>,
+    paused_remaining: Option<i64>,
+    completed: Option<i64>,
+    cancelled: Option<i64>,
+}
+
+fn focus_fields(
+    transaction: &Transaction<'_>,
+    snapshot: &FocusSnapshot,
+) -> Result<FocusFields, StorageError> {
+    let (
+        state,
+        planned_start,
+        planned_end,
+        actual_start,
+        deadline,
+        paused_remaining,
+        completed,
+        cancelled,
+    ) = focus_state_columns(snapshot.session().state());
+    let category_row_id = snapshot
+        .session()
+        .category_id()
+        .map(|id| category_row_id(transaction, id.as_bytes()))
+        .transpose()?;
+    Ok(FocusFields {
+        kind: match snapshot.kind() {
+            FocusKind::Focus => 0,
+            FocusKind::ShortBreak => 1,
+        },
+        state,
+        category_row_id,
+        planned_start,
+        planned_end,
+        actual_start,
+        deadline,
+        paused_remaining,
+        completed,
+        cancelled,
+    })
+}
+
+fn focus_state_columns(state: FocusSessionState) -> FocusStateColumns {
+    match state {
+        FocusSessionState::Ready => (0, None, None, None, None, None, None, None),
+        FocusSessionState::Planned {
+            planned_start,
+            planned_end,
+        } => (
+            1,
+            Some(planned_start.get()),
+            Some(planned_end.get()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
+        FocusSessionState::Running {
+            started_at,
+            deadline,
+        } => (
+            2,
+            None,
+            None,
+            Some(started_at.get()),
+            Some(deadline.get()),
+            None,
+            None,
+            None,
+        ),
+        FocusSessionState::Paused {
+            started_at,
+            remaining_us,
+        } => (
+            3,
+            None,
+            None,
+            Some(started_at.get()),
+            None,
+            Some(remaining_us),
+            None,
+            None,
+        ),
+        FocusSessionState::Completed {
+            started_at,
+            completed_at,
+        } => (
+            4,
+            None,
+            None,
+            Some(started_at.get()),
+            None,
+            None,
+            Some(completed_at.get()),
+            None,
+        ),
+        FocusSessionState::Cancelled {
+            started_at,
+            cancelled_at,
+        } => (
+            5,
+            None,
+            None,
+            Some(started_at.get()),
+            None,
+            None,
+            None,
+            Some(cancelled_at.get()),
+        ),
+    }
+}
+
+fn focus_state_from_columns(columns: FocusStateColumns) -> Result<FocusSessionState, StorageError> {
+    match columns {
+        (0, None, None, None, None, None, None, None) => Ok(FocusSessionState::Ready),
+        (1, Some(start), Some(end), None, None, None, None, None) => {
+            Ok(FocusSessionState::Planned {
+                planned_start: UtcMicros::new(start),
+                planned_end: UtcMicros::new(end),
+            })
+        }
+        (2, None, None, Some(start), Some(deadline), None, None, None) => {
+            Ok(FocusSessionState::Running {
+                started_at: UtcMicros::new(start),
+                deadline: UtcMicros::new(deadline),
+            })
+        }
+        (3, None, None, Some(start), None, Some(remaining), None, None) => {
+            Ok(FocusSessionState::Paused {
+                started_at: UtcMicros::new(start),
+                remaining_us: remaining,
+            })
+        }
+        (4, None, None, Some(start), None, None, Some(completed), None) => {
+            Ok(FocusSessionState::Completed {
+                started_at: UtcMicros::new(start),
+                completed_at: UtcMicros::new(completed),
+            })
+        }
+        (5, None, None, Some(start), None, None, None, Some(cancelled)) => {
+            Ok(FocusSessionState::Cancelled {
+                started_at: UtcMicros::new(start),
+                cancelled_at: UtcMicros::new(cancelled),
+            })
+        }
+        _ => Err(StorageError::InvalidStoredValue {
+            field: "focus session state",
+        }),
+    }
+}
+
 fn catalog_persistence_error(error: &StorageError) -> CatalogPersistenceError {
     match error {
         StorageError::CategoryMissing | StorageError::ApplicationMissing => {
@@ -992,13 +1353,15 @@ mod tests {
     use std::time::Duration;
 
     use openmanic_application::{
-        TrackingCheckpoint, TrackingPersistenceIntent, TrackingPersistencePort,
-        TrackingPersistenceSubmit,
+        CommandEnvelope, CommandId, EntityRevision, FocusCommand, FocusKind,
+        FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
+        FocusSnapshot, OrderingKey, SchemaRevision, TrackingCheckpoint, TrackingPersistenceIntent,
+        TrackingPersistencePort, TrackingPersistenceSubmit,
     };
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application,
-        ApplicationId, ApplicationName, Category, CategoryId, CategoryName, HalfOpenInterval,
-        TrackerRunId, UtcMicros,
+        ApplicationId, ApplicationName, Category, CategoryId, CategoryName, FocusSessionId,
+        FocusSessionState, HalfOpenInterval, TrackerRunId, UtcMicros,
     };
     use rusqlite::Connection;
 
@@ -1126,6 +1489,55 @@ mod tests {
                 .iter()
                 .all(|record| record.category().name().as_str() != "Deep work")
         );
+    }
+
+    #[test]
+    fn focus_persistence_keeps_one_active_timer_and_reconciles_deadlines() {
+        let database = TemporaryDatabase::new("focus-persistence");
+        let mut store = open_store(database.path(), 13);
+        let session_id = FocusSessionId::from_bytes([13; 16]);
+        let draft = FocusSnapshot::try_new(
+            session_id,
+            FocusKind::Focus,
+            Some("Finish report".to_owned()),
+            50,
+            None,
+            EntityRevision::new(0),
+        )
+        .expect("fixture focus draft should be valid");
+        {
+            let mut service = FocusService::new(store.writer(), NoNotifications);
+            assert!(matches!(
+                service
+                    .handle(&focus_command(1, FocusCommand::CreateDraft(draft)))
+                    .outcome(),
+                openmanic_application::MutationOutcome::Confirmed(_)
+            ));
+            assert!(matches!(
+                service
+                    .handle(&focus_command(
+                        2,
+                        FocusCommand::Start {
+                            session_id,
+                            started_at: time(100),
+                        },
+                    ))
+                    .outcome(),
+                openmanic_application::MutationOutcome::Confirmed(_)
+            ));
+            let restored = service
+                .reconcile_after_restart(time(200))
+                .expect("SQLite focus persistence should reconcile")
+                .expect("running focus session should remain visible");
+            assert!(matches!(
+                restored.session().state(),
+                FocusSessionState::Completed { completed_at, .. } if completed_at == time(150)
+            ));
+        }
+        assert!(matches!(
+            FocusPersistence::load_active_focus(store.writer()),
+            Ok(None)
+        ));
     }
 
     #[test]
@@ -1409,6 +1821,25 @@ mod tests {
 
     fn revision(value: u64) -> openmanic_application::DataRevision {
         openmanic_application::DataRevision::new(value)
+    }
+
+    struct NoNotifications;
+
+    impl FocusNotificationPort for NoNotifications {
+        fn notify_completed(&mut self, _: &FocusSnapshot) -> Result<(), FocusNotificationError> {
+            Ok(())
+        }
+    }
+
+    fn focus_command(id: u64, payload: FocusCommand) -> CommandEnvelope<FocusCommand> {
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            CommandId::new(id),
+            OrderingKey::new(13),
+            None,
+            time(0),
+            payload,
+        )
     }
 
     fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {

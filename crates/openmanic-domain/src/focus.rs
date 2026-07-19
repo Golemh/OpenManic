@@ -36,6 +36,32 @@ impl FocusSession {
         })
     }
 
+    /// Restores a session whose complete state was already validated by a
+    /// durable boundary.
+    ///
+    /// This still validates the cross-field invariants so a malformed stored
+    /// value cannot become an authoritative in-memory timer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FocusSessionError::InvalidRestoredState`] when the duration
+    /// or lifecycle payload is not representable by the domain state machine.
+    pub fn try_restore(
+        intended_duration_us: i64,
+        category_id: Option<CategoryId>,
+        state: FocusSessionState,
+    ) -> Result<Self, FocusSessionError> {
+        if intended_duration_us <= 0 || !state_is_valid(state) {
+            return Err(FocusSessionError::InvalidRestoredState);
+        }
+
+        Ok(Self {
+            category_id,
+            intended_duration_us,
+            state,
+        })
+    }
+
     /// Returns the session's optional category.
     #[must_use]
     pub const fn category_id(&self) -> Option<CategoryId> {
@@ -252,6 +278,29 @@ impl FocusSession {
     }
 }
 
+fn state_is_valid(state: FocusSessionState) -> bool {
+    match state {
+        FocusSessionState::Ready => true,
+        FocusSessionState::Planned {
+            planned_start,
+            planned_end,
+        } => planned_end > planned_start,
+        FocusSessionState::Running {
+            started_at,
+            deadline,
+        } => deadline > started_at,
+        FocusSessionState::Paused { remaining_us, .. } => remaining_us > 0,
+        FocusSessionState::Completed {
+            started_at,
+            completed_at,
+        }
+        | FocusSessionState::Cancelled {
+            started_at,
+            cancelled_at: completed_at,
+        } => completed_at >= started_at,
+    }
+}
+
 /// The lifecycle state of a [`FocusSession`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FocusSessionState {
@@ -310,6 +359,8 @@ pub enum FocusSessionError {
     },
     /// A timestamp calculation could not be represented as UTC microseconds.
     TimeArithmetic(UtcMicrosArithmeticError),
+    /// A persisted state did not satisfy the domain's cross-field invariants.
+    InvalidRestoredState,
 }
 
 #[cfg(test)]
@@ -582,6 +633,32 @@ mod tests {
                 started_at: micros(100),
                 remaining_us: 30,
             }
+        );
+    }
+
+    #[test]
+    fn restored_state_requires_the_same_invariants_as_live_state() {
+        assert_eq!(
+            FocusSession::try_restore(
+                50,
+                None,
+                FocusSessionState::Paused {
+                    started_at: micros(10),
+                    remaining_us: 0,
+                }
+            ),
+            Err(FocusSessionError::InvalidRestoredState)
+        );
+        assert_eq!(
+            FocusSession::try_restore(
+                50,
+                None,
+                FocusSessionState::Running {
+                    started_at: micros(10),
+                    deadline: micros(9),
+                }
+            ),
+            Err(FocusSessionError::InvalidRestoredState)
         );
     }
 }

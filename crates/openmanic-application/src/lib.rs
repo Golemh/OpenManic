@@ -10,6 +10,7 @@ mod catalog;
 mod commands;
 mod errors;
 mod events;
+mod focus;
 mod ids;
 mod ports;
 mod projection;
@@ -30,11 +31,15 @@ pub use events::{
     AppEvent, EventEnvelope, JobEvent, JobState, MutationConfirmation, MutationOutcome,
     MutationRejection, MutationRejectionReason, TrackingEvent, TrackingEvidenceIgnoredReason,
 };
+pub use focus::{
+    FocusCommand, FocusKind, FocusMutation, FocusNotificationError, FocusNotificationPort,
+    FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot,
+};
 pub use ids::{
     CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
     ProjectionSlot, RequestId, SchemaRevision,
 };
-pub use openmanic_domain::{ApplicationId, PowerTransitionEvidence, UtcMicros};
+pub use openmanic_domain::{ApplicationId, FocusSessionId, PowerTransitionEvidence, UtcMicros};
 pub use ports::{
     CommandPort, ProjectionPort, TrackingPersistencePort, TrackingPersistenceRetentionReason,
     TrackingPersistenceSubmit,
