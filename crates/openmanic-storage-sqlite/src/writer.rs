@@ -608,6 +608,11 @@ impl SchedulePersistence for StorageWriter {
         {
             return Err(SchedulePersistenceError::Conflict);
         }
+        if one_time_schedule_conflicts(&transaction, snapshot)
+            .map_err(|_| SchedulePersistenceError::Failed)?
+        {
+            return Err(SchedulePersistenceError::Conflict);
+        }
         let revision = next_revision(&transaction).map_err(|_| SchedulePersistenceError::Failed)?;
         insert_schedule_snapshot(&transaction, snapshot)
             .map_err(|_| SchedulePersistenceError::Failed)?;
@@ -657,6 +662,26 @@ fn schedule_id_exists(
         .optional()
         .map(|row| row.is_some())
         .map_err(|error| database_error(&error, "check schedule identity"))
+}
+
+fn one_time_schedule_conflicts(
+    transaction: &Transaction<'_>,
+    snapshot: &ScheduleSnapshot,
+) -> Result<bool, StorageError> {
+    let Some(interval) = snapshot.rule().one_time_interval() else {
+        return Ok(false);
+    };
+    let conflicts: i64 = transaction
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM one_time_schedule
+                  WHERE start_utc_us < ?1 AND end_utc_us > ?2
+             )",
+            params![interval.end().get(), interval.start().get()],
+            |row| row.get(0),
+        )
+        .map_err(|error| database_error(&error, "check one-time schedule overlap"))?;
+    Ok(conflicts != 0)
 }
 
 fn insert_one_time_schedule(
@@ -1761,6 +1786,57 @@ mod tests {
                 .map(|snapshot| snapshot.revision()),
             Ok(revision(2))
         );
+    }
+
+    #[test]
+    fn schedule_persistence_accepts_adjacency_and_rejects_one_time_overlap() {
+        let database = TemporaryDatabase::new("schedule-one-time-overlap");
+        let mut store = open_store(database.path(), 24);
+        let first = one_time_schedule_snapshot(25, 100, 200);
+        let adjacent = one_time_schedule_snapshot(26, 200, 300);
+        let overlapping = one_time_schedule_snapshot(27, 150, 250);
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &first),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &adjacent),
+            Ok(revision(2))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &overlapping),
+            Err(SchedulePersistenceError::Conflict)
+        );
+        assert_eq!(
+            store
+                .open_read_session()
+                .and_then(|mut reader| reader.snapshot())
+                .map(|snapshot| snapshot.revision()),
+            Ok(revision(2))
+        );
+    }
+
+    fn one_time_schedule_snapshot(
+        id_byte: u8,
+        start_utc_us: i64,
+        end_utc_us: i64,
+    ) -> ScheduleSnapshot {
+        let rule = ScheduleRule::one_time(
+            "Adjacent appointment",
+            None,
+            HalfOpenInterval::try_new(UtcMicros::new(start_utc_us), UtcMicros::new(end_utc_us))
+                .expect("positive interval"),
+            "Etc/UTC",
+        )
+        .expect("valid one-time rule");
+        ScheduleSnapshot::try_new(
+            ScheduleId::OneTime(OneTimeScheduleId::from_bytes([id_byte; 16])),
+            rule,
+            EntityRevision::new(0),
+            UtcMicros::new(12),
+        )
+        .expect("matching one-time identity")
     }
 
     #[test]
