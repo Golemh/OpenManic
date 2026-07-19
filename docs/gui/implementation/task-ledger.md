@@ -11,7 +11,8 @@ This ledger is the source of truth for delegated implementation ownership and in
 
 | Task | Branch | Worktree | Base SHA | Writable paths | Shared contracts | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| OM-040 | `codex/om040-native-ui-fixture` | `F:\\claude\\projects\\OpenManic\\.agents\\om040-native-ui-fixture` | _recorded at activation commit_ | `Cargo.toml`, `Cargo.lock`, `tools/native-ui-fixture/**`, `fixtures/performance/native-ui/**` | Root manifest and lockfile exclusively transferred; no production contract, shared fixture format, or renderer-policy change | Active; checks deferred until Phase 0 end |
+| OM-040 | `codex/om040-native-ui-fixture` | `F:\\claude\\projects\\OpenManic\\.agents\\om040-native-ui-fixture` | `df085bd32f402a2e3eade28e0ff487e79a57b8d8` | `Cargo.toml`, `Cargo.lock`, `tools/native-ui-fixture/**`, `fixtures/performance/native-ui/**` | Root manifest and lockfile transfer released after integration `ab1b40b6e80767538d14a04cbd70f54a73ecfe39`; no production contract, shared fixture format, or renderer-policy change | Implemented, unverified; targeted package tests passed; Phase 0 checks deferred |
+| OM-050 | `codex/om050-ui-direction-spike` | `F:\\claude\\projects\\OpenManic\\.agents\\om050-ui-direction-spike` | _recorded at activation commit_ | `Cargo.lock`, `tools/ui-direction-spike/**`, `fixtures/ui-direction/**` | Lockfile exclusively transferred; no root manifest, production contract, shared fixture format, or specification change | Active; checks deferred until Phase 0 end |
 
 ## Completed and integrated work
 
