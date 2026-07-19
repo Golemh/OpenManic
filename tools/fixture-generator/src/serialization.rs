@@ -2,14 +2,21 @@
 
 use crate::ScenarioFixture;
 use crate::scenarios::{JobKind, OverlayKind, ScheduleMarker};
-use std::io::{self, Write};
+use std::{
+    fs,
+    io::{self, BufReader, BufWriter, Read, Write},
+    path::Path,
+};
 
 /// Streams every fixture surface in stable order as newline-delimited JSON.
 ///
 /// # Errors
 ///
 /// Returns an error from the supplied writer.
-pub fn write_jsonl(writer: &mut impl Write, fixture: &ScenarioFixture) -> io::Result<u64> {
+pub fn write_jsonl(
+    writer: &mut (impl Write + ?Sized),
+    fixture: &ScenarioFixture,
+) -> io::Result<u64> {
     let mut counted = CountedWriter::new(writer);
     write_activity(&mut counted, fixture)?;
     write_bands(&mut counted, fixture)?;
@@ -22,7 +29,7 @@ pub fn write_jsonl(writer: &mut impl Write, fixture: &ScenarioFixture) -> io::Re
     Ok(counted.checksum())
 }
 
-fn write_activity<W: Write>(
+fn write_activity<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -42,7 +49,7 @@ fn write_activity<W: Write>(
     Ok(())
 }
 
-fn write_bands<W: Write>(
+fn write_bands<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -65,7 +72,7 @@ fn write_bands<W: Write>(
     Ok(())
 }
 
-fn write_schedules<W: Write>(
+fn write_schedules<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -85,7 +92,7 @@ fn write_schedules<W: Write>(
     Ok(())
 }
 
-fn write_overlays<W: Write>(
+fn write_overlays<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -102,7 +109,7 @@ fn write_overlays<W: Write>(
     Ok(())
 }
 
-fn write_names<W: Write>(
+fn write_names<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -121,7 +128,7 @@ fn write_names<W: Write>(
     Ok(())
 }
 
-fn write_titles<W: Write>(
+fn write_titles<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -143,7 +150,7 @@ fn write_titles<W: Write>(
     Ok(())
 }
 
-fn write_jobs<W: Write>(
+fn write_jobs<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -159,7 +166,7 @@ fn write_jobs<W: Write>(
     Ok(())
 }
 
-fn write_slowed_ui<W: Write>(
+fn write_slowed_ui<W: Write + ?Sized>(
     counted: &mut CountedWriter<'_, W>,
     fixture: &ScenarioFixture,
 ) -> io::Result<()> {
@@ -191,6 +198,91 @@ pub fn metadata_json(seed: u64, fixtures: &[ScenarioFixture]) -> io::Result<Stri
         entries.push_str(&metadata_entry(fixture)?);
     }
     Ok(format!("{{\"seed\":{seed},\"scenarios\":[{entries}]}}\n"))
+}
+
+/// Materializes selected scenarios and their metadata below an explicit directory.
+///
+/// Existing identical files are accepted. Different existing files are preserved and
+/// reported as errors.
+///
+/// # Errors
+///
+/// Returns an error creating, serializing, comparing, or atomically publishing files.
+pub fn materialize(output: &Path, seed: u64, scenarios: &[crate::Scenario]) -> io::Result<()> {
+    fs::create_dir_all(output)?;
+    let fixtures = scenarios
+        .iter()
+        .map(|scenario| scenario.generate(seed))
+        .collect::<Vec<_>>();
+    for fixture in &fixtures {
+        write_atomically(
+            output,
+            &format!("{}.jsonl", fixture.scenario.name()),
+            |writer| write_jsonl(writer, fixture).map(|_| ()),
+        )?;
+    }
+    let metadata = metadata_json(seed, &fixtures)?;
+    write_atomically(output, "metadata.json", |writer| {
+        writer.write_all(metadata.as_bytes())
+    })
+}
+
+fn write_atomically(
+    output: &Path,
+    file_name: &str,
+    write_contents: impl FnOnce(&mut dyn Write) -> io::Result<()>,
+) -> io::Result<()> {
+    let destination = output.join(file_name);
+    let temporary = output.join(format!(".{file_name}.tmp"));
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let result = (|| {
+        let mut writer = BufWriter::new(file);
+        write_contents(&mut writer)?;
+        writer.flush()?;
+        drop(writer);
+        if destination.exists() {
+            if files_match(&temporary, &destination)? {
+                return Ok(());
+            }
+            return Err(io::Error::other(format!(
+                "refusing to overwrite different fixture `{}`",
+                destination.display()
+            )));
+        }
+        fs::rename(&temporary, &destination)
+    })();
+    if result.is_err() || destination.exists() {
+        remove_owned_temp(&temporary)?;
+    }
+    result
+}
+
+fn files_match(left: &Path, right: &Path) -> io::Result<bool> {
+    let mut left = BufReader::new(fs::File::open(left)?);
+    let mut right = BufReader::new(fs::File::open(right)?);
+    let mut left_buffer = [0_u8; 8_192];
+    let mut right_buffer = [0_u8; 8_192];
+    loop {
+        let left_count = left.read(&mut left_buffer)?;
+        let right_count = right.read(&mut right_buffer)?;
+        if left_count != right_count || left_buffer[..left_count] != right_buffer[..right_count] {
+            return Ok(false);
+        }
+        if left_count == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+fn remove_owned_temp(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn metadata_entry(fixture: &ScenarioFixture) -> io::Result<String> {
@@ -249,11 +341,11 @@ fn job_kind(kind: JobKind) -> &'static str {
     }
 }
 
-struct CountedWriter<'a, W> {
+struct CountedWriter<'a, W: ?Sized> {
     writer: &'a mut W,
     hash: u64,
 }
-impl<'a, W: Write> CountedWriter<'a, W> {
+impl<'a, W: Write + ?Sized> CountedWriter<'a, W> {
     fn new(writer: &'a mut W) -> Self {
         Self {
             writer,
@@ -264,7 +356,7 @@ impl<'a, W: Write> CountedWriter<'a, W> {
         self.hash
     }
 }
-impl<W: Write> Write for CountedWriter<'_, W> {
+impl<W: Write + ?Sized> Write for CountedWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let written = self.writer.write(bytes)?;
         for byte in &bytes[..written] {
@@ -378,5 +470,64 @@ mod tests {
                 .iter()
                 .all(|item| item.retained_titles.len() <= 16)
         );
+    }
+
+    #[test]
+    fn materializes_all_files_and_accepts_identical_reruns() {
+        let directory = test_directory("all-files");
+        materialize(&directory, 2_026_030, &Scenario::all()).expect("first materialization");
+        for scenario in Scenario::all() {
+            assert!(
+                directory
+                    .join(format!("{}.jsonl", scenario.name()))
+                    .is_file()
+            );
+        }
+        assert!(directory.join("metadata.json").is_file());
+        materialize(&directory, 2_026_030, &Scenario::all()).expect("identical rerun");
+        remove_test_directory(&directory);
+    }
+
+    #[test]
+    fn refuses_different_destination_and_cleans_temp_file() {
+        let directory = test_directory("different-destination");
+        fs::create_dir_all(&directory).expect("test directory");
+        let destination = directory.join("normal-workday.jsonl");
+        fs::write(&destination, b"preserve this file\n").expect("preexisting fixture");
+        let error = materialize(&directory, 1, &[Scenario::NormalWorkday]).expect_err("refusal");
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert_eq!(
+            fs::read(&destination).expect("preserved bytes"),
+            b"preserve this file\n"
+        );
+        assert!(!directory.join(".normal-workday.jsonl.tmp").exists());
+        remove_test_directory(&directory);
+    }
+
+    #[test]
+    fn expected_metadata_matches_default_seed_and_configuration() {
+        const DEFAULT_SEED: u64 = 2_026_030;
+        let fixtures = Scenario::all().map(|scenario| scenario.generate(DEFAULT_SEED));
+        assert_eq!(
+            metadata_json(DEFAULT_SEED, &fixtures).expect("metadata"),
+            include_str!("../../../fixtures/performance/expected-metadata.json")
+        );
+        assert!(
+            include_str!("../../../fixtures/performance/generator-config.toml")
+                .lines()
+                .any(|line| line.trim() == "default_seed = 2_026_030")
+        );
+    }
+
+    fn test_directory(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join("openmanic-fixture-generator-tests")
+            .join(name)
+    }
+
+    fn remove_test_directory(directory: &std::path::Path) {
+        if directory.exists() {
+            fs::remove_dir_all(directory).expect("remove only test directory");
+        }
     }
 }

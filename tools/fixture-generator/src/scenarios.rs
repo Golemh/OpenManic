@@ -72,6 +72,14 @@ impl Scenario {
         }
     }
 
+    /// Finds a scenario by its frozen configuration name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|scenario| scenario.name() == name)
+    }
+
     /// Builds synthetic data using only the supplied deterministic seed.
     #[must_use]
     pub fn generate(self, seed: u64) -> ScenarioFixture {
