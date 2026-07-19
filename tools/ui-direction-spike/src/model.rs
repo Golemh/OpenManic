@@ -556,6 +556,10 @@ pub(crate) struct CategoryState {
 pub(crate) struct SettingsState {
     /// Whether technical/advanced settings are visible.
     pub advanced_visible: bool,
+    /// Whether local tracking starts automatically in the review state.
+    pub start_tracking_automatically: bool,
+    /// Whether the local review state collects titles prospectively.
+    pub collect_window_titles: bool,
 }
 
 /// A visible command reconciliation state with no external side effect.
@@ -646,6 +650,8 @@ impl Default for SpikeState {
             calendar_offset: 0,
             settings: SettingsState {
                 advanced_visible: false,
+                start_tracking_automatically: true,
+                collect_window_titles: true,
             },
             command: CommandState::Idle,
         }
@@ -731,6 +737,10 @@ pub(crate) enum SpikeAction {
     CalendarGoCurrent,
     /// Toggle advanced Settings disclosure.
     ToggleAdvancedSettings,
+    /// Set the local autostart review control.
+    SetStartTrackingAutomatically(bool),
+    /// Set the local prospective title-collection review control.
+    SetCollectWindowTitles(bool),
 }
 
 impl SpikeState {
@@ -830,6 +840,12 @@ impl SpikeState {
             SpikeAction::CalendarGoCurrent => self.calendar_offset = 0,
             SpikeAction::ToggleAdvancedSettings => {
                 self.settings.advanced_visible = !self.settings.advanced_visible;
+            }
+            SpikeAction::SetStartTrackingAutomatically(enabled) => {
+                self.settings.start_tracking_automatically = enabled;
+            }
+            SpikeAction::SetCollectWindowTitles(enabled) => {
+                self.settings.collect_window_titles = enabled;
             }
         }
     }

@@ -1032,10 +1032,20 @@ fn render_settings(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeToke
     );
     card(ui, tokens, |ui| {
         ui.strong("Tracking and privacy");
-        let mut start_tracking = true;
-        let mut collect_titles = true;
-        ui.checkbox(&mut start_tracking, "Start tracking automatically");
-        ui.checkbox(&mut collect_titles, "Collect window titles");
+        let mut start_tracking = state.settings.start_tracking_automatically;
+        if ui
+            .checkbox(&mut start_tracking, "Start tracking automatically")
+            .changed()
+        {
+            state.reduce(SpikeAction::SetStartTrackingAutomatically(start_tracking));
+        }
+        let mut collect_titles = state.settings.collect_window_titles;
+        if ui
+            .checkbox(&mut collect_titles, "Collect window titles")
+            .changed()
+        {
+            state.reduce(SpikeAction::SetCollectWindowTitles(collect_titles));
+        }
         ui.label(
             "Window-title collection affects future activity only; existing records are unchanged.",
         );
