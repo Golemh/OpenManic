@@ -4,7 +4,7 @@ use fixture_generator::{
     Scenario,
     scenarios::{OverlayKind, ScheduleMarker},
 };
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, time::Duration};
 
 const TIMELINE_DURATION: f32 = 120.0;
 const FIXTURE_SEED: u64 = 2_026_050;
@@ -315,6 +315,10 @@ pub(crate) struct MockSnapshot {
 impl MockSnapshot {
     /// Builds deterministic review data from the already accepted fixture-generator APIs.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The fixed review fixture keeps its source scenarios and visible mock data together for auditability."
+    )]
     pub(crate) fn deterministic() -> Self {
         let bands_fixture = Scenario::ThreeSegmentedBands.generate(FIXTURE_SEED);
         let normal_fixture = Scenario::NormalWorkday.generate(FIXTURE_SEED);
@@ -348,17 +352,11 @@ impl MockSnapshot {
             segments: bands_fixture
                 .state_band
                 .iter()
-                .enumerate()
-                .map(|(index, segment)| {
-                    let label = if index + 1 == bands_fixture.state_band.len() {
-                        "Powered off"
-                    } else {
-                        segment.label.as_str()
-                    };
+                .map(|segment| {
                     mock_segment(
                         segment.id,
                         BandKind::ActivityState,
-                        label,
+                        &segment.label,
                         segment.start.get(),
                         segment.end.get(),
                         origin,
@@ -383,21 +381,17 @@ impl MockSnapshot {
                 })
                 .collect(),
         };
-        let schedules =
-            schedule_fixture
-                .schedules
-                .iter()
-                .take(3)
-                .enumerate()
-                .map(|(index, item)| MockOverlay {
-                    id: item.id,
-                    label: schedule_label(&item.marker).to_owned(),
-                    range: TimeRange {
-                        start: 12.0 + index as f32 * 28.0,
-                        end: 32.0 + index as f32 * 28.0,
-                    },
-                    schedule: true,
-                });
+        let schedules = schedule_fixture
+            .schedules
+            .iter()
+            .take(3)
+            .zip([(12.0, 32.0), (40.0, 60.0), (68.0, 88.0)])
+            .map(|(item, (start, end))| MockOverlay {
+                id: item.id,
+                label: schedule_label(&item.marker).to_owned(),
+                range: TimeRange { start, end },
+                schedule: true,
+            });
         let focus = overlay_fixture
             .overlays
             .iter()
@@ -415,11 +409,16 @@ impl MockSnapshot {
             .activity_intervals
             .iter()
             .take(4)
-            .enumerate()
-            .map(|(index, interval)| MockApplication {
-                name: format!("Application {}", index + 1),
-                duration: format!("{} min", 48_u8.saturating_sub(index as u8 * 9)),
-                percent: 38_u8.saturating_sub(index as u8 * 7),
+            .zip([
+                ("Application 1", 48_u8, 38_u8),
+                ("Application 2", 39_u8, 31_u8),
+                ("Application 3", 30_u8, 24_u8),
+                ("Application 4", 21_u8, 17_u8),
+            ])
+            .map(|(interval, (name, minutes, percent))| MockApplication {
+                name: name.to_owned(),
+                duration: format!("{minutes} min"),
+                percent,
                 category: interval.category_id.clone(),
             })
             .collect();
@@ -458,10 +457,19 @@ fn mock_segment(
         id,
         band,
         label: label.to_owned(),
-        start: ((start - origin) as f32 / 1_000_000.0).clamp(0.0, TIMELINE_DURATION),
-        end: ((end - origin) as f32 / 1_000_000.0).clamp(0.0, TIMELINE_DURATION),
-        unfilled: label == "Powered off",
+        start: relative_seconds(start, origin),
+        end: relative_seconds(end, origin),
+        // OM-030 supplies `away`, not evidence of a Powered Off interval.
+        unfilled: false,
     }
+}
+
+fn relative_seconds(timestamp: i64, origin: i64) -> f32 {
+    let elapsed_microseconds = timestamp.saturating_sub(origin);
+    let microseconds = u64::try_from(elapsed_microseconds).unwrap_or_default();
+    Duration::from_micros(microseconds)
+        .as_secs_f32()
+        .clamp(0.0, TIMELINE_DURATION)
 }
 
 fn schedule_label(marker: &ScheduleMarker) -> &'static str {
@@ -727,6 +735,10 @@ pub(crate) enum SpikeAction {
 
 impl SpikeState {
     /// Applies a local action without issuing a production command or performing I/O.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keeping every review-only action in one exhaustive reducer makes the local interaction model auditable."
+    )]
     pub(crate) fn reduce(&mut self, action: SpikeAction) {
         match action {
             SpikeAction::Navigate(route) => self.route = route,
@@ -737,7 +749,7 @@ impl SpikeState {
             SpikeAction::TodayNext if self.today_offset < 0 => self.change_today(1),
             SpikeAction::TodayNext | SpikeAction::TodayGoCurrent => self.set_today_offset(0),
             SpikeAction::ToggleApplicationFilter => {
-                self.application_filter = !self.application_filter
+                self.application_filter = !self.application_filter;
             }
             SpikeAction::ToggleCategoryFilter => self.category_filter = !self.category_filter,
             SpikeAction::ClearNarrowing => {
@@ -778,15 +790,7 @@ impl SpikeState {
                         !self.layout.swapped_supporting_widgets;
                 }
             }
-            SpikeAction::ResizeTimeline => {
-                if matches!(self.layout_edit, LayoutEditState::Editing { .. }) {
-                    self.layout.timeline_span = if self.layout.timeline_span == 12 {
-                        8
-                    } else {
-                        12
-                    };
-                }
-            }
+            SpikeAction::ResizeTimeline => self.resize_timeline(),
             SpikeAction::SaveLayout => {
                 if matches!(self.layout_edit, LayoutEditState::Editing { .. }) {
                     self.layout_edit = LayoutEditState::Viewing;
@@ -907,11 +911,38 @@ impl SpikeState {
         self.layout_edit = LayoutEditState::Viewing;
         self.command = CommandState::Confirmed("Layout draft reverted locally");
     }
+
+    fn resize_timeline(&mut self) {
+        if !matches!(self.layout_edit, LayoutEditState::Editing { .. }) {
+            return;
+        }
+        self.layout.timeline_span = match self.layout.timeline_span {
+            12 => 8,
+            _ => 12,
+        };
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LayoutEditState, SpikeAction, SpikeState, TimeRange};
+    use super::{BandKind, LayoutEditState, SpikeAction, SpikeState, TimeRange};
+
+    #[test]
+    fn fixture_state_labels_remain_explicit_and_filled() {
+        let state_band = &SpikeState::default().snapshot.timeline.state.segments;
+        let labels = state_band
+            .iter()
+            .map(|segment| segment.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(labels, ["active", "idle", "active", "away"]);
+        assert!(
+            state_band
+                .iter()
+                .filter(|segment| segment.band == BandKind::ActivityState)
+                .all(|segment| !segment.unfilled)
+        );
+    }
 
     #[test]
     fn today_navigation_never_moves_past_the_current_day() {

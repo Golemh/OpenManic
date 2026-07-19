@@ -29,25 +29,29 @@ impl eframe::App for UiDirectionApp {
             render_top_controls(ui, &mut self.state, &self.tokens);
             ui.add_space(self.tokens.space);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                let desired_width = f32::from(self.state.preview_width.logical_pixels());
-                ui.horizontal(|ui| {
-                    ui.add_space(((ui.available_width() - desired_width) / 2.0).max(0.0));
-                    egui::Frame::new()
-                        .fill(self.tokens.panel)
-                        .inner_margin(egui::Margin::same(16))
-                        .stroke(Stroke::new(1.0, self.tokens.outline))
-                        .show(ui, |ui| {
-                            ui.set_width(desired_width.min(ui.available_width()));
-                            render_shell(ui, &mut self.state, &self.tokens);
-                        });
-                });
+                render_preview(ui, &mut self.state, &self.tokens);
                 ui.add_space(self.tokens.space * 2.0);
             });
         });
     }
 }
 
-/// A small local semantic token set. It is intentionally not the future ThemeSpec schema.
+fn render_preview(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeTokens) {
+    let desired_width = f32::from(state.preview_width.logical_pixels());
+    ui.horizontal(|ui| {
+        ui.add_space(((ui.available_width() - desired_width) / 2.0).max(0.0));
+        egui::Frame::new()
+            .fill(tokens.panel)
+            .inner_margin(egui::Margin::same(16))
+            .stroke(Stroke::new(1.0, tokens.outline))
+            .show(ui, |ui| {
+                ui.set_width(desired_width.min(ui.available_width()));
+                render_shell(ui, state, tokens);
+            });
+    });
+}
+
+/// A small local semantic token set. It is intentionally not the future `ThemeSpec` schema.
 #[derive(Clone, Copy)]
 struct SpikeTokens {
     canvas: Color32,
@@ -104,7 +108,7 @@ impl SpikeTokens {
             BandKind::Application => self.application,
             BandKind::ActivityState => match segment.label.as_str() {
                 "active" => self.active,
-                "idle" => self.away,
+                "idle" | "away" => self.away,
                 "Powered off" => self.panel,
                 _ => self.unavailable,
             },
@@ -127,24 +131,28 @@ fn render_top_controls(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &Spike
             }
         }
         ui.separator();
-        egui::ComboBox::from_id_salt("mock-data-state")
-            .selected_text(state.data_state.label())
-            .show_ui(ui, |ui| {
-                for data_state in MockDataState::all() {
-                    if ui
-                        .selectable_label(state.data_state == data_state, data_state.label())
-                        .clicked()
-                    {
-                        state.reduce(SpikeAction::SelectDataState(data_state));
-                    }
-                }
-            });
+        render_data_state_picker(ui, state);
         ui.separator();
         ui.colored_label(
             tokens.content_secondary,
             "Width presets are logical-layout previews, not DPI evidence.",
         );
     });
+}
+
+fn render_data_state_picker(ui: &mut egui::Ui, state: &mut SpikeState) {
+    egui::ComboBox::from_id_salt("mock-data-state")
+        .selected_text(state.data_state.label())
+        .show_ui(ui, |ui| {
+            for data_state in MockDataState::all() {
+                if ui
+                    .selectable_label(state.data_state == data_state, data_state.label())
+                    .clicked()
+                {
+                    state.reduce(SpikeAction::SelectDataState(data_state));
+                }
+            }
+        });
 }
 
 fn render_shell(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeTokens) {
@@ -187,20 +195,24 @@ fn render_command_status(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &Spi
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(color, message);
             if matches!(state.command, CommandState::Pending(_)) {
-                if ui.button("Simulate accepted").clicked() {
-                    state.reduce(SpikeAction::ConfirmCommand(
-                        "Action accepted in the local spike",
-                    ));
-                }
-                if ui.button("Simulate rejected").clicked() {
-                    state.reduce(SpikeAction::RejectCommand(
-                        "Action rejected; review the inline explanation",
-                    ));
-                }
+                render_pending_command_controls(ui, state);
             }
         });
     });
     ui.add_space(tokens.space);
+}
+
+fn render_pending_command_controls(ui: &mut egui::Ui, state: &mut SpikeState) {
+    if ui.button("Simulate accepted").clicked() {
+        state.reduce(SpikeAction::ConfirmCommand(
+            "Action accepted in the local spike",
+        ));
+    }
+    if ui.button("Simulate rejected").clicked() {
+        state.reduce(SpikeAction::RejectCommand(
+            "Action rejected; review the inline explanation",
+        ));
+    }
 }
 
 fn render_data_state_banner(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeTokens) {
@@ -231,14 +243,18 @@ fn render_data_state_banner(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &
         ui.horizontal_wrapped(|ui| {
             ui.colored_label(color, message);
             if state.data_state == MockDataState::Failed {
-                if ui.button("Retry locally").clicked() {
-                    state.reduce(SpikeAction::SelectDataState(MockDataState::Refreshing));
-                }
-                egui::CollapsingHeader::new("Technical details").show(ui, |ui| {
-                    ui.monospace("Mock query: deterministic review fixture unavailable")
-                });
+                render_failed_data_state_controls(ui, state);
             }
         });
+    });
+}
+
+fn render_failed_data_state_controls(ui: &mut egui::Ui, state: &mut SpikeState) {
+    if ui.button("Retry locally").clicked() {
+        state.reduce(SpikeAction::SelectDataState(MockDataState::Refreshing));
+    }
+    egui::CollapsingHeader::new("Technical details").show(ui, |ui| {
+        ui.monospace("Mock query: deterministic review fixture unavailable");
     });
 }
 
@@ -384,7 +400,7 @@ fn render_timeline(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeToke
         let desired_size = Vec2::new(ui.available_width().max(380.0), 226.0);
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
         paint_timeline(ui, rect, state, tokens);
-        handle_timeline_interaction(ui, response, rect, state);
+        handle_timeline_interaction(ui, &response, rect, state);
         render_timeline_details(ui, state, tokens);
     });
 }
@@ -483,7 +499,7 @@ fn paint_band(
         } else {
             painter.rect_filled(segment_rect, 0.0, tokens.segment_color(segment));
         }
-        if selection_matches(&state.timeline.selection, segment) {
+        if selection_matches(state.timeline.selection.as_ref(), segment) {
             painter.line_segment(
                 [segment_rect.left_top(), segment_rect.right_top()],
                 Stroke::new(3.0, tokens.selected),
@@ -562,7 +578,7 @@ fn paint_time_axis(painter: &Painter, plot: Rect, state: &SpikeState, tokens: &S
 
 fn handle_timeline_interaction(
     ui: &egui::Ui,
-    response: egui::Response,
+    response: &egui::Response,
     rect: Rect,
     state: &mut SpikeState,
 ) {
@@ -572,19 +588,19 @@ fn handle_timeline_interaction(
         .and_then(|position| hit_segment(state, plot, position))
         .map(segment_reference);
     state.reduce(SpikeAction::SetHover(hover));
-    if response.drag_started() {
-        if let Some(position) = response.interact_pointer_pos() {
-            state.reduce(SpikeAction::BeginTimelineDrag(x_to_time(
-                plot, state, position.x,
-            )));
-        }
+    if response.drag_started()
+        && let Some(position) = response.interact_pointer_pos()
+    {
+        state.reduce(SpikeAction::BeginTimelineDrag(x_to_time(
+            plot, state, position.x,
+        )));
     }
-    if response.drag_stopped() {
-        if let Some(position) = response.interact_pointer_pos() {
-            state.reduce(SpikeAction::EndTimelineDrag(x_to_time(
-                plot, state, position.x,
-            )));
-        }
+    if response.drag_stopped()
+        && let Some(position) = response.interact_pointer_pos()
+    {
+        state.reduce(SpikeAction::EndTimelineDrag(x_to_time(
+            plot, state, position.x,
+        )));
     }
     if response.clicked() {
         if let Some(segment) = response
@@ -605,6 +621,10 @@ fn handle_timeline_interaction(
     }
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "The review-only timeline keeps its related immediate-mode controls in one scoped panel."
+)]
 fn render_timeline_details(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeTokens) {
     ui.horizontal_wrapped(|ui| {
         match &state.timeline.hover {
@@ -679,6 +699,8 @@ fn render_timeline_details(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &S
     }
 }
 
+type WidgetRenderer = fn(&mut egui::Ui, &mut SpikeState, &SpikeTokens);
+
 fn render_supporting_widgets(
     ui: &mut egui::Ui,
     state: &mut SpikeState,
@@ -691,7 +713,7 @@ fn render_supporting_widgets(
         render_focus_widget(ui, state, tokens);
         return;
     }
-    let mut renderers: [fn(&mut egui::Ui, &mut SpikeState, &SpikeTokens); 3] = [
+    let mut renderers: [WidgetRenderer; 3] = [
         render_usage_widget,
         render_distribution_widget,
         render_focus_widget,
@@ -731,6 +753,10 @@ fn render_usage_widget(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &Spike
     });
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "The review-only distribution alternatives share a compact immediate-mode card."
+)]
 fn render_distribution_widget(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeTokens) {
     card(ui, tokens, |ui| {
         ui.horizontal_wrapped(|ui| {
@@ -841,6 +867,10 @@ fn render_overview(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeToke
     );
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "Each compact category row keeps its selection and secondary-detail controls together."
+)]
 fn render_categories(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &SpikeTokens) {
     heading(
         ui,
@@ -952,8 +982,8 @@ fn render_calendar_surface(ui: &mut egui::Ui, state: &mut SpikeState, tokens: &S
         ],
         Stroke::new(1.0, tokens.outline),
     );
-    for hour in [9, 10, 11, 12, 13, 14] {
-        let y = rect.top() + 20.0 + (hour - 9) as f32 * 52.0;
+    for hour in [9_i16, 10, 11, 12, 13, 14] {
+        let y = rect.top() + 20.0 + f32::from(hour - 9) * 52.0;
         painter.text(
             Pos2::new(rect.left() + 8.0, y),
             Align2::LEFT_CENTER,
@@ -1082,7 +1112,7 @@ fn x_to_time(plot: Rect, state: &SpikeState, x: f32) -> f32 {
     state.timeline.view_start + normalized * state.timeline.view_span
 }
 
-fn hit_segment<'a>(state: &'a SpikeState, plot: Rect, position: Pos2) -> Option<&'a MockSegment> {
+fn hit_segment(state: &SpikeState, plot: Rect, position: Pos2) -> Option<&MockSegment> {
     let category_bottom = plot.top() + 78.0;
     let state_bottom = category_bottom + 34.0;
     let band = if position.y < category_bottom {
@@ -1107,12 +1137,12 @@ fn segment_reference(segment: &MockSegment) -> MockSegmentRef {
     }
 }
 
-fn selection_matches(selection: &Option<MockSelection>, segment: &MockSegment) -> bool {
+fn selection_matches(selection: Option<&MockSelection>, segment: &MockSegment) -> bool {
     matches!(selection, Some(MockSelection::Segment(selected)) if selected.id == segment.id && selected.band == segment.band)
 }
 
 fn format_time(seconds: f32) -> String {
-    format!("09:{:02}", (seconds / 2.0).round() as u8)
+    format!("09:{:02.0}", (seconds / 2.0).round())
 }
 
 fn format_range(range: TimeRange) -> String {
