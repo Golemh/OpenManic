@@ -14,12 +14,14 @@ compile_error!("select one renderer: renderer-wgpu or renderer-glow");
 
 mod app;
 mod controller;
+mod distribution;
 mod model;
 mod reducer;
 mod repaint;
 mod shell;
 pub mod timeline;
 mod today;
+mod usage;
 
 pub use app::OpenManicApp;
 pub use controller::{
