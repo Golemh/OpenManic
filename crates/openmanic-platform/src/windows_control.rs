@@ -11,6 +11,9 @@ use std::sync::Arc;
 #[cfg(windows)]
 use std::{error::Error, fmt};
 
+#[cfg(windows)]
+use crate::windows_tray::WindowsTray;
+
 use crate::windows_raw::{
     RawEventIngress, RawForegroundEvent, RawIngressDrainError, RawWindowHandle, receive_time_utc,
 };
@@ -378,6 +381,8 @@ pub enum WindowsControlError {
     ForegroundHookInstall,
     /// Windows failed to install the one-second foreground health-poll timer.
     HealthTimerInstall,
+    /// Windows could not install or recover the notification-area tray icon.
+    Tray,
     /// The message loop reported an unrecoverable failure.
     MessageLoop,
 }
@@ -393,6 +398,7 @@ impl fmt::Display for WindowsControlError {
             Self::CallbackRegistrationUnavailable => "Windows callback routing is not available",
             Self::ForegroundHookInstall => "Windows could not install the foreground hook",
             Self::HealthTimerInstall => "Windows could not install the foreground health timer",
+            Self::Tray => "Windows could not install or recover the OpenManic tray icon",
             Self::MessageLoop => "Windows reported a control message-loop failure",
         };
         formatter.write_str(message)
@@ -490,6 +496,18 @@ impl WindowsControlWindow {
         })
     }
 
+    /// Installs the notification-area icon on this hidden control window's message loop.
+    ///
+    /// The returned tray keeps native callbacks on the control thread and exposes only queued
+    /// local actions for the primary composition task to route.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsControlError::Tray`] when Windows rejects the notification-area icon.
+    pub fn install_tray(&self) -> Result<WindowsTray, WindowsControlError> {
+        WindowsTray::install(self.window).map_err(|_| WindowsControlError::Tray)
+    }
+
     /// Runs the installing thread's message loop until Windows posts `WM_QUIT`.
     ///
     /// Every delivered message is dispatched normally. The one-second timer causes a fresh
@@ -534,6 +552,55 @@ impl WindowsControlWindow {
         }
     }
 
+    /// Runs the control loop while also dispatching notification-area callbacks.
+    ///
+    /// The tray only queues local actions; it never invokes the application service from a
+    /// callback. Callers drain those actions through [`WindowsTray::take_next_action`] and route
+    /// them through the accepted composition path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsControlError::Tray`] if Explorer recreation cannot restore the tray icon,
+    /// or [`WindowsControlError::MessageLoop`] when Windows reports message retrieval failure.
+    pub fn run_with_tray(
+        mut self,
+        adapter: &mut WindowsControlAdapter,
+        sink: &dyn TrackingEvidenceSink,
+        tray: &mut WindowsTray,
+    ) -> Result<(), WindowsControlError> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, MSG, TranslateMessage,
+        };
+
+        adapter.note_callback_registration_loss();
+        let _ = adapter.drain(sink);
+        let result = loop {
+            let mut message = MSG::default();
+            // SAFETY: MSG is initialized storage owned by this thread. Passing no HWND and zero
+            // filters reads the installing thread's queue, which this object owns.
+            let message_result = unsafe { GetMessageW(&raw mut message, None, 0, 0) };
+            if message_result.0 == -1 {
+                break Err(WindowsControlError::MessageLoop);
+            }
+            if message_result.0 == 0 {
+                break Ok(());
+            }
+            if let Err(error) = self.dispatch_message_with_tray(message, adapter, tray) {
+                break Err(error);
+            }
+            // SAFETY: The message was obtained from this thread's queue and remains valid for
+            // the duration of this dispatch. Windows owns any message-associated memory.
+            unsafe {
+                let _ = TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+            adapter.note_callback_registration_loss();
+            let _ = adapter.drain(sink);
+        };
+        tray.remove_icon();
+        result
+    }
+
     /// Drains all currently queued messages without blocking, primarily for controlled fixtures.
     #[must_use]
     pub fn pump_available(
@@ -564,6 +631,42 @@ impl WindowsControlWindow {
         adapter.drain(sink)
     }
 
+    /// Drains available control and notification-area messages without blocking.
+    ///
+    /// This is the controlled-fixture counterpart of [`Self::run_with_tray`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WindowsControlError::Tray`] when a taskbar recreation cannot restore the icon.
+    pub fn pump_available_with_tray(
+        &mut self,
+        adapter: &mut WindowsControlAdapter,
+        sink: &dyn TrackingEvidenceSink,
+        tray: &mut WindowsTray,
+    ) -> Result<WindowsControlDrain, WindowsControlError> {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+        };
+
+        loop {
+            let mut message = MSG::default();
+            // SAFETY: MSG is initialized stack storage and this method runs on the installing
+            // thread. PM_REMOVE prevents a message from being dispatched twice.
+            let available = unsafe { PeekMessageW(&raw mut message, None, 0, 0, PM_REMOVE) };
+            if !available.as_bool() {
+                break;
+            }
+            self.dispatch_message_with_tray(message, adapter, tray)?;
+            // SAFETY: The message came from this thread's queue and is valid for dispatch.
+            unsafe {
+                let _ = TranslateMessage(&raw const message);
+                DispatchMessageW(&raw const message);
+            }
+        }
+        adapter.note_callback_registration_loss();
+        Ok(adapter.drain(sink))
+    }
+
     fn dispatch_message(
         &mut self,
         message: windows::Win32::UI::WindowsAndMessaging::MSG,
@@ -581,6 +684,18 @@ impl WindowsControlWindow {
                 receive_time_utc(),
             );
         }
+    }
+
+    fn dispatch_message_with_tray(
+        &mut self,
+        message: windows::Win32::UI::WindowsAndMessaging::MSG,
+        adapter: &WindowsControlAdapter,
+        tray: &mut WindowsTray,
+    ) -> Result<(), WindowsControlError> {
+        tray.handle_control_message(message.message, message.wParam.0, message.lParam.0)
+            .map_err(|_| WindowsControlError::Tray)?;
+        self.dispatch_message(message, adapter);
+        Ok(())
     }
 }
 

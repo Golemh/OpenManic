@@ -16,6 +16,8 @@ mod windows_control;
 mod windows_identity;
 mod windows_lifecycle;
 mod windows_raw;
+mod windows_single_instance;
+mod windows_tray;
 
 pub use adapter::{
     AdapterObservation, AdapterObservationKind, AdapterPublishResult, AdapterPublishStatus,
@@ -32,3 +34,14 @@ pub use windows_control::{
 };
 #[cfg(windows)]
 pub use windows_control::{WindowsControlError, WindowsControlWindow};
+pub use windows_single_instance::{
+    ActivationCommandDecode, LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT,
+};
+#[cfg(windows)]
+pub use windows_single_instance::{
+    ActivationSendOutcome, InstanceAcquisition, WindowsActivationServer, WindowsExistingInstance,
+    WindowsInstanceError, WindowsInstanceOwner,
+};
+pub use windows_tray::{CloseToTrayDisposition, WindowsPlatformAction, WindowsTrayController};
+#[cfg(windows)]
+pub use windows_tray::{WindowsTray, WindowsTrayError};
