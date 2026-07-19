@@ -11,3 +11,20 @@ compile_error!("select exactly one renderer: renderer-wgpu or renderer-glow");
 
 #[cfg(not(any(feature = "renderer-wgpu", feature = "renderer-glow")))]
 compile_error!("select one renderer: renderer-wgpu or renderer-glow");
+
+mod app;
+mod controller;
+mod model;
+mod reducer;
+mod repaint;
+mod shell;
+
+pub use app::OpenManicApp;
+pub use controller::{
+    CommandDispatcher, DispatchDrain, InboundMessage, QueueCapacityError, QueueOverflow,
+    UiController,
+};
+pub use model::{
+    DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
+    SnapshotReception, UiAction, UiModel, UserFacingError,
+};
