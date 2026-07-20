@@ -1200,6 +1200,7 @@ struct VerticalSliceApp {
     close_to_tray: WindowsTrayController,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
+    schedule_draft_range: Option<HalfOpenInterval>,
     #[cfg(windows)]
     instance_owner: WindowsInstanceOwner,
 }
@@ -1271,6 +1272,7 @@ impl VerticalSlice {
             close_to_tray: WindowsTrayController::new(),
             projection_sequence: 1,
             requested_range: None,
+            schedule_draft_range: None,
             #[cfg(windows)]
             instance_owner: self.instance_owner,
         }
@@ -1358,7 +1360,14 @@ impl VerticalSliceApp {
                         .reduce_local(UiAction::Today(action));
                 }
                 TimelineRenderAction::ViewRangeChanged { range } => self.publish_projection(range),
-                TimelineRenderAction::ScheduleRequested { .. } => {}
+                TimelineRenderAction::ScheduleRequested { range } => {
+                    self.schedule_draft_range = Some(range);
+                }
+            }
+        }
+        if let Some(range) = self.schedule_draft_range {
+            if render_schedule_draft(ui, range) {
+                self.schedule_draft_range = None;
             }
         }
         ui.add_space(12.0);
@@ -1446,6 +1455,20 @@ impl VerticalSliceApp {
             context.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
         }
     }
+}
+
+fn render_schedule_draft(ui: &mut eframe::egui::Ui, range: HalfOpenInterval) -> bool {
+    ui.group(|ui| {
+        ui.strong("New schedule");
+        ui.label(format!(
+            "Provisional range: {} to {} UTC",
+            range.start().get(),
+            range.end().get()
+        ));
+        ui.label("Schedule details and save actions are being connected to the authoritative service.");
+        ui.button("Cancel").clicked()
+    })
+    .inner
 }
 
 impl eframe::App for VerticalSliceApp {
