@@ -1050,31 +1050,7 @@ fn run_writer_worker(
     ui_inbox: Arc<UiInbox>,
 ) {
     let store = Arc::new(Mutex::new(store));
-    let run_id = tracker_run_id();
-    let persistence = WriterPersistence {
-        store: Arc::clone(&store),
-        first_write: true,
-    };
-    let tracking = TrackingService::new(run_id, persistence);
-    let schedule_persistence = WriterPersistence {
-        store: Arc::clone(&store),
-        first_write: false,
-    };
-    let schedules = ScheduleService::new(schedule_persistence);
-    let focus_persistence = WriterPersistence {
-        store: Arc::clone(&store),
-        first_write: false,
-    };
-    let focus = FocusService::new(focus_persistence, UnavailableFocusNotifications);
-    let mut services = WriterServices {
-        tracking,
-        schedules,
-        focus,
-        ui_event_sequence: 0,
-    };
-    let _ = services
-        .focus
-        .reconcile_after_restart(UtcMicros::new(utc_now_micros()));
+    let mut services = writer_services(&store);
     let mut current_projection = None;
     let mut running = true;
 
@@ -1132,6 +1108,34 @@ fn run_writer_worker(
             LaneReceive::Empty => thread::park_timeout(WORKER_IDLE_INTERVAL),
             LaneReceive::Closed => running = false,
         }
+    }
+}
+
+fn writer_services(store: &Arc<Mutex<SqliteStore>>) -> WriterServices {
+    let tracking = TrackingService::new(
+        tracker_run_id(),
+        WriterPersistence {
+            store: Arc::clone(store),
+            first_write: true,
+        },
+    );
+    let schedules = ScheduleService::new(WriterPersistence {
+        store: Arc::clone(store),
+        first_write: false,
+    });
+    let mut focus = FocusService::new(
+        WriterPersistence {
+            store: Arc::clone(store),
+            first_write: false,
+        },
+        UnavailableFocusNotifications,
+    );
+    let _ = focus.reconcile_after_restart(UtcMicros::new(utc_now_micros()));
+    WriterServices {
+        tracking,
+        schedules,
+        focus,
+        ui_event_sequence: 0,
     }
 }
 
