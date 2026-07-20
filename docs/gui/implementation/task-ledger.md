@@ -180,14 +180,18 @@ Remaining risk or waiver:
   architecture, delivery/setup, and UI specifications.
 - **Branch/worktree:** `codex/openmanic-mvp-implementation-continuation`, primary integration checkout.
 - **Base SHA:** `c4b19bfa3b1c5bed04eb0525e62cacbcb9444e0d`.
-- **Status:** implementation complete through `54492fc`: the Settings screen hosts CSV
+- **Status:** implementation is pending the final Phase 6 gate. The Settings screen hosts CSV
   import/export with explicit title disclosure, verified backup/restore, verified data-location
   move with persisted per-user locator, privacy-safe diagnostics export, and named recoverable
-  data-operation jobs. Restore and move quiesce the writer before storage work, retain the source
-  on move, and rebuild the local runtime after completion.
-- **Evidence:** `CARGO_TARGET_DIR=target-msvc cargo +stable-x86_64-pc-windows-msvc xtask quality`
-  passed: format check, locked workspace check, strict Clippy, workspace tests, rustdoc, and docs
-  validation.
+  data-operation jobs. CSV imports now honor cancellation before and during merge: the transaction
+  savepoint rolls back merged entities while retaining terminal cancelled job/batch metadata.
+  Restore and move quiesce the writer before storage work, retain the source on move, and rebuild
+  the local runtime after completion.
+- **Evidence:** the consolidated MSVC gate passed after the Settings visibility and CSV-cancellation
+  changes: `CARGO_TARGET_DIR=target-msvc cargo +stable-x86_64-pc-windows-msvc xtask quality`
+  completed formatting, locked workspace checks, strict Clippy, the workspace test suite, rustdoc,
+  and docs validation. Focused cancellation evidence confirms no staged entity is merged after
+  cancellation.
 - **G6 limitation:** the automated quality gate is green, but the real-Windows/manual acceptance
   evidence is still unobserved: actual restore/move behavior, Explorer/tray recovery, autostart
   repair, and portable-artifact replacement must be recorded before declaring G6 accepted.

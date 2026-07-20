@@ -6,7 +6,7 @@ use std::{
 };
 
 use openmanic_application::{
-    AcceptedWindowTitle, ApplicationError, ApplicationPort, CatalogPersistence,
+    AcceptedWindowTitle, ApplicationError, ApplicationPort, CancellationToken, CatalogPersistence,
     CatalogPersistenceError, CsvImportRequest, DataRevision, EntityRevision, FocusKind,
     FocusPersistence, FocusPersistenceError, FocusSnapshot, ImportFailure, ImportScopeOutcome,
     LayoutPersistence, LayoutPersistenceError, LayoutSnapshot, PortFailureReason, SavedViewId,
@@ -595,15 +595,37 @@ impl StorageWriter {
     ///
     /// Returns [`StorageError`] if the local source cannot be read or SQLite cannot persist the
     /// batch, job, failures, or accepted records.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one transaction deliberately owns the complete CSV import lifecycle"
-    )]
     pub fn import_csv(
         &mut self,
         request: &CsvImportRequest,
         completed_at_utc: UtcMicros,
     ) -> Result<ImportScopeOutcome, StorageError> {
+        let (_source, cancellation) = openmanic_application::CancellationSource::new();
+        self.import_csv_cancellable(request, completed_at_utc, &cancellation)?
+            .ok_or(StorageError::DataOperationFailed {
+                operation: "cancel CSV import",
+            })
+    }
+
+    /// Imports CSV data while honoring cancellation before and during the transactional merge.
+    ///
+    /// A cancellation leaves the import batch and job records in their terminal cancelled state,
+    /// retains row validation failures already discovered, and rolls back every merged entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the local source cannot be read or SQLite cannot persist the
+    /// import batch, staged rows, cancellation checkpoint, or completed result.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one transaction deliberately owns the complete CSV import lifecycle"
+    )]
+    pub fn import_csv_cancellable(
+        &mut self,
+        request: &CsvImportRequest,
+        completed_at_utc: UtcMicros,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<ImportScopeOutcome>, StorageError> {
         let bytes =
             fs::read(request.source().path()).map_err(|_| StorageError::DataOperationFailed {
                 operation: "read CSV import",
@@ -657,6 +679,21 @@ impl StorageWriter {
         let mut parsed = 0_u64;
         let mut accepted = 0_u64;
         for record in records.into_iter().skip(1) {
+            if cancellation.is_cancelled() {
+                complete_cancelled_csv_import(
+                    &transaction,
+                    request,
+                    batch_row_id,
+                    parsed,
+                    accepted,
+                    completed_at_utc,
+                    "staged",
+                )?;
+                transaction
+                    .commit()
+                    .map_err(|error| database_error(&error, "commit cancelled CSV import"))?;
+                return Ok(None);
+            }
             parsed = parsed.saturating_add(1);
             match validate_csv_record(&record) {
                 Ok(fields) => {
@@ -679,8 +716,46 @@ impl StorageWriter {
                 }
             }
         }
+        if cancellation.is_cancelled() {
+            complete_cancelled_csv_import(
+                &transaction,
+                request,
+                batch_row_id,
+                parsed,
+                accepted,
+                completed_at_utc,
+                "staged",
+            )?;
+            transaction
+                .commit()
+                .map_err(|error| database_error(&error, "commit cancelled CSV import"))?;
+            return Ok(None);
+        }
         let revision = next_revision(&transaction)?;
-        merge_csv_stage(&transaction, revision, batch_row_id)?;
+        transaction
+            .execute_batch("SAVEPOINT csv_import_merge")
+            .map_err(|error| database_error(&error, "begin CSV import merge savepoint"))?;
+        if merge_csv_stage(&transaction, revision, batch_row_id, cancellation)? {
+            transaction
+                .execute_batch("ROLLBACK TO csv_import_merge; RELEASE csv_import_merge")
+                .map_err(|error| database_error(&error, "rollback cancelled CSV import merge"))?;
+            complete_cancelled_csv_import(
+                &transaction,
+                request,
+                batch_row_id,
+                parsed,
+                accepted,
+                completed_at_utc,
+                "staged",
+            )?;
+            transaction
+                .commit()
+                .map_err(|error| database_error(&error, "commit cancelled CSV import"))?;
+            return Ok(None);
+        }
+        transaction
+            .execute_batch("RELEASE csv_import_merge")
+            .map_err(|error| database_error(&error, "release CSV import merge savepoint"))?;
         let rejected: u64 = transaction
             .query_row(
                 "SELECT COUNT(*) FROM import_error WHERE import_batch_id = ?1",
@@ -725,11 +800,11 @@ impl StorageWriter {
         transaction
             .commit()
             .map_err(|error| database_error(&error, "commit CSV import"))?;
-        ImportScopeOutcome::try_new(parsed, accepted, rejected, committed).map_err(|_| {
-            StorageError::InvalidStoredValue {
+        ImportScopeOutcome::try_new(parsed, accepted, rejected, committed)
+            .map(Some)
+            .map_err(|_| StorageError::InvalidStoredValue {
                 field: "CSV import counts",
-            }
-        })
+            })
     }
 
     /// Stores an application's current category association and observation bounds atomically.
@@ -2608,6 +2683,44 @@ fn insert_import_failure(
     Ok(())
 }
 
+fn complete_cancelled_csv_import(
+    transaction: &Transaction<'_>,
+    request: &CsvImportRequest,
+    batch_row_id: i64,
+    parsed: u64,
+    accepted: u64,
+    completed_at_utc: UtcMicros,
+    checkpoint: &str,
+) -> Result<(), StorageError> {
+    let rejected = parsed.saturating_sub(accepted);
+    transaction
+        .execute(
+            "UPDATE import_batch SET state = 3, parsed_count = ?2, accepted_count = ?3,
+             rejected_count = ?4, committed_count = 0, completed_utc_us = ?5 WHERE id = ?1",
+            params![
+                batch_row_id,
+                as_i64(parsed, "cancelled CSV parsed count")?,
+                as_i64(accepted, "cancelled CSV accepted count")?,
+                as_i64(rejected, "cancelled CSV rejected count")?,
+                completed_at_utc.get()
+            ],
+        )
+        .map_err(|error| database_error(&error, "complete cancelled CSV import batch"))?;
+    transaction
+        .execute(
+            "UPDATE job_record SET state = 3, progress_current = ?2, progress_total = ?2,
+             safe_checkpoint = ?3, completed_utc_us = ?4 WHERE public_id = ?1",
+            params![
+                job_public_id(request.job_id().get()).as_slice(),
+                as_i64(parsed, "cancelled CSV progress")?,
+                checkpoint,
+                completed_at_utc.get()
+            ],
+        )
+        .map_err(|error| database_error(&error, "complete cancelled CSV import job"))?;
+    Ok(())
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "the transactional category, application, then activity merge order is deliberately explicit"
@@ -2616,7 +2729,8 @@ fn merge_csv_stage(
     transaction: &Transaction<'_>,
     revision: DataRevision,
     batch_row_id: i64,
-) -> Result<(), StorageError> {
+    cancellation: &CancellationToken,
+) -> Result<bool, StorageError> {
     let mut categories = transaction
         .prepare(
             "SELECT stable_id, display_name FROM import_stage_v1 WHERE record_type = 'category'",
@@ -2628,6 +2742,9 @@ fn merge_csv_stage(
         })
         .map_err(|error| database_error(&error, "iterate staged CSV categories"))?;
     for category in categories {
+        if cancellation.is_cancelled() {
+            return Ok(true);
+        }
         let (id, name) =
             category.map_err(|error| database_error(&error, "read staged CSV category"))?;
         let category_id = hex_id_bytes(&id).ok_or(StorageError::DataOperationFailed {
@@ -2648,6 +2765,9 @@ fn merge_csv_stage(
         })
         .map_err(|error| database_error(&error, "iterate staged CSV applications"))?;
     for application in applications {
+        if cancellation.is_cancelled() {
+            return Ok(true);
+        }
         let (id, category, name) =
             application.map_err(|error| database_error(&error, "read staged CSV application"))?;
         let category_row: Option<i64> = if category.is_empty() {
@@ -2688,6 +2808,9 @@ fn merge_csv_stage(
         })
         .map_err(|error| database_error(&error, "iterate staged CSV activities"))?;
     for row in rows {
+        if cancellation.is_cancelled() {
+            return Ok(true);
+        }
         let (line, stable, start, end, state, cause, application) =
             row.map_err(|error| database_error(&error, "read staged CSV activity"))?;
         let tracker = activity_tracker_id(&stable).ok_or(StorageError::DataOperationFailed {
@@ -2767,7 +2890,7 @@ fn merge_csv_stage(
             params![tracker_row, start, end, state, cause, application_row, nonnegative_i64(revision.get(), "CSV activity revision")?],
         ).map_err(|error| database_error(&error, "merge CSV activity"))?;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn hex_id_bytes(value: &str) -> Option<[u8; 16]> {
@@ -3224,14 +3347,14 @@ mod tests {
     use std::time::Duration;
 
     use openmanic_application::{
-        CommandEnvelope, CommandId, EntityRevision, FocusCommand, FocusKind,
-        FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
-        FocusSnapshot, LayoutPersistence, LayoutSnapshot, OrderingKey, SavedViewId,
-        SavedViewPersistence, SavedViewSnapshot, ScheduleId, SchedulePersistence,
-        SchedulePersistenceError, ScheduleSnapshot, SchemaRevision, SettingsPersistence,
-        SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode, TitleObservationResult,
-        TitleStabilizer, TrackingCheckpoint, TrackingPersistenceIntent, TrackingPersistencePort,
-        TrackingPersistenceSubmit,
+        CancellationSource, CommandEnvelope, CommandId, CsvImportRequest, DataOperationDestination,
+        EntityRevision, FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort,
+        FocusPersistence, FocusService, FocusSnapshot, ImportBatchId, JobId, LayoutPersistence,
+        LayoutSnapshot, OrderingKey, SavedViewId, SavedViewPersistence, SavedViewSnapshot,
+        ScheduleId, SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot,
+        SchemaRevision, SettingsPersistence, SettingsPersistenceError, SettingsSnapshot,
+        SettingsThemeMode, TitleObservationResult, TitleStabilizer, TrackingCheckpoint,
+        TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit,
     };
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application,
@@ -3314,6 +3437,52 @@ mod tests {
         assert!(snapshot.activities().is_empty());
         assert_eq!(snapshot.applications().len(), 1);
         assert_eq!(snapshot.categories().len(), 1);
+    }
+
+    #[test]
+    fn cancelled_csv_import_retains_terminal_metadata_without_merging_staged_entities() {
+        let database = TemporaryDatabase::new("cancelled-csv-import");
+        let source = database.path().with_extension("csv");
+        fs::write(
+            &source,
+            "record_type,format_version,stable_id,related_id,aux_id,start_utc_us,end_utc_us,activity_state,activity_cause,application_id,category_id,display_name\ncategory,1,01010101010101010101010101010101,,,,,,,,,Imported\n",
+        )
+        .expect("write deterministic CSV fixture");
+        let mut store = open_store(database.path(), 91);
+        let request = CsvImportRequest::new(
+            JobId::new(91),
+            ImportBatchId::from_bytes([91; 16]),
+            DataOperationDestination::new(source.clone()),
+            openmanic_application::ImportDestinationScope::CurrentStore,
+        );
+        let (source_cancel, cancellation) = CancellationSource::new();
+        let _ = source_cancel.cancel();
+
+        assert_eq!(
+            store
+                .writer()
+                .import_csv_cancellable(&request, UtcMicros::new(91), &cancellation),
+            Ok(None)
+        );
+
+        let connection = Connection::open(database.path()).expect("open cancellation evidence");
+        let (state, parsed, accepted, rejected, committed): (i64, i64, i64, i64, i64) = connection
+            .query_row(
+                "SELECT state, parsed_count, accepted_count, rejected_count, committed_count FROM import_batch WHERE public_id = ?1",
+                [request.batch_id().as_bytes().as_slice()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .expect("read cancelled batch");
+        assert_eq!(
+            (state, parsed, accepted, rejected, committed),
+            (3, 0, 0, 0, 0)
+        );
+        let category_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM category", [], |row| row.get(0))
+            .expect("count categories after cancellation");
+        assert_eq!(category_count, 0);
+        drop(connection);
+        let _ = fs::remove_file(source);
     }
 
     #[test]

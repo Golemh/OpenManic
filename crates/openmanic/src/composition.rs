@@ -21,14 +21,15 @@ use openmanic_application::{
     AppEvent, ApplicationError, ApplicationIconCache, ApplicationIconCacheLimits,
     ApplicationIconLookup, ApplicationIconResult, ApplicationPort, CalendarBlockId,
     CalendarDayContext, CalendarDayProjector, CalendarDaySnapshot, CalendarProjectionSource,
-    CalendarSourceFocus, CatalogCommand, CatalogPersistence, CatalogPersistenceError,
-    CatalogService, CommandEnvelope, CommandId, CommandReceipt, CsvExportRequest, CsvImportRequest,
-    DataOperationDestination, DataOperationOutcome, DataRevision, EntityRevision, EventEnvelope,
-    FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort, FocusPersistence,
-    FocusPersistenceError, FocusService, FocusSnapshot, ImportBatchId, ImportDestinationScope,
-    ImportScopeOutcome, JobId, JobState, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
-    LatestMailboxReceiver, LayoutPersistence, LayoutSnapshot, MailboxReceive, MutationOutcome,
-    OrderingKey, PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
+    CalendarSourceFocus, CancellationRequest, CancellationSource, CancellationToken,
+    CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService, CommandEnvelope,
+    CommandId, CommandReceipt, CsvExportRequest, CsvImportRequest, DataOperationDestination,
+    DataOperationOutcome, DataRevision, EntityRevision, EventEnvelope, FocusCommand, FocusKind,
+    FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusPersistenceError,
+    FocusService, FocusSnapshot, ImportBatchId, ImportDestinationScope, ImportScopeOutcome, JobId,
+    JobState, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox, LatestMailboxReceiver,
+    LayoutPersistence, LayoutSnapshot, MailboxReceive, MutationOutcome, OrderingKey,
+    PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
     ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
@@ -1007,7 +1008,10 @@ fn persistence_failure(reason: PortFailureReason) -> TrackingPersistenceSubmit {
 #[derive(Debug)]
 enum DataOperationWork {
     Export(CsvExportRequest),
-    Import(CsvImportRequest),
+    Import {
+        request: CsvImportRequest,
+        cancellation: CancellationToken,
+    },
     Backup {
         job_id: JobId,
         destination: PathBuf,
@@ -1039,6 +1043,9 @@ enum DataOperationResult {
     Imported {
         request: CsvImportRequest,
         outcome: ImportScopeOutcome,
+    },
+    ImportCancelled {
+        request: CsvImportRequest,
     },
     BackedUp {
         job_id: JobId,
@@ -1093,6 +1100,7 @@ struct RuntimeResources {
     data_operation_stop: Option<mpsc::Sender<()>>,
     data_operation_handle: Option<JoinHandle<()>>,
     data_operation_results: Arc<Mutex<VecDeque<DataOperationResult>>>,
+    import_cancellations: Arc<Mutex<BTreeMap<JobId, CancellationSource>>>,
     accepting: Arc<AtomicBool>,
     identifiers: Arc<CommandIdentifiers>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
@@ -1193,6 +1201,7 @@ impl RuntimeResources {
             mpsc::sync_channel(DATA_OPERATION_REQUEST_CAPACITY);
         let (data_operation_stop, data_operation_stop_receiver) = mpsc::channel();
         let data_operation_results = Arc::new(Mutex::new(VecDeque::new()));
+        let import_cancellations = Arc::new(Mutex::new(BTreeMap::new()));
         let data_operation_handle = spawn_data_operation_worker(
             Arc::clone(&store),
             data_root,
@@ -1249,6 +1258,7 @@ impl RuntimeResources {
                 data_operation_stop: Some(data_operation_stop),
                 data_operation_handle: Some(data_operation_handle),
                 data_operation_results,
+                import_cancellations,
                 accepting,
                 identifiers,
                 focus_notification_error,
@@ -1453,11 +1463,42 @@ impl RuntimeResources {
 
     /// Submits one explicitly initiated CSV import without blocking an egui frame.
     fn try_submit_csv_import(&self, request: CsvImportRequest) -> bool {
-        self.accepting.load(Ordering::Acquire)
-            && self
-                .data_operation_requests
-                .try_send(DataOperationWork::Import(request))
-                .is_ok()
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let job_id = request.job_id();
+        let (source, cancellation) = CancellationSource::new();
+        let Ok(mut cancellations) = self.import_cancellations.lock() else {
+            return false;
+        };
+        if self
+            .data_operation_requests
+            .try_send(DataOperationWork::Import {
+                request,
+                cancellation,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        cancellations.insert(job_id, source);
+        true
+    }
+
+    /// Requests cancellation of a queued or running CSV import at its next durable checkpoint.
+    fn try_cancel_csv_import(&self, job_id: JobId) -> bool {
+        self.import_cancellations
+            .lock()
+            .ok()
+            .and_then(|cancellations| cancellations.get(&job_id).map(CancellationSource::cancel))
+            .is_some_and(|request| matches!(request, CancellationRequest::Requested))
+    }
+
+    /// Forgets the local cancellation handle after a terminal worker result is observed.
+    fn finish_csv_import(&self, job_id: JobId) {
+        if let Ok(mut cancellations) = self.import_cancellations.lock() {
+            cancellations.remove(&job_id);
+        }
     }
 
     /// Submits one new backup destination without blocking an egui frame.
@@ -1962,17 +2003,26 @@ fn run_data_operation_worker(
                     |outcome| DataOperationResult::Exported { request, outcome },
                 )
             }
-            DataOperationWork::Import(request) => {
+            DataOperationWork::Import {
+                request,
+                cancellation,
+            } => {
                 let job_id = request.job_id();
                 let import = store.lock().ok().and_then(|mut store| {
-                    store.writer().import_csv(&request, completed_at_utc).ok()
+                    store
+                        .writer()
+                        .import_csv_cancellable(&request, completed_at_utc, &cancellation)
+                        .ok()
                 });
                 import.map_or_else(
                     || DataOperationResult::Failed {
                         job_id,
                         operation: "CSV import",
                     },
-                    |outcome| DataOperationResult::Imported { request, outcome },
+                    |outcome| match outcome {
+                        Some(outcome) => DataOperationResult::Imported { request, outcome },
+                        None => DataOperationResult::ImportCancelled { request },
+                    },
                 )
             }
             DataOperationWork::Backup {
@@ -3484,6 +3534,12 @@ impl VerticalSliceApp {
                         JobState::Succeeded,
                     )
                 }
+                DataOperationResult::ImportCancelled { request } => (
+                    request.job_id(),
+                    "CSV import",
+                    "Import cancelled before any staged records were merged.".to_owned(),
+                    JobState::Cancelled,
+                ),
                 DataOperationResult::BackedUp { job_id } => (
                     job_id,
                     "Backup",
@@ -3563,6 +3619,9 @@ impl VerticalSliceApp {
                     },
                 ),
             };
+            if name == "CSV import" {
+                self.runtime.finish_csv_import(job_id);
+            }
             self.observe_data_job(job_id, name, &state);
             self.data_operation_message = Some(message);
         }
@@ -3678,7 +3737,8 @@ impl VerticalSliceApp {
 
     #[expect(
         clippy::excessive_nesting,
-        reason = "job rows and destructive confirmation must remain adjacent to their local interaction state."
+        clippy::too_many_lines,
+        reason = "job rows, cancellation, and destructive confirmation must remain adjacent to their local interaction state."
     )]
     fn render_data_jobs(&mut self, ui: &mut eframe::egui::Ui) {
         let view = self.jobs.view_model();
@@ -3687,7 +3747,7 @@ impl VerticalSliceApp {
             ui.label("Recent data operations");
             let mut dismiss = None;
             for job in view.jobs() {
-                let dismiss_clicked = ui
+                let (dismiss_clicked, cancel_clicked) = ui
                     .horizontal(|ui| {
                         ui.label(job.name());
                         ui.small(match job.state() {
@@ -3699,15 +3759,34 @@ impl VerticalSliceApp {
                             JobPresentationState::Failed { message } => message,
                             JobPresentationState::Interrupted => "Interrupted",
                         });
-                        ui.add_enabled(
-                            job.state().can_dismiss(),
-                            eframe::egui::Button::new("Dismiss"),
-                        )
-                        .clicked()
+                        let cancel_clicked = ui
+                            .add_enabled(
+                                job.state().can_cancel(),
+                                eframe::egui::Button::new("Cancel"),
+                            )
+                            .clicked();
+                        let dismiss_clicked = ui
+                            .add_enabled(
+                                job.state().can_dismiss(),
+                                eframe::egui::Button::new("Dismiss"),
+                            )
+                            .clicked();
+                        (dismiss_clicked, cancel_clicked)
                     })
                     .inner;
                 if dismiss_clicked {
                     dismiss = Some(job.job_id());
+                }
+                if cancel_clicked
+                    && matches!(
+                        self.jobs.apply(JobsAction::RequestCancel {
+                            job_id: job.job_id(),
+                        }),
+                        Some(JobsEffect::CancelRequested { .. })
+                    )
+                    && self.runtime.try_cancel_csv_import(job.job_id())
+                {
+                    self.observe_data_job(job.job_id(), job.name(), &JobState::Cancelling);
                 }
             }
             if let Some(job_id) = dismiss {
@@ -5651,6 +5730,10 @@ fn render_weekday_selector(ui: &mut eframe::egui::Ui, weekday_mask: &mut u8) {
 }
 
 impl eframe::App for VerticalSliceApp {
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the settings overlay deliberately contains its bounded visual frame and scroll surface."
+    )]
     fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
         // The bootstrap data-root lock, instance owner, worker handles, and supervisor remain
         // process-owned while the viewport is hidden or stalled.
@@ -5671,7 +5754,19 @@ impl eframe::App for VerticalSliceApp {
         self.render_onboarding(ui);
         self.render_categories_dashboard(ui);
         self.render_calendar_dashboard(ui);
-        self.render_settings_dashboard(ui);
+        if route_after_shell == openmanic_ui_egui::Route::Settings {
+            let context = ui.ctx().clone();
+            eframe::egui::Area::new(eframe::egui::Id::new("phase-six-settings"))
+                .fixed_pos(eframe::egui::pos2(12.0, 84.0))
+                .show(&context, |ui| {
+                    ui.set_width(640.0);
+                    eframe::egui::Frame::window(ui.style()).show(ui, |ui| {
+                        eframe::egui::ScrollArea::vertical()
+                            .max_height(640.0)
+                            .show(ui, |ui| self.render_settings_dashboard(ui));
+                    });
+                });
+        }
         self.publish_day_projection();
         self.dispatch_ui_commands();
         let context = ui.ctx().clone();
