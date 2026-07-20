@@ -1072,6 +1072,9 @@ fn run_writer_worker(
         focus,
         ui_event_sequence: 0,
     };
+    let _ = services
+        .focus
+        .reconcile_after_restart(UtcMicros::new(utc_now_micros()));
     let mut current_projection = None;
     let mut running = true;
 
