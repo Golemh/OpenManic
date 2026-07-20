@@ -18,7 +18,7 @@ use openmanic_domain::{
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::repository::database_error;
+use crate::repository::{database_error, read_schedule_snapshot};
 use crate::{
     ConnectionConfiguration, SqliteReadSession, SqliteWriter, StorageError, StoreOpenOptions,
 };
@@ -673,6 +673,21 @@ impl FocusPersistence for &mut StorageWriter {
 }
 
 impl SchedulePersistence for StorageWriter {
+    fn load_schedule(
+        &mut self,
+        schedule_id: ScheduleId,
+    ) -> Result<Option<ScheduleSnapshot>, SchedulePersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin schedule scope read")
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        let snapshot = read_schedule_snapshot(&transaction, schedule_id)
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        Ok(snapshot)
+    }
+
     fn create_schedule(
         &mut self,
         snapshot: &ScheduleSnapshot,
@@ -757,6 +772,13 @@ impl SchedulePersistence for StorageWriter {
 }
 
 impl SchedulePersistence for &mut StorageWriter {
+    fn load_schedule(
+        &mut self,
+        schedule_id: ScheduleId,
+    ) -> Result<Option<ScheduleSnapshot>, SchedulePersistenceError> {
+        <StorageWriter as SchedulePersistence>::load_schedule(*self, schedule_id)
+    }
+
     fn create_schedule(
         &mut self,
         snapshot: &ScheduleSnapshot,

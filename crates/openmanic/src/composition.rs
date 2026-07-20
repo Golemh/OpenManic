@@ -637,6 +637,16 @@ impl TrackingPersistencePort for WriterPersistence {
 }
 
 impl SchedulePersistence for WriterPersistence {
+    fn load_schedule(
+        &mut self,
+        schedule_id: ScheduleId,
+    ) -> Result<Option<ScheduleSnapshot>, SchedulePersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(SchedulePersistenceError::Failed);
+        };
+        store.writer().load_schedule(schedule_id)
+    }
+
     fn create_schedule(
         &mut self,
         snapshot: &ScheduleSnapshot,

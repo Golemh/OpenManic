@@ -418,6 +418,17 @@ impl ScheduleRepository {
     }
 }
 
+/// Reads one complete authoritative schedule snapshot inside an existing transaction.
+pub(crate) fn read_schedule_snapshot(
+    transaction: &Transaction<'_>,
+    schedule_id: ScheduleId,
+) -> Result<Option<ScheduleSnapshot>, StorageError> {
+    Ok(ScheduleRepository::read(transaction)?
+        .into_iter()
+        .map(|record| record.snapshot)
+        .find(|snapshot| snapshot.id() == schedule_id))
+}
+
 pub(crate) fn read_snapshot(transaction: &Transaction<'_>) -> Result<ReadSnapshot, StorageError> {
     let revision = transaction
         .query_row(
