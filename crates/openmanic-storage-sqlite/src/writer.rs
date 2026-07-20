@@ -335,6 +335,35 @@ impl StorageWriter {
         Ok(revision)
     }
 
+    /// Returns whether an existing application's future foreground observations are excluded.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the application is absent or its stored policy is invalid.
+    pub fn application_is_excluded(
+        &mut self,
+        application_id: ApplicationId,
+    ) -> Result<bool, StorageError> {
+        let policy: i64 = self
+            .writer
+            .connection_mut()
+            .query_row(
+                "SELECT exclusion_policy FROM application WHERE public_id = ?1",
+                [application_id.as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| database_error(&error, "read application exclusion policy"))?
+            .ok_or(StorageError::ApplicationMissing)?;
+        match policy {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(StorageError::InvalidStoredValue {
+                field: "application exclusion policy",
+            }),
+        }
+    }
+
     /// Stores an application's current category association and observation bounds atomically.
     ///
     /// # Errors

@@ -882,9 +882,15 @@ fn process_writer_work(
         {
             return;
         }
+        let Ok(excluded) = writer_store
+            .writer()
+            .application_is_excluded(application.id())
+        else {
+            return;
+        };
         drop(writer_store);
         process_tracking_command(
-            command,
+            foreground_command_with_exclusion(command, excluded),
             false,
             tracking,
             store,
@@ -904,6 +910,34 @@ fn process_writer_work(
         snapshots,
         ui_inbox,
     );
+}
+
+fn foreground_command_with_exclusion(
+    command: CommandEnvelope<TrackingCommand>,
+    excluded: bool,
+) -> CommandEnvelope<TrackingCommand> {
+    if !excluded {
+        return command;
+    }
+    let TrackingCommand::Evidence(TrackingEvidence::Foreground {
+        sequence,
+        observed_at_utc,
+        ..
+    }) = *command.payload()
+    else {
+        return command;
+    };
+    CommandEnvelope::new(
+        command.schema_revision(),
+        command.command_id(),
+        command.ordering_key(),
+        command.expected_entity_revision(),
+        command.submitted_at_utc(),
+        TrackingCommand::Evidence(TrackingEvidence::ExcludedForeground {
+            sequence,
+            observed_at_utc,
+        }),
+    )
 }
 
 fn process_tracking_command(
