@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use openmanic_application::{
-    ApplicationError, ApplicationPort, CatalogPersistence, CatalogPersistenceError, DataRevision,
+    AcceptedWindowTitle, ApplicationError, ApplicationPort, CatalogPersistence, CatalogPersistenceError, DataRevision,
     EntityRevision, FocusKind, FocusPersistence, FocusPersistenceError, FocusSnapshot,
     PortFailureReason, ScheduleId, SchedulePersistence, SchedulePersistenceError,
     ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
@@ -121,6 +121,48 @@ impl StorageWriter {
         transaction
             .commit()
             .map_err(|error| database_error(&error, "commit tracker run"))?;
+        Ok(revision)
+    }
+
+    /// Persists one accepted stabilized title span, deduplicating text and coalescing an adjacent
+    /// identical span for the same application and tracker run.
+    pub fn persist_window_title(
+        &mut self,
+        tracker_run_id: TrackerRunId,
+        title: &AcceptedWindowTitle,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin window title persistence")?;
+        let revision = next_revision(&transaction)?;
+        let application_row_id = application_row_id(&transaction, title.application_id().as_bytes())?;
+        let tracker_run_row_id = tracker_run_row_id(&transaction, tracker_run_id)?;
+        transaction.execute(
+            "INSERT INTO window_title_text(text_hash, title) VALUES (?1, ?2) ON CONFLICT(text_hash, title) DO NOTHING",
+            params![title.text_hash().to_be_bytes().as_slice(), title.text()],
+        ).map_err(|error| database_error(&error, "insert window title text"))?;
+        let title_text_id: i64 = transaction.query_row(
+            "SELECT id FROM window_title_text WHERE text_hash = ?1 AND title = ?2",
+            params![title.text_hash().to_be_bytes().as_slice(), title.text()],
+            |row| row.get(0),
+        ).map_err(|error| database_error(&error, "find window title text"))?;
+        let start = title.stable_since_utc().get();
+        let end = title.accepted_at_utc().get();
+        let revision_value = i64::try_from(revision.get()).map_err(|_| StorageError::InvalidStoredValue { field: "data revision" })?;
+        let updated = transaction.execute(
+            "UPDATE window_title_span SET end_utc_us = ?1, source_revision = ?2
+              WHERE id = (SELECT id FROM window_title_span
+                           WHERE application_id = ?3 AND tracker_run_id = ?4 AND title_text_id = ?5 AND end_utc_us = ?6
+                           ORDER BY id DESC LIMIT 1)",
+            params![end, revision_value, application_row_id, tracker_run_row_id, title_text_id, start],
+        ).map_err(|error| database_error(&error, "coalesce window title span"))?;
+        if updated == 0 {
+            transaction.execute(
+                "INSERT INTO window_title_span(application_id, tracker_run_id, title_text_id, start_utc_us, end_utc_us, source_revision)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![application_row_id, tracker_run_row_id, title_text_id, start, end, revision_value],
+            ).map_err(|error| database_error(&error, "insert window title span"))?;
+        }
+        update_revision(&transaction, revision)?;
+        transaction.commit().map_err(|error| database_error(&error, "commit window title persistence"))?;
         Ok(revision)
     }
 
@@ -361,6 +403,30 @@ impl StorageWriter {
             1 => Ok(true),
             _ => Err(StorageError::InvalidStoredValue {
                 field: "application exclusion policy",
+            }),
+        }
+    }
+
+    /// Returns whether the sole persisted settings record has explicitly enabled title collection.
+    ///
+    /// A missing record is deliberately treated as disabled: collection cannot begin before the
+    /// user has an authoritative privacy setting.
+    pub fn window_title_collection_enabled(&mut self) -> Result<bool, StorageError> {
+        let enabled: Option<i64> = self
+            .writer
+            .connection_mut()
+            .query_row(
+                "SELECT collect_window_titles FROM user_settings WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| database_error(&error, "read window title collection setting"))?;
+        match enabled {
+            None | Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            Some(_) => Err(StorageError::InvalidStoredValue {
+                field: "window title collection setting",
             }),
         }
     }
@@ -2058,7 +2124,8 @@ mod tests {
         FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
         FocusSnapshot, OrderingKey, ScheduleId, SchedulePersistence, SchedulePersistenceError,
         ScheduleSnapshot, SchemaRevision, TrackingCheckpoint, TrackingPersistenceIntent,
-        TrackingPersistencePort, TrackingPersistenceSubmit,
+        TitleObservationResult, TitleStabilizer, TrackingPersistencePort,
+        TrackingPersistenceSubmit,
     };
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application,
@@ -2520,6 +2587,70 @@ mod tests {
         assert_eq!(excluded, 0);
     }
 
+    #[test]
+    fn window_title_persistence_deduplicates_text_and_coalesces_adjacent_spans() {
+        let database = TemporaryDatabase::new("window-title-spans");
+        let mut store = open_store(database.path(), 33);
+        let writer = store.writer();
+        writer
+            .register_tracker_run(&registration(33, 0))
+            .expect("the tracker run should register");
+        seed_active_application(writer, 34);
+        let first = accepted_title(application_id(34), 0, 2_000_000, "Plan");
+        let second = accepted_title(application_id(34), 2_000_000, 4_000_000, "Plan");
+        let different = accepted_title(application_id(34), 4_000_000, 6_000_000, "Review");
+
+        assert_eq!(writer.persist_window_title(run_id(33), &first), Ok(revision(4)));
+        assert_eq!(writer.persist_window_title(run_id(33), &second), Ok(revision(5)));
+        assert_eq!(writer.persist_window_title(run_id(33), &different), Ok(revision(6)));
+
+        let spans: Vec<(String, i64, i64)> = writer
+            .writer
+            .connection_mut()
+            .prepare(
+                "SELECT title, start_utc_us, end_utc_us
+                   FROM window_title_span
+                   JOIN window_title_text ON window_title_text.id = window_title_span.title_text_id
+                   ORDER BY start_utc_us",
+            )
+            .expect("title span query should prepare")
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .expect("title span query should execute")
+            .collect::<Result<_, _>>()
+            .expect("title span rows should decode");
+        assert_eq!(spans, vec![("Plan".to_owned(), 0, 4_000_000), ("Review".to_owned(), 4_000_000, 6_000_000)]);
+        let distinct_title_texts: i64 = writer
+            .writer
+            .connection_mut()
+            .query_row("SELECT COUNT(*) FROM window_title_text", [], |row| row.get(0))
+            .expect("title text count should read");
+        assert_eq!(distinct_title_texts, 2);
+    }
+
+    #[test]
+    fn window_title_collection_requires_an_explicit_enabled_setting() {
+        let database = TemporaryDatabase::new("window-title-setting");
+        let mut store = open_store(database.path(), 35);
+        let writer = store.writer();
+        assert_eq!(writer.window_title_collection_enabled(), Ok(false));
+        writer
+            .writer
+            .connection_mut()
+            .execute(
+                "INSERT INTO user_settings(
+                    singleton_id, schema_version, first_launch_consent_revision,
+                    start_tracking_automatically, start_at_login, close_to_tray,
+                    idle_threshold_seconds, idle_policy, collect_window_titles,
+                    time_zone_mode, manual_time_zone_id, theme_mode, density,
+                    notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged,
+                    revision, updated_utc_us
+                 ) VALUES (1, 1, 0, 0, 0, 1, 60, 1, 1, 0, NULL, 0, 1, 1, 1, 0, 0, 0)",
+                [],
+            )
+            .expect("enabled title collection setting should insert");
+        assert_eq!(writer.window_title_collection_enabled(), Ok(true));
+    }
+
     fn one_time_schedule_snapshot(
         id_byte: u8,
         start_utc_us: i64,
@@ -2947,6 +3078,23 @@ mod tests {
         writer
             .upsert_application(&application)
             .expect("the fixture application should commit");
+    }
+
+    fn accepted_title(
+        application_id: ApplicationId,
+        stable_since_utc: i64,
+        accepted_at_utc: i64,
+        text: &str,
+    ) -> openmanic_application::AcceptedWindowTitle {
+        let mut stabilizer = TitleStabilizer::default();
+        assert!(matches!(
+            stabilizer.observe(application_id, time(stable_since_utc), text, true, false),
+            TitleObservationResult::Ignored
+        ));
+        match stabilizer.observe(application_id, time(accepted_at_utc), text, true, false) {
+            TitleObservationResult::Accepted(title) => title,
+            TitleObservationResult::Ignored => panic!("fixture title should be stable"),
+        }
     }
 
     fn active_intent(

@@ -37,6 +37,7 @@ pub use windows_control::{
 #[cfg(windows)]
 pub use windows_control::{
     WindowsApplicationMetadataRequest, WindowsControlError, WindowsControlWindow,
+    WindowsWindowTitleObservationRequest,
 };
 #[cfg(windows)]
 pub use windows_metadata::extract_application_icon;

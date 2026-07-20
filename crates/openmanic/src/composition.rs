@@ -34,7 +34,8 @@ use openmanic_application::{
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
     TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
-    TrackingPersistenceSubmit, TrackingService, WorkLane, bounded_runtime_lanes, latest_mailbox,
+    TitleObservationResult, TitleStabilizer, TrackingPersistenceSubmit, TrackingService,
+    WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId,
@@ -46,6 +47,7 @@ use openmanic_domain::{
 use openmanic_platform::{
     ActivationCommandDecode, InstanceAcquisition, LocalActivationCommand, WindowsActivationServer,
     WindowsApplicationMetadataRequest, WindowsControlAdapter, WindowsInstanceOwner,
+    WindowsWindowTitleObservationRequest,
 };
 use openmanic_platform::{
     EvidencePublishResult, TrackingEvidenceSink, WindowsPlatformAction, WindowsTrayController,
@@ -75,6 +77,8 @@ const WORKER_IDLE_INTERVAL: Duration = Duration::from_millis(10);
 const PLATFORM_PUMP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(windows)]
 const APPLICATION_METADATA_REQUEST_CAPACITY: usize = 32;
+#[cfg(windows)]
+const WINDOW_TITLE_OBSERVATION_CAPACITY: usize = 32;
 #[cfg(windows)]
 const APPLICATION_ICON_CACHE_ENTRIES: usize = 128;
 #[cfg(windows)]
@@ -176,6 +180,7 @@ enum WriterWork {
     Catalog(CommandEnvelope<CatalogCommand>),
     Schedule(CommandEnvelope<ScheduleCommand>),
     Focus(CommandEnvelope<FocusCommand>),
+    WindowTitle(WindowTitleObservation),
 }
 
 impl WriterWork {
@@ -183,10 +188,29 @@ impl WriterWork {
         match self {
             Self::System(command) | Self::CatalogForeground { command, .. } => (command, false),
             Self::Ui(command) => (command, true),
-            Self::Catalog(_) | Self::Schedule(_) | Self::Focus(_) => {
+            Self::Catalog(_) | Self::Schedule(_) | Self::Focus(_) | Self::WindowTitle(_) => {
                 unreachable!("typed commands use their own application service")
             }
         }
+    }
+}
+
+/// Private platform title data awaiting the serialized privacy gate. Its debug output redacts the
+/// title so an accidental writer-lane diagnostic cannot disclose personal content.
+struct WindowTitleObservation {
+    application_id: ApplicationId,
+    observed_at_utc: UtcMicros,
+    title: String,
+}
+
+impl fmt::Debug for WindowTitleObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WindowTitleObservation")
+            .field("application_id", &self.application_id)
+            .field("observed_at_utc", &self.observed_at_utc)
+            .field("title", &"<redacted>")
+            .finish()
     }
 }
 
@@ -196,6 +220,7 @@ struct WriterServices {
     catalog: CatalogService<WriterPersistence>,
     schedules: ScheduleService<WriterPersistence>,
     focus: FocusService<WriterPersistence, InAppFocusNotifications>,
+    title_stabilizer: TitleStabilizer,
     ui_event_sequence: u64,
 }
 
@@ -958,6 +983,10 @@ struct RuntimeResources {
     #[cfg(windows)]
     metadata_handle: Option<JoinHandle<()>>,
     #[cfg(windows)]
+    title_stop: Option<mpsc::Sender<()>>,
+    #[cfg(windows)]
+    title_handle: Option<JoinHandle<()>>,
+    #[cfg(windows)]
     application_icons: Arc<Mutex<ApplicationIconCache>>,
     #[cfg(windows)]
     activation_stop: Arc<AtomicBool>,
@@ -1037,6 +1066,10 @@ impl RuntimeResources {
                 metadata_stop: None,
                 #[cfg(windows)]
                 metadata_handle: None,
+                #[cfg(windows)]
+                title_stop: None,
+                #[cfg(windows)]
+                title_handle: None,
                 #[cfg(windows)]
                 application_icons: Arc::new(Mutex::new(ApplicationIconCache::new(
                     ApplicationIconCacheLimits::try_new(
@@ -1188,10 +1221,12 @@ impl RuntimeResources {
         let (metadata_requests, metadata_stop, metadata_handle) = spawn_metadata_worker(
             Arc::clone(&self.application_icons),
         )?;
+        let (title_requests, title_stop, title_handle) = spawn_title_worker(Arc::clone(&self.lanes))?;
         let (stop_sender, platform_handle, ready_receiver) = spawn_platform_worker(
             self.action_router(),
             self.evidence_sink(),
             metadata_requests,
+            title_requests,
         )?;
         if let Ok(Ok(())) = ready_receiver.recv_timeout(Duration::from_secs(5)) {
             self.activation_handle = Some(activation_handle);
@@ -1199,15 +1234,19 @@ impl RuntimeResources {
             self.platform_handle = Some(platform_handle);
             self.metadata_stop = Some(metadata_stop);
             self.metadata_handle = Some(metadata_handle);
+            self.title_stop = Some(title_stop);
+            self.title_handle = Some(title_handle);
             return Ok(());
         }
 
         self.activation_stop.store(true, Ordering::Release);
         let _ = stop_sender.send(());
         let _ = metadata_stop.send(());
+        let _ = title_stop.send(());
         let _ = activation_handle.join();
         let _ = platform_handle.join();
         let _ = metadata_handle.join();
+        let _ = title_handle.join();
         Err(CompositionError::Platform)
     }
 
@@ -1229,11 +1268,18 @@ impl RuntimeResources {
             .metadata_handle
             .take()
             .is_none_or(|handle| handle.join().is_ok());
+        if let Some(stop) = self.title_stop.take() {
+            let _ = stop.send(());
+        }
+        let title_joined = self
+            .title_handle
+            .take()
+            .is_none_or(|handle| handle.join().is_ok());
         let activation_joined = self
             .activation_handle
             .take()
             .is_none_or(|handle| handle.join().is_ok());
-        platform_joined && metadata_joined && activation_joined
+        platform_joined && metadata_joined && title_joined && activation_joined
     }
 }
 
@@ -1297,6 +1343,7 @@ fn spawn_platform_worker(
     action_router: PlatformActionRouter,
     evidence_sink: RuntimeEvidenceSink,
     metadata_requests: SyncSender<WindowsApplicationMetadataRequest>,
+    title_requests: SyncSender<WindowsWindowTitleObservationRequest>,
 ) -> Result<PlatformWorkerStart, CompositionError> {
     let (stop_sender, stop_receiver) = mpsc::channel();
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -1311,6 +1358,7 @@ fn spawn_platform_worker(
                 action_router,
                 evidence_sink,
                 metadata_requests,
+                title_requests,
                 stop_receiver,
                 &ready_sender,
             )
@@ -1332,10 +1380,13 @@ fn run_platform_worker(
     action_router: PlatformActionRouter,
     evidence_sink: RuntimeEvidenceSink,
     metadata_requests: SyncSender<WindowsApplicationMetadataRequest>,
+    title_requests: SyncSender<WindowsWindowTitleObservationRequest>,
     stop_receiver: Receiver<()>,
     ready_sender: &SyncSender<Result<(), ()>>,
 ) -> Result<(), openmanic_platform::WindowsControlError> {
-    let mut adapter = WindowsControlAdapter::new().with_metadata_requests(metadata_requests);
+    let mut adapter = WindowsControlAdapter::new()
+        .with_metadata_requests(metadata_requests)
+        .with_title_requests(title_requests);
     let mut control = adapter.install_control_window()?;
     let mut tray = control.install_tray()?;
     let _ = ready_sender.send(Ok(()));
@@ -1364,6 +1415,43 @@ fn spawn_metadata_worker(
         .spawn(move || run_metadata_worker(request_receiver, stop_receiver, application_icons))
         .map_err(|_| CompositionError::Runtime)?;
     Ok((request_sender, stop_sender, handle))
+}
+
+#[cfg(windows)]
+fn spawn_title_worker(
+    lanes: Arc<RuntimeLanes<WriterWork>>,
+) -> Result<(SyncSender<WindowsWindowTitleObservationRequest>, mpsc::Sender<()>, JoinHandle<()>), CompositionError> {
+    let (request_sender, request_receiver) = mpsc::sync_channel(WINDOW_TITLE_OBSERVATION_CAPACITY);
+    let (stop_sender, stop_receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("openmanic-window-titles".to_owned())
+        .spawn(move || run_title_worker(request_receiver, stop_receiver, lanes))
+        .map_err(|_| CompositionError::Runtime)?;
+    Ok((request_sender, stop_sender, handle))
+}
+
+#[cfg(windows)]
+fn run_title_worker(
+    requests: Receiver<WindowsWindowTitleObservationRequest>,
+    stop: Receiver<()>,
+    lanes: Arc<RuntimeLanes<WriterWork>>,
+) {
+    loop {
+        if matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected)) {
+            return;
+        }
+        let request = match requests.recv_timeout(PLATFORM_PUMP_INTERVAL) {
+            Ok(request) => request,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        let work = WriterWork::WindowTitle(WindowTitleObservation {
+            application_id: request.application_id(),
+            observed_at_utc: UtcMicros::new(request.observed_at_utc_us()),
+            title: request.title().to_owned(),
+        });
+        let _ = lanes.try_submit(WorkLane::Optional, work);
+    }
 }
 
 #[cfg(windows)]
@@ -1507,6 +1595,7 @@ fn writer_services(
         catalog,
         schedules,
         focus,
+        title_stabilizer: TitleStabilizer::default(),
         ui_event_sequence: 0,
     }
 }
@@ -1542,6 +1631,10 @@ fn process_writer_work(
     ui_inbox: &UiInbox,
     focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
+    if let WriterWork::WindowTitle(observation) = work {
+        process_window_title_observation(observation, services, store);
+        return;
+    }
     if let WriterWork::Focus(command) = work {
         process_focus_command(
             &command,
@@ -1619,6 +1712,38 @@ fn process_writer_work(
         snapshots,
         ui_inbox,
     );
+}
+
+fn process_window_title_observation(
+    observation: WindowTitleObservation,
+    services: &mut WriterServices,
+    store: &Arc<Mutex<SqliteStore>>,
+) {
+    let Ok(mut writer_store) = store.lock() else {
+        return;
+    };
+    let Ok(collection_enabled) = writer_store.writer().window_title_collection_enabled() else {
+        return;
+    };
+    let Ok(application_excluded) = writer_store
+        .writer()
+        .application_is_excluded(observation.application_id)
+    else {
+        return;
+    };
+    let TitleObservationResult::Accepted(title) = services.title_stabilizer.observe(
+        observation.application_id,
+        observation.observed_at_utc,
+        &observation.title,
+        collection_enabled,
+        application_excluded,
+    ) else {
+        return;
+    };
+    let Some(tracker_run_id) = services.tracking.checkpoint().map(|checkpoint| checkpoint.tracker_run_id()) else {
+        return;
+    };
+    let _ = writer_store.writer().persist_window_title(tracker_run_id, &title);
 }
 
 fn foreground_command_with_exclusion(

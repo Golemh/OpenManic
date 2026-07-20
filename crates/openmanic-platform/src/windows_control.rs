@@ -43,6 +43,41 @@ pub struct WindowsApplicationMetadataRequest {
     executable_path: String,
 }
 
+/// One bounded, unlogged sample of the current foreground window title.
+///
+/// The request holds no window handle or process identity. Consumers must pass its title only to
+/// the privacy gate and title stabilizer; it is intentionally not `Debug` so ordinary diagnostics
+/// cannot disclose it accidentally.
+#[cfg(windows)]
+pub struct WindowsWindowTitleObservationRequest {
+    application_id: openmanic_application::ApplicationId,
+    observed_at_utc_us: i64,
+    title: String,
+}
+
+#[cfg(windows)]
+impl WindowsWindowTitleObservationRequest {
+    fn new(
+        application_id: openmanic_application::ApplicationId,
+        observed_at_utc_us: i64,
+        title: String,
+    ) -> Self {
+        Self { application_id, observed_at_utc_us, title }
+    }
+
+    /// Returns the resolved foreground application.
+    #[must_use]
+    pub const fn application_id(&self) -> openmanic_application::ApplicationId { self.application_id }
+
+    /// Returns when the platform observed this title.
+    #[must_use]
+    pub const fn observed_at_utc_us(&self) -> i64 { self.observed_at_utc_us }
+
+    /// Returns the raw title exclusively for private stabilization; callers must not log it.
+    #[must_use]
+    pub fn title(&self) -> &str { &self.title }
+}
+
 #[cfg(windows)]
 impl WindowsApplicationMetadataRequest {
     /// Creates a request using the already-resolved executable path; no raw handle escapes.
@@ -113,6 +148,8 @@ pub struct WindowsControlAdapter {
     identity_resolver: WindowsIdentityResolver,
     #[cfg(windows)]
     metadata_requests: Option<SyncSender<WindowsApplicationMetadataRequest>>,
+    #[cfg(windows)]
+    title_requests: Option<SyncSender<WindowsWindowTitleObservationRequest>>,
 }
 
 impl Default for WindowsControlAdapter {
@@ -133,6 +170,14 @@ impl WindowsControlAdapter {
     #[must_use]
     pub fn with_metadata_requests(mut self, sender: SyncSender<WindowsApplicationMetadataRequest>) -> Self {
         self.metadata_requests = Some(sender);
+        self
+    }
+
+    /// Adds a bounded, nonblocking route for private title observations.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn with_title_requests(mut self, sender: SyncSender<WindowsWindowTitleObservationRequest>) -> Self {
+        self.title_requests = Some(sender);
         self
     }
 
@@ -210,6 +255,8 @@ impl WindowsControlAdapter {
             identity_resolver: WindowsIdentityResolver::default(),
             #[cfg(windows)]
             metadata_requests: None,
+            #[cfg(windows)]
+            title_requests: None,
         }
     }
 
@@ -283,9 +330,7 @@ impl WindowsControlAdapter {
     ) {
         let changed_window = self.last_live_window != Some(event.window());
         self.last_live_window = Some(event.window());
-        if !changed_window && !self.normalizer.reconciliation_required() {
-            return;
-        }
+        let publish_foreground = changed_window || self.normalizer.reconciliation_required();
         #[cfg(windows)]
         match self
             .identity_resolver
@@ -299,12 +344,21 @@ impl WindowsControlAdapter {
                 if let (Some(sender), Some(path)) = (&self.metadata_requests, application.display_path()) {
                     let _ = sender.try_send(WindowsApplicationMetadataRequest::new(application_id, path.to_owned()));
                 }
-                self.announce_foreground(
-                    event,
-                    application_id,
-                    sink,
-                    drain,
-                );
+                if let (Some(sender), Some(title)) = (&self.title_requests, current_window_title(event.window())) {
+                    let _ = sender.try_send(WindowsWindowTitleObservationRequest::new(
+                        application_id,
+                        event.received_at_utc().get(),
+                        title,
+                    ));
+                }
+                if publish_foreground {
+                    self.announce_foreground(
+                        event,
+                        application_id,
+                        sink,
+                        drain,
+                    );
+                }
             }
             ApplicationIdentityResolution::Unresolved { .. } => {
                 self.announce_identity_degraded(event, sink, drain);
@@ -387,6 +441,35 @@ impl WindowsControlAdapter {
             self.ingress.mark_overflow();
         }
     }
+}
+
+/// Maximum UTF-16 code units retained from one Win32 title query before private normalization.
+#[cfg(windows)]
+const WINDOW_TITLE_CAPTURE_MAX_CODE_UNITS: usize = 4_096;
+
+#[cfg(windows)]
+fn current_window_title(window: RawWindowHandle) -> Option<String> {
+    use windows::{
+        Win32::{Foundation::HWND, UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW}},
+    };
+
+    let hwnd = HWND(window.value() as *mut core::ffi::c_void);
+    // SAFETY: The HWND came from the current foreground sample and is used only synchronously.
+    let length = unsafe { GetWindowTextLengthW(hwnd) };
+    if length <= 0 {
+        return None;
+    }
+    let length = usize::try_from(length).ok()?.min(WINDOW_TITLE_CAPTURE_MAX_CODE_UNITS);
+    let capacity = length.checked_add(1)?;
+    let mut buffer = vec![0_u16; capacity];
+    // SAFETY: `buffer` is valid writable UTF-16 storage with a trailing NUL slot and
+    // Windows retains neither the HWND-derived buffer pointer nor the title after return.
+    let written = unsafe { GetWindowTextW(hwnd, &mut buffer) };
+    if written <= 0 {
+        return None;
+    }
+    let written = usize::try_from(written).ok()?;
+    Some(String::from_utf16_lossy(&buffer[..written]))
 }
 
 impl PlatformActivityAdapter for WindowsControlAdapter {
