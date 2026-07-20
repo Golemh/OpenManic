@@ -180,4 +180,14 @@ Remaining risk or waiver:
   architecture, delivery/setup, and UI specifications.
 - **Branch/worktree:** `codex/openmanic-mvp-implementation-continuation`, primary integration checkout.
 - **Base SHA:** `c4b19bfa3b1c5bed04eb0525e62cacbcb9444e0d`.
-- **Status:** in progress; focused implementation checks only until the consolidated G6 gate.
+- **Status:** in progress. The CSV import/export worker is host-wired with explicit title disclosure,
+  verified SQLite backup and privacy-safe diagnostics export run on the same bounded worker, and the
+  Settings screen retains named data-operation job results. Integrated at `98dfe38` after the
+  consolidated MSVC quality gate on 2026-07-20.
+- **Evidence:** `CARGO_TARGET_DIR=target-msvc cargo +stable-x86_64-pc-windows-msvc xtask quality`
+  passed: format check, locked workspace check, strict Clippy, workspace tests, rustdoc, and docs
+  validation.
+- **Remaining limitation:** restore and data-root move are intentionally not presented yet. Their
+  accepted contracts require quiescing dependent work and reopening services; the current runtime
+  has no safe coordinator for that lifecycle. Do not expose a destructive restore or move control
+  until that coordinator exists.
