@@ -13,7 +13,7 @@ use openmanic_application::{
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
     CategoryId, CategoryName, FocusSessionId, FocusSessionState, HalfOpenInterval,
-    ScheduleOccurrenceException, TrackerRunId, UtcMicros,
+    ScheduleOccurrenceException, ScheduleSegment, TrackerRunId, UtcMicros,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
@@ -684,7 +684,7 @@ impl SchedulePersistence for StorageWriter {
         {
             return Err(SchedulePersistenceError::Conflict);
         }
-        if schedule_conflicts_with_one_time_intervals(&transaction, snapshot)
+        if schedule_conflicts_with_existing_schedules(&transaction, snapshot)
             .map_err(|_| SchedulePersistenceError::Failed)?
         {
             return Err(SchedulePersistenceError::Conflict);
@@ -715,7 +715,7 @@ impl SchedulePersistence for StorageWriter {
         }
         delete_schedule_snapshot(&transaction, snapshot.id())
             .map_err(|_| SchedulePersistenceError::Failed)?;
-        if schedule_conflicts_with_one_time_intervals(&transaction, snapshot)
+        if schedule_conflicts_with_existing_schedules(&transaction, snapshot)
             .map_err(|_| SchedulePersistenceError::Failed)?
         {
             return Err(SchedulePersistenceError::Conflict);
@@ -869,7 +869,7 @@ fn schedule_id_exists(
         .map_err(|error| database_error(&error, "check schedule identity"))
 }
 
-fn schedule_conflicts_with_one_time_intervals(
+fn schedule_conflicts_with_existing_schedules(
     transaction: &Transaction<'_>,
     snapshot: &ScheduleSnapshot,
 ) -> Result<bool, StorageError> {
@@ -886,10 +886,195 @@ fn schedule_conflicts_with_one_time_intervals(
     let intervals = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| database_error(&error, "read one-time schedule overlap check"))?;
-    schedule_rule_conflicts_with_intervals(snapshot.rule(), &intervals)
-        .map_err(|_| StorageError::InvalidStoredValue {
+    if schedule_rule_conflicts_with_intervals(snapshot.rule(), &intervals).map_err(|_| {
+        StorageError::InvalidStoredValue {
             field: "schedule time-zone overlap validation",
+        }
+    })? {
+        return Ok(true);
+    }
+
+    let Some(candidate_interval) = snapshot.rule().one_time_interval() else {
+        return Ok(false);
+    };
+    for rule in load_schedule_series_rules(transaction)? {
+        if schedule_rule_conflicts_with_intervals(&rule, &[candidate_interval]).map_err(|_| {
+            StorageError::InvalidStoredValue {
+                field: "schedule time-zone overlap validation",
+            }
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn load_schedule_series_rules(
+    transaction: &Transaction<'_>,
+) -> Result<Vec<openmanic_domain::ScheduleRule>, StorageError> {
+    let mut series_statement = transaction
+        .prepare("SELECT id FROM schedule_series")
+        .map_err(|error| database_error(&error, "prepare schedule-series overlap check"))?;
+    let series_ids = series_statement
+        .query_map([], |row| row.get::<_, i64>(0))
+        .map_err(|error| database_error(&error, "read schedule-series overlap check"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error(&error, "read schedule-series overlap check"))?;
+
+    series_ids
+        .into_iter()
+        .map(|series_id| load_schedule_series_rule(transaction, series_id))
+        .collect()
+}
+
+fn load_schedule_series_rule(
+    transaction: &Transaction<'_>,
+    series_id: i64,
+) -> Result<openmanic_domain::ScheduleRule, StorageError> {
+    let segments = load_schedule_segments(transaction, series_id)?;
+    let exceptions = load_schedule_exceptions(transaction, series_id)?;
+    openmanic_domain::ScheduleRule::try_restore_repeating_with_exceptions(segments, exceptions)
+        .map_err(|_| StorageError::InvalidStoredValue {
+            field: "stored schedule series",
         })
+}
+
+fn load_schedule_segments(
+    transaction: &Transaction<'_>,
+    series_id: i64,
+) -> Result<Vec<ScheduleSegment>, StorageError> {
+    let mut segment_statement = transaction
+        .prepare(
+            "SELECT effective_start_date, effective_end_date, weekday_mask,
+                    start_second_of_day, end_second_of_day, time_zone_id, label
+               FROM schedule_rule_segment
+              WHERE series_id = ?1
+              ORDER BY effective_start_date",
+        )
+        .map_err(|error| database_error(&error, "prepare stored schedule segments"))?;
+    let raw_segments = segment_statement
+        .query_map([series_id], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, Option<i32>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|error| database_error(&error, "read stored schedule segments"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error(&error, "read stored schedule segments"))?;
+    let segments = raw_segments
+        .into_iter()
+        .map(
+            |(start, end, weekday_mask, start_second, end_second, zone, label)| {
+                ScheduleSegment::try_new(
+                    start,
+                    end,
+                    u8::try_from(weekday_mask).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "schedule weekday mask",
+                    })?,
+                    u32::try_from(start_second).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "schedule start second",
+                    })?,
+                    u32::try_from(end_second).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "schedule end second",
+                    })?,
+                    zone,
+                    label,
+                    None,
+                )
+                .map_err(|_| StorageError::InvalidStoredValue {
+                    field: "stored schedule rule segment",
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(segments)
+}
+
+fn load_schedule_exceptions(
+    transaction: &Transaction<'_>,
+    series_id: i64,
+) -> Result<Vec<ScheduleOccurrenceException>, StorageError> {
+    let mut exception_statement = transaction
+        .prepare(
+            "SELECT anchor_local_date, kind, override_start_utc_us, override_end_utc_us,
+                    start_boundary_resolution, end_boundary_resolution
+               FROM schedule_exception
+              WHERE series_id = ?1
+              ORDER BY anchor_local_date",
+        )
+        .map_err(|error| database_error(&error, "prepare stored schedule exceptions"))?;
+    let raw_exceptions = exception_statement
+        .query_map([series_id], |row| {
+            Ok((
+                row.get::<_, i32>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+            ))
+        })
+        .map_err(|error| database_error(&error, "read stored schedule exceptions"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| database_error(&error, "read stored schedule exceptions"))?;
+    raw_exceptions
+        .into_iter()
+        .map(schedule_occurrence_exception_from_row)
+        .collect()
+}
+
+fn schedule_occurrence_exception_from_row(
+    row: (i32, i64, Option<i64>, Option<i64>, i64, i64),
+) -> Result<ScheduleOccurrenceException, StorageError> {
+    let (anchor_date, kind, start, end, start_resolution, end_resolution) = row;
+    match kind {
+        0 => Ok(ScheduleOccurrenceException::Skip { anchor_date }),
+        1 => {
+            let interval = HalfOpenInterval::try_new(
+                UtcMicros::new(start.ok_or(StorageError::InvalidStoredValue {
+                    field: "schedule exception override start",
+                })?),
+                UtcMicros::new(end.ok_or(StorageError::InvalidStoredValue {
+                    field: "schedule exception override end",
+                })?),
+            )
+            .map_err(|_| StorageError::InvalidStoredValue {
+                field: "schedule exception override interval",
+            })?;
+            let (start_after_gap, start_earlier_fold) =
+                boundary_resolution_flags(start_resolution)?;
+            let (end_after_gap, end_earlier_fold) = boundary_resolution_flags(end_resolution)?;
+            Ok(ScheduleOccurrenceException::Override {
+                anchor_date,
+                interval,
+                start_after_gap,
+                start_earlier_fold,
+                end_after_gap,
+                end_earlier_fold,
+            })
+        }
+        _ => Err(StorageError::InvalidStoredValue {
+            field: "schedule exception kind",
+        }),
+    }
+}
+
+fn boundary_resolution_flags(code: i64) -> Result<(bool, bool), StorageError> {
+    match code {
+        0 => Ok((false, false)),
+        1 => Ok((true, false)),
+        2 => Ok((false, true)),
+        _ => Err(StorageError::InvalidStoredValue {
+            field: "schedule exception boundary resolution",
+        }),
+    }
 }
 
 fn insert_one_time_schedule(
@@ -2131,6 +2316,84 @@ mod tests {
                 .and_then(|mut reader| reader.snapshot())
                 .map(|snapshot| snapshot.revision()),
             Ok(revision(1))
+        );
+    }
+
+    #[test]
+    fn schedule_persistence_rejects_one_time_conflict_with_recurring_schedule() {
+        let database = TemporaryDatabase::new("schedule-one-time-recurring-overlap");
+        let mut store = open_store(database.path(), 30);
+        let recurring = ScheduleSnapshot::try_new(
+            ScheduleId::Series(ScheduleSeriesId::from_bytes([31; 16])),
+            ScheduleRule::repeating(
+                "Daily planning",
+                None,
+                0b0111_1111,
+                9 * 3_600,
+                10 * 3_600,
+                0,
+                None,
+                "Etc/UTC",
+            )
+            .expect("valid recurring rule"),
+            EntityRevision::new(0),
+            UtcMicros::new(12),
+        )
+        .expect("matching recurring identity");
+        let conflicting_one_time = one_time_schedule_snapshot(32, 32_700_000_000, 35_100_000_000);
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &recurring),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &conflicting_one_time),
+            Err(SchedulePersistenceError::Conflict)
+        );
+        assert_eq!(
+            store
+                .open_read_session()
+                .and_then(|mut reader| reader.snapshot())
+                .map(|snapshot| snapshot.revision()),
+            Ok(revision(1))
+        );
+    }
+
+    #[test]
+    fn schedule_persistence_honors_persisted_recurring_skip_during_overlap_validation() {
+        let database = TemporaryDatabase::new("schedule-recurring-skip-overlap");
+        let mut store = open_store(database.path(), 31);
+        let mut recurring_rule = ScheduleRule::repeating(
+            "Daily planning",
+            None,
+            0b0111_1111,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("valid recurring rule");
+        recurring_rule
+            .skip_only_this_date(0)
+            .expect("valid occurrence skip");
+        let recurring = ScheduleSnapshot::try_new(
+            ScheduleId::Series(ScheduleSeriesId::from_bytes([33; 16])),
+            recurring_rule,
+            EntityRevision::new(0),
+            UtcMicros::new(12),
+        )
+        .expect("matching recurring identity");
+        let one_time_at_skipped_occurrence =
+            one_time_schedule_snapshot(34, 32_700_000_000, 35_100_000_000);
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &recurring),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &one_time_at_skipped_occurrence),
+            Ok(revision(2))
         );
     }
 
