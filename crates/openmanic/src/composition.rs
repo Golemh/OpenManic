@@ -2643,6 +2643,7 @@ struct VerticalSliceApp {
     today: TodayController,
     layout_editor: LayoutEditor,
     pending_layout_save: Option<LayoutDocument>,
+    pending_layout_navigation: Option<openmanic_ui_egui::Route>,
     theme_key: String,
     calendar: CalendarController,
     calendar_data: PresentableData<CalendarDaySnapshot>,
@@ -2768,6 +2769,7 @@ impl VerticalSlice {
             today: TodayController::new(),
             layout_editor: LayoutEditor::new(layout),
             pending_layout_save: None,
+            pending_layout_navigation: None,
             theme_key,
             calendar: CalendarController::default(),
             calendar_data: PresentableData::InitialLoading,
@@ -3071,6 +3073,22 @@ impl VerticalSliceApp {
             .today
             .widget_bindings_for_layout(self.app.controller().model(), &layout);
         let reflow = reflow_dashboard(&layout, self.today.registry(), ui.available_width());
+        let column_count = f32::from(reflow.columns().count());
+        let grid_gap = 8.0;
+        let grid_width = ui.available_width();
+        let cell_width = ((grid_width - (grid_gap * (column_count - 1.0))) / column_count).max(1.0);
+        let max_row = reflow
+            .placements()
+            .iter()
+            .map(openmanic_ui_egui::DashboardPlacement::row)
+            .max()
+            .unwrap_or(0);
+        let row_height = 340.0;
+        let grid_rows = u16::try_from(max_row.saturating_add(1)).unwrap_or(u16::MAX);
+        let (grid_rect, _) = ui.allocate_exact_size(
+            eframe::egui::vec2(grid_width, f32::from(grid_rows) * row_height),
+            eframe::egui::Sense::hover(),
+        );
         for placement in reflow.placements() {
             let Some(binding) = bindings
                 .widgets()
@@ -3079,7 +3097,28 @@ impl VerticalSliceApp {
             else {
                 continue;
             };
-            ui.separator();
+            let widget_height = match placement.height() {
+                LayoutHeight::Compact => 150.0,
+                LayoutHeight::Standard => 230.0,
+                LayoutHeight::Tall => 320.0,
+            };
+            let x = grid_rect.min.x + f32::from(placement.column()) * (cell_width + grid_gap);
+            let grid_row = u16::try_from(placement.row()).unwrap_or(u16::MAX);
+            let y = grid_rect.min.y + f32::from(grid_row) * row_height;
+            let widget_rect = eframe::egui::Rect::from_min_size(
+                eframe::egui::pos2(x, y),
+                eframe::egui::vec2(
+                    f32::from(placement.span()) * cell_width
+                        + f32::from(placement.span().saturating_sub(1)) * grid_gap,
+                    widget_height,
+                ),
+            );
+            ui.scope_builder(
+                eframe::egui::UiBuilder::new()
+                    .max_rect(widget_rect)
+                    .id_salt(placement.instance_id()),
+                |ui| {
+                    ui.group(|ui| {
             ui.label(format!(
                 "Responsive placement: row {}, column {}, span {}/{}",
                 placement.row(),
@@ -3156,9 +3195,16 @@ impl VerticalSliceApp {
                 }
                 TodayWidgetResolution::Available(definition) => {
                     ui.heading(definition.display_name());
-                    self.render_today_widget(ui, definition.kind(), &snapshot, &context);
+                    if self.layout_editor.is_editing() {
+                        ui.label("Widget interactions are disabled while editing this layout.");
+                    } else {
+                        self.render_today_widget(ui, definition.kind(), &snapshot, &context);
+                    }
                 }
             }
+            });
+                },
+            );
         }
     }
 
@@ -3167,6 +3213,24 @@ impl VerticalSliceApp {
         reason = "the explicit layout editor retains its actions next to their egui controls"
     )]
     fn render_layout_editor_controls(&mut self, ui: &mut eframe::egui::Ui) {
+        if let Some(route) = self.pending_layout_navigation {
+            ui.group(|ui| {
+                ui.strong("Unsaved layout changes");
+                ui.label(format!("Discard the draft and open {}?", route.label()));
+                if ui.button("Discard changes").clicked() {
+                    let _ = self
+                        .layout_editor
+                        .apply(LayoutEditAction::Cancel, self.today.registry());
+                    self.pending_layout_navigation = None;
+                    self.app
+                        .controller_mut()
+                        .reduce_local(UiAction::Navigate(route));
+                }
+                if ui.button("Keep editing").clicked() {
+                    self.pending_layout_navigation = None;
+                }
+            });
+        }
         if !self.layout_editor.is_editing() {
             if ui.button("Edit layout").clicked() {
                 let _ = self
@@ -3286,6 +3350,16 @@ impl VerticalSliceApp {
         }
     }
 
+    fn request_layout_aware_navigation(&mut self, route: openmanic_ui_egui::Route) {
+        if self.layout_editor.is_editing() {
+            self.pending_layout_navigation = Some(route);
+        } else {
+            self.app
+                .controller_mut()
+                .reduce_local(UiAction::Navigate(route));
+        }
+    }
+
     fn render_today_widget(
         &mut self,
         ui: &mut eframe::egui::Ui,
@@ -3337,9 +3411,7 @@ impl VerticalSliceApp {
                 TimelineRenderAction::OpenCategories { application_id } => {
                     self.selected_category_applications.clear();
                     self.selected_category_applications.insert(application_id);
-                    self.app
-                        .controller_mut()
-                        .reduce_local(UiAction::Navigate(openmanic_ui_egui::Route::Categories));
+                    self.request_layout_aware_navigation(openmanic_ui_egui::Route::Categories);
                 }
             }
         }
@@ -4368,7 +4440,15 @@ impl eframe::App for VerticalSliceApp {
         self.drain_worker_ingress();
         self.reconcile_persisted_appearance(ui.ctx());
         self.reconcile_persisted_layout();
+        let route_before_shell = self.app.controller().model().route();
         eframe::App::ui(&mut self.app, ui, frame);
+        let route_after_shell = self.app.controller().model().route();
+        if self.layout_editor.is_editing() && route_after_shell != route_before_shell {
+            self.pending_layout_navigation = Some(route_after_shell);
+            self.app
+                .controller_mut()
+                .reduce_local(UiAction::Navigate(route_before_shell));
+        }
         self.render_today_dashboard(ui);
         self.render_categories_dashboard(ui);
         self.render_calendar_dashboard(ui);

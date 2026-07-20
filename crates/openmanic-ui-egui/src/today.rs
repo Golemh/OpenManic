@@ -10,7 +10,9 @@ use std::sync::Arc;
 use openmanic_application::{
     CommandEnvelope, CommandId, OrderingKey, SchemaRevision, TrackingCommand, UtcMicros,
 };
-use openmanic_domain::{ActivityState, ApplicationId, HalfOpenInterval, LayoutDefinition};
+use openmanic_domain::{
+    ActivityState, ApplicationId, HalfOpenInterval, LayoutDefinition, LayoutFields, LayoutScalar,
+};
 
 use crate::{
     MutationStatus, QueueOverflow, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext,
@@ -304,12 +306,28 @@ impl TodayWidgetDefinition {
     }
 }
 
+/// Recoverable failure to migrate a stored widget configuration to a renderer.
+///
+/// Callers retain the original [`TodayWidgetInstance`] for diagnostics and use
+/// the registry's default configuration while presenting a missing-renderer
+/// placeholder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TodayWidgetConfigurationError {
+    /// No renderer claims the stable widget kind ID.
+    UnknownKind,
+    /// The stored kind or configuration schema is newer than this renderer.
+    UnsupportedSchema,
+    /// The bounded generic configuration is malformed.
+    InvalidConfiguration,
+}
+
 /// A persisted widget instance restored independently from renderer availability.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TodayWidgetInstance {
     id: TodayWidgetInstanceId,
     kind_id: String,
     kind_schema_version: u16,
+    configuration: LayoutFields,
 }
 
 impl TodayWidgetInstance {
@@ -318,6 +336,10 @@ impl TodayWidgetInstance {
             id: TodayWidgetInstanceId::new(id),
             kind_id: kind.id().to_owned(),
             kind_schema_version,
+            configuration: LayoutFields {
+                schema_version: kind_schema_version,
+                fields: Vec::new(),
+            },
         }
     }
 
@@ -332,6 +354,24 @@ impl TodayWidgetInstance {
             id: TodayWidgetInstanceId::new(instance_id),
             kind_id: kind_id.into(),
             kind_schema_version,
+            configuration: LayoutFields {
+                schema_version: kind_schema_version,
+                fields: Vec::new(),
+            },
+        }
+    }
+
+    fn from_layout_with_configuration(
+        instance_id: impl Into<String>,
+        kind_id: impl Into<String>,
+        kind_schema_version: u16,
+        configuration: LayoutFields,
+    ) -> Self {
+        Self {
+            id: TodayWidgetInstanceId::new(instance_id),
+            kind_id: kind_id.into(),
+            kind_schema_version,
+            configuration,
         }
     }
 
@@ -349,6 +389,12 @@ impl TodayWidgetInstance {
     #[must_use]
     pub const fn kind_schema_version(&self) -> u16 {
         self.kind_schema_version
+    }
+
+    /// Returns the original stored generic configuration for diagnostics.
+    #[must_use]
+    pub fn configuration(&self) -> &LayoutFields {
+        &self.configuration
     }
 }
 
@@ -371,7 +417,7 @@ pub enum TodayWidgetRegistryError {
 const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
     TodayWidgetDefinition {
         kind: TodayWidgetKind::TIMELINE,
-        schema_version: 1,
+        schema_version: 2,
         display_name: "Timeline",
         description: "Tracked activity and personal schedule",
         size_policy: TodayWidgetSizePolicy::new(6, 4, 4, 12),
@@ -379,7 +425,7 @@ const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
     },
     TodayWidgetDefinition {
         kind: TodayWidgetKind::APPLICATION_USAGE,
-        schema_version: 1,
+        schema_version: 2,
         display_name: "Application usage",
         description: "Exact duration by application",
         size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
@@ -387,7 +433,7 @@ const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
     },
     TodayWidgetDefinition {
         kind: TodayWidgetKind::TIME_DISTRIBUTION,
-        schema_version: 1,
+        schema_version: 2,
         display_name: "Time distribution",
         description: "Exact duration by category",
         size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
@@ -395,7 +441,7 @@ const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
     },
     TodayWidgetDefinition {
         kind: TodayWidgetKind::FOCUS,
-        schema_version: 1,
+        schema_version: 2,
         display_name: "Focus session",
         description: "Focus timer controls and status",
         size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
@@ -446,27 +492,105 @@ impl TodayWidgetRegistry {
     /// Resolves a restored widget without allowing an unavailable renderer to block startup.
     #[must_use]
     pub fn resolve(&self, instance: &TodayWidgetInstance) -> TodayWidgetResolution {
-        self.definitions
+        self.migrate_configuration(instance).map_or_else(
+            |_| TodayWidgetResolution::MissingRenderer,
+            |definition_and_configuration| {
+                TodayWidgetResolution::Available(definition_and_configuration.0)
+            },
+        )
+    }
+
+    /// Migrates and validates a stored configuration without mutating its layout document.
+    ///
+    /// Each registered widget presently has an explicit `1 -> 2` migration.
+    /// The migration only advances the generic configuration envelope: first-party
+    /// version two did not add a widget-specific field. The source configuration
+    /// remains on [`TodayWidgetInstance`] until a fully validated layout is saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns a recoverable error for an unknown kind, a newer schema, or an
+    /// invalid bounded generic value. Such an instance resolves to
+    /// [`TodayWidgetResolution::MissingRenderer`].
+    pub fn migrate_configuration(
+        &self,
+        instance: &TodayWidgetInstance,
+    ) -> Result<(TodayWidgetDefinition, LayoutFields), TodayWidgetConfigurationError> {
+        let definition = self
+            .definitions
             .iter()
             .copied()
-            .find(|definition| {
-                definition.kind.id() == instance.kind_id
-                    && definition.supports_schema(instance.kind_schema_version)
+            .find(|definition| definition.kind.id() == instance.kind_id)
+            .ok_or(TodayWidgetConfigurationError::UnknownKind)?;
+        if !definition.supports_schema(instance.kind_schema_version)
+            || !definition.supports_schema(instance.configuration.schema_version)
+        {
+            return Err(TodayWidgetConfigurationError::UnsupportedSchema);
+        }
+
+        let mut migrated = instance.configuration.clone();
+        while migrated.schema_version < definition.schema_version {
+            migrated = migrate_configuration_step(definition, migrated)?;
+        }
+        validate_configuration(&migrated, definition.schema_version)?;
+        Ok((definition, migrated))
+    }
+
+    fn fallback_configuration(&self, instance: &TodayWidgetInstance) -> LayoutFields {
+        self.definitions
+            .iter()
+            .find(|definition| definition.kind.id() == instance.kind_id)
+            .map_or_else(LayoutFields::empty, |definition| LayoutFields {
+                schema_version: definition.schema_version,
+                fields: Vec::new(),
             })
-            .map_or(
-                TodayWidgetResolution::MissingRenderer,
-                TodayWidgetResolution::Available,
-            )
     }
 
     fn default_instances() -> Vec<TodayWidgetInstance> {
         vec![
-            TodayWidgetInstance::new("today.timeline", TodayWidgetKind::TIMELINE, 1),
-            TodayWidgetInstance::new("today.usage", TodayWidgetKind::APPLICATION_USAGE, 1),
-            TodayWidgetInstance::new("today.distribution", TodayWidgetKind::TIME_DISTRIBUTION, 1),
-            TodayWidgetInstance::new("today.focus", TodayWidgetKind::FOCUS, 1),
+            TodayWidgetInstance::new("today.timeline", TodayWidgetKind::TIMELINE, 2),
+            TodayWidgetInstance::new("today.usage", TodayWidgetKind::APPLICATION_USAGE, 2),
+            TodayWidgetInstance::new("today.distribution", TodayWidgetKind::TIME_DISTRIBUTION, 2),
+            TodayWidgetInstance::new("today.focus", TodayWidgetKind::FOCUS, 2),
         ]
     }
+}
+
+fn migrate_configuration_step(
+    definition: TodayWidgetDefinition,
+    mut configuration: LayoutFields,
+) -> Result<LayoutFields, TodayWidgetConfigurationError> {
+    match configuration.schema_version {
+        1 if definition.schema_version >= 2 => {
+            configuration.schema_version = 2;
+            Ok(configuration)
+        }
+        _ => Err(TodayWidgetConfigurationError::UnsupportedSchema),
+    }
+}
+
+fn validate_configuration(
+    configuration: &LayoutFields,
+    expected_schema_version: u16,
+) -> Result<(), TodayWidgetConfigurationError> {
+    if configuration.schema_version != expected_schema_version {
+        return Err(TodayWidgetConfigurationError::InvalidConfiguration);
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for field in &configuration.fields {
+        if field.name.is_empty()
+            || !field.name.bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'-' | b'_')
+            })
+            || !names.insert(&field.name)
+            || matches!(&field.value, LayoutScalar::Text(value) if value.contains(['\n', '\r', '\0']))
+        {
+            return Err(TodayWidgetConfigurationError::InvalidConfiguration);
+        }
+    }
+    Ok(())
 }
 
 /// One renderer input pairing a restored widget with the shared immutable context.
@@ -474,6 +598,7 @@ impl TodayWidgetRegistry {
 pub struct TodayWidgetBinding {
     instance: TodayWidgetInstance,
     resolution: TodayWidgetResolution,
+    configuration: LayoutFields,
     context: Arc<TodayViewContext>,
 }
 
@@ -487,6 +612,12 @@ impl TodayWidgetBinding {
     #[must_use]
     pub const fn resolution(&self) -> TodayWidgetResolution {
         self.resolution
+    }
+
+    /// Returns the migrated configuration, or renderer defaults for recovery.
+    #[must_use]
+    pub fn configuration(&self) -> &LayoutFields {
+        &self.configuration
     }
 
     /// Returns the same immutable context object supplied to every Today widget.
@@ -563,10 +694,11 @@ impl TodayController {
             widgets
                 .into_iter()
                 .map(|widget| {
-                    TodayWidgetInstance::from_layout(
+                    TodayWidgetInstance::from_layout_with_configuration(
                         widget.instance_id,
                         widget.kind_id,
                         widget.kind_schema_version,
+                        widget.configuration,
                     )
                 })
                 .collect(),
@@ -582,10 +714,25 @@ impl TodayController {
         TodayWidgetBindings {
             widgets: instances
                 .into_iter()
-                .map(|instance| TodayWidgetBinding {
-                    resolution: self.registry.resolve(&instance),
-                    instance,
-                    context: Arc::clone(&context),
+                .map(|instance| {
+                    let (resolution, configuration) =
+                        self.registry.migrate_configuration(&instance).map_or_else(
+                            |_| {
+                                (
+                                    TodayWidgetResolution::MissingRenderer,
+                                    self.registry.fallback_configuration(&instance),
+                                )
+                            },
+                            |(definition, configuration)| {
+                                (TodayWidgetResolution::Available(definition), configuration)
+                            },
+                        );
+                    TodayWidgetBinding {
+                        resolution,
+                        instance,
+                        configuration,
+                        context: Arc::clone(&context),
+                    }
                 })
                 .collect(),
         }
@@ -644,13 +791,15 @@ mod tests {
         MutationRejection, MutationRejectionReason, OrderingKey, SchemaRevision, TrackingEvent,
     };
     use openmanic_domain::{
-        ActivityState, ApplicationId, HalfOpenInterval, LayoutDocument, UtcMicros,
+        ActivityState, ApplicationId, HalfOpenInterval, LayoutDocument, LayoutField, LayoutFields,
+        LayoutScalar, UtcMicros,
     };
 
     use super::{
         TodayAction, TodayCategoryFilter, TodayController, TodayNarrowingCriterion,
-        TodayTrackingRequest, TodayWidgetKind, TodayWidgetRegistry, TodayWidgetRegistryError,
-        TodayWidgetResolution, TrackingControlAction,
+        TodayTrackingRequest, TodayWidgetConfigurationError, TodayWidgetInstance, TodayWidgetKind,
+        TodayWidgetRegistry, TodayWidgetRegistryError, TodayWidgetResolution,
+        TrackingControlAction,
     };
     use crate::{InboundMessage, MutationStatus, UiController, UiModel};
 
@@ -817,6 +966,71 @@ mod tests {
             bindings.widgets()[0].resolution(),
             TodayWidgetResolution::Available(_)
         ));
+    }
+
+    #[test]
+    fn widget_configuration_migrates_once_and_preserves_the_original_source() {
+        let registry = TodayWidgetRegistry::default();
+        let source = LayoutFields {
+            schema_version: 1,
+            fields: vec![LayoutField {
+                name: "show-schedule".to_owned(),
+                value: LayoutScalar::Boolean(true),
+            }],
+        };
+        let instance = TodayWidgetInstance::from_layout_with_configuration(
+            "today.timeline",
+            TodayWidgetKind::TIMELINE.id(),
+            1,
+            source.clone(),
+        );
+
+        let (definition, migrated) = registry
+            .migrate_configuration(&instance)
+            .expect("version one config has a defined migration");
+        assert_eq!(definition.schema_version(), 2);
+        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.fields, source.fields);
+        assert_eq!(instance.configuration(), &source);
+    }
+
+    #[test]
+    fn newer_or_invalid_widget_configuration_is_recoverable_with_defaults() {
+        let controller = TodayController::new();
+        let model = UiModel::<()>::default();
+        let mut layout = LayoutDocument::safe_default().definition();
+        layout.widgets[0].configuration.schema_version = 3;
+        let bindings = controller.widget_bindings_for_layout(&model, &layout);
+
+        assert_eq!(
+            bindings.widgets()[0].resolution(),
+            TodayWidgetResolution::MissingRenderer
+        );
+        assert_eq!(bindings.widgets()[0].configuration().schema_version, 2);
+        assert_eq!(
+            bindings.widgets()[0]
+                .instance()
+                .configuration()
+                .schema_version,
+            3
+        );
+
+        let invalid = TodayWidgetInstance::from_layout_with_configuration(
+            "today.timeline",
+            TodayWidgetKind::TIMELINE.id(),
+            1,
+            LayoutFields {
+                schema_version: 1,
+                fields: vec![LayoutField {
+                    name: "Bad field".to_owned(),
+                    value: LayoutScalar::Integer(1),
+                }],
+            },
+        );
+        assert_eq!(
+            controller.registry().migrate_configuration(&invalid),
+            Err(TodayWidgetConfigurationError::InvalidConfiguration)
+        );
     }
 
     #[test]
