@@ -69,6 +69,7 @@ pub use schedule::{
 pub use schedule_time::{
     ResolvedScheduleBoundary, ResolvedScheduleOccurrence, SCHEDULE_CIVIL_EPOCH,
     ScheduleBoundaryResolution, ScheduleTimeError, expand_repeating_schedule,
+    expand_repeating_schedule_in_interval,
     repeating_schedule_rules_conflict, resolve_schedule_boundary,
     schedule_rule_conflicts_with_intervals,
 };

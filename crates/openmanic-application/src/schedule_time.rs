@@ -214,6 +214,41 @@ pub fn schedule_rule_conflicts_with_intervals(
     Ok(false)
 }
 
+/// Expands a recurring rule only across the local anchor dates that can intersect `visible_range`.
+///
+/// Each retained segment zone contributes its own bounded anchor range; the one-day margins cover
+/// overnight occurrences at either visible boundary.
+///
+/// # Errors
+///
+/// Returns [`ScheduleTimeError`] when the rule does not repeat or a stored instant or boundary
+/// cannot be resolved.
+pub fn expand_repeating_schedule_in_interval(
+    rule: &ScheduleRule,
+    visible_range: HalfOpenInterval,
+) -> Result<Vec<ResolvedScheduleOccurrence>, ScheduleTimeError> {
+    if !rule.is_repeating() {
+        return Err(ScheduleTimeError::RuleDoesNotRepeat);
+    }
+    let mut first_anchor = i32::MAX;
+    let mut last_anchor = i32::MIN;
+    for segment in rule.segments() {
+        first_anchor = first_anchor.min(
+            local_anchor_date(visible_range.start(), segment.time_zone_id())?
+                .checked_sub(1)
+                .ok_or(ScheduleTimeError::CivilDateOutOfRange)?,
+        );
+        last_anchor = last_anchor.max(
+            local_anchor_date(visible_range.end(), segment.time_zone_id())?
+                .checked_add(1)
+                .ok_or(ScheduleTimeError::CivilDateOutOfRange)?,
+        );
+    }
+    let mut occurrences = expand_repeating_schedule(rule, first_anchor, last_anchor)?;
+    occurrences.retain(|occurrence| occurrence.interval().overlaps(visible_range));
+    Ok(occurrences)
+}
+
 /// Returns whether two recurring rules have any positive UTC intersection.
 ///
 /// The recurring pattern repeats weekly, so each overlapping segment lineage is expanded for one
@@ -442,7 +477,8 @@ mod tests {
 
     use super::{
         SCHEDULE_CIVIL_EPOCH, ScheduleBoundaryResolution, ScheduleTimeError,
-        expand_repeating_schedule, repeating_schedule_rules_conflict, resolve_schedule_boundary,
+        expand_repeating_schedule, expand_repeating_schedule_in_interval,
+        repeating_schedule_rules_conflict, resolve_schedule_boundary,
         schedule_rule_conflicts_with_intervals,
     };
 
@@ -596,5 +632,23 @@ mod tests {
             repeating_schedule_rules_conflict(&daily, &skipped_single_day),
             Ok(false)
         );
+    }
+
+    #[test]
+    fn bounded_expansion_keeps_only_occurrences_intersecting_the_visible_range() {
+        let rule = ScheduleRule::repeating(
+            "Daily planning", None, 0b0111_1111, 9 * 3_600, 10 * 3_600, 0, None, "Etc/UTC",
+        )
+        .expect("valid recurring rule");
+        let visible = HalfOpenInterval::try_new(
+            UtcMicros::new(9 * 3_600_000_000),
+            UtcMicros::new(10 * 3_600_000_000),
+        )
+        .expect("positive visible range");
+
+        let occurrences = expand_repeating_schedule_in_interval(&rule, visible)
+            .expect("bounded expansion should resolve");
+        assert_eq!(occurrences.len(), 1);
+        assert_eq!(occurrences[0].interval(), visible);
     }
 }
