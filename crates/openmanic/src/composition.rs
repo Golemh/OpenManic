@@ -33,7 +33,7 @@ use openmanic_application::{
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval,
-    FocusSessionId, OneTimeScheduleId, ScheduleRule, TrackerRunId, UtcMicros,
+    FocusSessionId, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -351,14 +351,26 @@ impl CommandIdentifiers {
         &self,
         range: HalfOpenInterval,
         label: &str,
+        repeats: bool,
+        weekday_mask: u8,
     ) -> Option<CommandEnvelope<ScheduleCommand>> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         let mut id_bytes = [0_u8; 16];
         id_bytes[..8].copy_from_slice(&submitted_at_utc.get().to_be_bytes());
         id_bytes[8..].copy_from_slice(&command_id.get().to_be_bytes());
-        let rule = ScheduleRule::one_time(label, None, range, "Etc/UTC").ok()?;
+        let (id, rule) = if repeats {
+            (
+                ScheduleId::Series(ScheduleSeriesId::from_bytes(id_bytes)),
+                recurring_schedule_rule(label, range, weekday_mask)?,
+            )
+        } else {
+            (
+                ScheduleId::OneTime(OneTimeScheduleId::from_bytes(id_bytes)),
+                ScheduleRule::one_time(label, None, range, "Etc/UTC").ok()?,
+            )
+        };
         let snapshot = ScheduleSnapshot::try_new(
-            ScheduleId::OneTime(OneTimeScheduleId::from_bytes(id_bytes)),
+            id,
             rule,
             EntityRevision::new(0),
             submitted_at_utc,
@@ -1551,6 +1563,38 @@ fn range_label(range: HalfOpenInterval) -> String {
     format!("{}–{} UTC", range.start().get(), range.end().get())
 }
 
+fn recurring_schedule_rule(
+    label: &str,
+    range: HalfOpenInterval,
+    weekday_mask: u8,
+) -> Option<ScheduleRule> {
+    const DAY_US: i64 = 86_400_000_000;
+    const SECOND_US: i64 = 1_000_000;
+    if weekday_mask == 0
+        || range.start().get().rem_euclid(SECOND_US) != 0
+        || range.end().get().rem_euclid(SECOND_US) != 0
+    {
+        return None;
+    }
+    let start_second = u32::try_from(range.start().get().rem_euclid(DAY_US) / SECOND_US).ok()?;
+    let end_second = u32::try_from(range.end().get().rem_euclid(DAY_US) / SECOND_US).ok()?;
+    if start_second == end_second {
+        return None;
+    }
+    let effective_start_date = i32::try_from(range.start().get().div_euclid(DAY_US)).ok()?;
+    ScheduleRule::repeating(
+        label,
+        None,
+        weekday_mask,
+        start_second,
+        end_second,
+        effective_start_date,
+        None,
+        "Etc/UTC",
+    )
+    .ok()
+}
+
 const fn tracking_status_label(status: &MutationStatus) -> &'static str {
     match status {
         MutationStatus::Pending => "Tracking request pending…",
@@ -1871,14 +1915,14 @@ impl VerticalSliceApp {
     fn render_schedule_editor(&mut self, ui: &mut eframe::egui::Ui) {
         let schedule_draft_action = self.schedule_draft.as_mut().map(|draft| {
             let action = render_schedule_draft(ui, draft);
-            (action, draft.range, draft.label.clone())
+            (action, draft.range, draft.label.clone(), draft.repeats, draft.weekday_mask)
         });
-        let Some((action, range, label)) = schedule_draft_action else {
+        let Some((action, range, label, repeats, weekday_mask)) = schedule_draft_action else {
             self.render_schedule_status(ui);
             return;
         };
         let submitted = match action {
-            ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label),
+            ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label, repeats, weekday_mask),
             ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
         };
         if let Some(command_id) = submitted {
@@ -1900,10 +1944,16 @@ impl VerticalSliceApp {
         }
     }
 
-    fn queue_schedule_draft(&self, range: HalfOpenInterval, label: &str) -> Option<CommandId> {
+    fn queue_schedule_draft(
+        &self,
+        range: HalfOpenInterval,
+        label: &str,
+        repeats: bool,
+        weekday_mask: u8,
+    ) -> Option<CommandId> {
         self.runtime
             .identifiers
-            .schedule_create(range, label)
+            .schedule_create(range, label, repeats, weekday_mask)
             .and_then(|command| self.runtime.try_submit_schedule(command))
     }
 
@@ -1990,6 +2040,8 @@ enum ScheduleDraftAction {
 struct ScheduleDraft {
     range: HalfOpenInterval,
     label: String,
+    repeats: bool,
+    weekday_mask: u8,
 }
 
 impl ScheduleDraft {
@@ -1997,6 +2049,8 @@ impl ScheduleDraft {
         Self {
             range,
             label: "New schedule".to_owned(),
+            repeats: false,
+            weekday_mask: 0b0111_1111,
         }
     }
 }
@@ -2016,7 +2070,12 @@ fn render_schedule_draft(
             ui.label("Name");
             ui.text_edit_singleline(&mut draft.label);
         });
-        ui.label("This creates a one-time schedule. Recurrence and editing existing schedules follow next.");
+        ui.checkbox(&mut draft.repeats, "Repeat");
+        if draft.repeats {
+            render_weekday_selector(ui, &mut draft.weekday_mask);
+            ui.label("Choose at least one day. Recurring times use UTC until local-zone editing is added.");
+        }
+        ui.label("Editing existing schedules and occurrence scopes follow next.");
         if ui
             .add_enabled(!draft.label.trim().is_empty(), eframe::egui::Button::new("Save schedule"))
             .clicked()
@@ -2029,6 +2088,20 @@ fn render_schedule_draft(
         }
     })
     .inner
+}
+
+fn render_weekday_selector(ui: &mut eframe::egui::Ui, weekday_mask: &mut u8) {
+    ui.horizontal(|ui| {
+        for (index, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            .iter()
+            .enumerate()
+        {
+            let bit = 1_u8 << index;
+            if ui.selectable_label(*weekday_mask & bit != 0, *label).clicked() {
+                *weekday_mask ^= bit;
+            }
+        }
+    });
 }
 
 impl eframe::App for VerticalSliceApp {
