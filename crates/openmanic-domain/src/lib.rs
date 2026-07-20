@@ -22,7 +22,8 @@ pub use catalog::{
     CategoryNameKind, NameError, ValidatedName,
 };
 pub use documents::{
-    DocumentError, LayoutDocument, SavedViewDefinition, SavedViewDocument, SavedViewField,
+    DocumentError, LayoutDefinition, LayoutDocument, LayoutField, LayoutFields, LayoutHeight,
+    LayoutScalar, LayoutWidgetDefinition, SavedViewDefinition, SavedViewDocument, SavedViewField,
     SavedViewFields, SavedViewRange, SavedViewRelativeRange, SavedViewScalar,
     SavedViewTimeZoneBehavior, SettingsDocument, ThemeSelection,
 };

@@ -1,4 +1,4 @@
-//! Today dashboard controller, shared state actions, and fixed bootstrap widgets.
+//! Today dashboard controller, shared state actions, and registered widget bindings.
 //!
 //! This module owns only UI-local selection, navigation, and command correlation.
 //! It deliberately does not render widgets, query snapshots, access storage, or
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use openmanic_application::{
     CommandEnvelope, CommandId, OrderingKey, SchemaRevision, TrackingCommand, UtcMicros,
 };
-use openmanic_domain::{ActivityState, ApplicationId, HalfOpenInterval};
+use openmanic_domain::{ActivityState, ApplicationId, HalfOpenInterval, LayoutDefinition};
 
 use crate::{
     MutationStatus, QueueOverflow, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext,
@@ -167,102 +167,326 @@ impl TrackingControlAcknowledgement {
     }
 }
 
-/// Stable identity for a fixed Today bootstrap widget instance.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub enum TodayWidgetInstanceId {
-    /// The primary three-band activity timeline instance.
-    Timeline,
-    /// The default application-usage summary instance.
-    ApplicationUsage,
-    /// The default time-distribution summary instance.
-    TimeDistribution,
-}
+/// Stable persisted identity of one Today widget instance.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TodayWidgetInstanceId(String);
 
-/// The compiled-in kind of one fixed Today bootstrap widget.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TodayWidgetKind {
-    /// The primary activity timeline widget.
-    Timeline,
-    /// The application-duration summary widget.
-    ApplicationUsage,
-    /// The category/time distribution summary widget.
-    TimeDistribution,
-}
-
-/// One fixed, compiled-in default dashboard widget instance.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct TodayWidgetInstance {
-    id: TodayWidgetInstanceId,
-    kind: TodayWidgetKind,
-}
-
-impl TodayWidgetInstance {
-    const fn new(id: TodayWidgetInstanceId, kind: TodayWidgetKind) -> Self {
-        Self { id, kind }
-    }
-
-    /// Returns the stable bootstrap instance identity.
+impl TodayWidgetInstanceId {
+    /// Creates a stable instance identity from an already validated layout value.
     #[must_use]
-    pub const fn id(self) -> TodayWidgetInstanceId {
-        self.id
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
     }
 
-    /// Returns the compiled-in widget kind.
+    /// Returns the storage-stable identity string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stable reverse-domain identifier for a first-party widget kind.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct TodayWidgetKind(&'static str);
+
+impl TodayWidgetKind {
+    /// The primary activity Timeline.
+    pub const TIMELINE: Self = Self("openmanic.timeline.day");
+    /// Application-duration summary.
+    pub const APPLICATION_USAGE: Self = Self("openmanic.usage.application");
+    /// Category/time distribution summary.
+    pub const TIME_DISTRIBUTION: Self = Self("openmanic.distribution.time");
+    /// Focus-session controls and state.
+    pub const FOCUS: Self = Self("openmanic.focus.session");
+
+    /// Returns the stable persisted kind ID.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        self.0
+    }
+}
+
+/// Width constraints declared by a widget renderer for each responsive grid mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TodayWidgetSizePolicy {
+    minimum_span_12: u8,
+    minimum_span_8: u8,
+    minimum_span_4: u8,
+    preferred_span_12: u8,
+}
+
+impl TodayWidgetSizePolicy {
+    const fn new(
+        minimum_span_12: u8,
+        minimum_span_8: u8,
+        minimum_span_4: u8,
+        preferred_span_12: u8,
+    ) -> Self {
+        Self {
+            minimum_span_12,
+            minimum_span_8,
+            minimum_span_4,
+            preferred_span_12,
+        }
+    }
+
+    /// Returns the minimum span for a 12-column desktop grid.
+    #[must_use]
+    pub const fn minimum_span_12(self) -> u8 {
+        self.minimum_span_12
+    }
+
+    /// Returns the minimum span for an 8-column responsive grid.
+    #[must_use]
+    pub const fn minimum_span_8(self) -> u8 {
+        self.minimum_span_8
+    }
+
+    /// Returns the minimum span for a 4-column responsive grid.
+    #[must_use]
+    pub const fn minimum_span_4(self) -> u8 {
+        self.minimum_span_4
+    }
+
+    /// Returns the preferred persisted desktop span.
+    #[must_use]
+    pub const fn preferred_span_12(self) -> u8 {
+        self.preferred_span_12
+    }
+}
+
+/// Static first-party widget contract registered before a dashboard layout is restored.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TodayWidgetDefinition {
+    kind: TodayWidgetKind,
+    schema_version: u16,
+    display_name: &'static str,
+    description: &'static str,
+    size_policy: TodayWidgetSizePolicy,
+    supports_multiple_instances: bool,
+}
+
+impl TodayWidgetDefinition {
+    /// Returns the stable widget kind.
     #[must_use]
     pub const fn kind(self) -> TodayWidgetKind {
         self.kind
     }
+    /// Returns the latest compatible configuration schema version.
+    #[must_use]
+    pub const fn schema_version(self) -> u16 {
+        self.schema_version
+    }
+    /// Returns picker-visible display text.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        self.display_name
+    }
+    /// Returns picker-visible explanatory text.
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        self.description
+    }
+    /// Returns responsive sizing requirements.
+    #[must_use]
+    pub const fn size_policy(self) -> TodayWidgetSizePolicy {
+        self.size_policy
+    }
+    /// Returns whether layouts may contain more than one instance of this kind.
+    #[must_use]
+    pub const fn supports_multiple_instances(self) -> bool {
+        self.supports_multiple_instances
+    }
+    /// Returns whether a persisted configuration can be migrated by this renderer.
+    #[must_use]
+    pub const fn supports_schema(self, schema_version: u16) -> bool {
+        schema_version > 0 && schema_version <= self.schema_version
+    }
 }
 
-const BOOTSTRAP_WIDGETS: [TodayWidgetInstance; 3] = [
-    TodayWidgetInstance::new(TodayWidgetInstanceId::Timeline, TodayWidgetKind::Timeline),
-    TodayWidgetInstance::new(
-        TodayWidgetInstanceId::ApplicationUsage,
-        TodayWidgetKind::ApplicationUsage,
-    ),
-    TodayWidgetInstance::new(
-        TodayWidgetInstanceId::TimeDistribution,
-        TodayWidgetKind::TimeDistribution,
-    ),
+/// A persisted widget instance restored independently from renderer availability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TodayWidgetInstance {
+    id: TodayWidgetInstanceId,
+    kind_id: String,
+    kind_schema_version: u16,
+}
+
+impl TodayWidgetInstance {
+    fn new(id: &str, kind: TodayWidgetKind, kind_schema_version: u16) -> Self {
+        Self {
+            id: TodayWidgetInstanceId::new(id),
+            kind_id: kind.id().to_owned(),
+            kind_schema_version,
+        }
+    }
+
+    /// Reconstructs an instance from a validated persisted layout placement.
+    #[must_use]
+    pub fn from_layout(
+        instance_id: impl Into<String>,
+        kind_id: impl Into<String>,
+        kind_schema_version: u16,
+    ) -> Self {
+        Self {
+            id: TodayWidgetInstanceId::new(instance_id),
+            kind_id: kind_id.into(),
+            kind_schema_version,
+        }
+    }
+
+    /// Returns the stable instance identity.
+    #[must_use]
+    pub fn id(&self) -> &TodayWidgetInstanceId {
+        &self.id
+    }
+    /// Returns the stable persisted widget-kind identifier.
+    #[must_use]
+    pub fn kind_id(&self) -> &str {
+        &self.kind_id
+    }
+    /// Returns the persisted widget configuration schema version.
+    #[must_use]
+    pub const fn kind_schema_version(&self) -> u16 {
+        self.kind_schema_version
+    }
+}
+
+/// Recoverable outcome of resolving a restored layout instance through the registry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TodayWidgetResolution {
+    /// A compatible first-party renderer is available.
+    Available(TodayWidgetDefinition),
+    /// The kind is absent or its persisted schema is newer than the renderer supports.
+    MissingRenderer,
+}
+
+/// Registry construction failure used to reject duplicate first-party widget kinds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TodayWidgetRegistryError {
+    /// More than one definition claims the same stable kind ID.
+    DuplicateKind,
+}
+
+const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
+    TodayWidgetDefinition {
+        kind: TodayWidgetKind::TIMELINE,
+        schema_version: 1,
+        display_name: "Timeline",
+        description: "Tracked activity and personal schedule",
+        size_policy: TodayWidgetSizePolicy::new(6, 4, 4, 12),
+        supports_multiple_instances: false,
+    },
+    TodayWidgetDefinition {
+        kind: TodayWidgetKind::APPLICATION_USAGE,
+        schema_version: 1,
+        display_name: "Application usage",
+        description: "Exact duration by application",
+        size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
+        supports_multiple_instances: true,
+    },
+    TodayWidgetDefinition {
+        kind: TodayWidgetKind::TIME_DISTRIBUTION,
+        schema_version: 1,
+        display_name: "Time distribution",
+        description: "Exact duration by category",
+        size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
+        supports_multiple_instances: true,
+    },
+    TodayWidgetDefinition {
+        kind: TodayWidgetKind::FOCUS,
+        schema_version: 1,
+        display_name: "Focus session",
+        description: "Focus timer controls and status",
+        size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
+        supports_multiple_instances: false,
+    },
 ];
 
-/// Fixed bootstrap registry for the three default Today widget instances.
-///
-/// This intentionally has no mutation API. The versioned configurable registry
-/// and saved layouts are owned by OM-500 and later work.
+/// First-party widget definitions and their recoverable layout resolution contract.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TodayWidgetRegistry {
-    instances: [TodayWidgetInstance; 3],
+    definitions: Vec<TodayWidgetDefinition>,
 }
 
 impl Default for TodayWidgetRegistry {
     fn default() -> Self {
         Self {
-            instances: BOOTSTRAP_WIDGETS,
+            definitions: FIRST_PARTY_WIDGETS.to_vec(),
         }
     }
 }
 
 impl TodayWidgetRegistry {
-    /// Returns the exactly three compiled-in bootstrap widget instances.
+    /// Builds a registry, rejecting duplicate stable kind IDs before presentation starts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TodayWidgetRegistryError::DuplicateKind`] for duplicate stable widget kind IDs.
+    pub fn try_new(
+        definitions: Vec<TodayWidgetDefinition>,
+    ) -> Result<Self, TodayWidgetRegistryError> {
+        for (index, definition) in definitions.iter().enumerate() {
+            if definitions[..index]
+                .iter()
+                .any(|existing| existing.kind == definition.kind)
+            {
+                return Err(TodayWidgetRegistryError::DuplicateKind);
+            }
+        }
+        Ok(Self { definitions })
+    }
+
+    /// Returns all registered first-party widget definitions in picker order.
     #[must_use]
-    pub const fn instances(&self) -> &[TodayWidgetInstance; 3] {
-        &self.instances
+    pub fn definitions(&self) -> &[TodayWidgetDefinition] {
+        &self.definitions
+    }
+
+    /// Resolves a restored widget without allowing an unavailable renderer to block startup.
+    #[must_use]
+    pub fn resolve(&self, instance: &TodayWidgetInstance) -> TodayWidgetResolution {
+        self.definitions
+            .iter()
+            .copied()
+            .find(|definition| {
+                definition.kind.id() == instance.kind_id
+                    && definition.supports_schema(instance.kind_schema_version)
+            })
+            .map_or(
+                TodayWidgetResolution::MissingRenderer,
+                TodayWidgetResolution::Available,
+            )
+    }
+
+    fn default_instances() -> Vec<TodayWidgetInstance> {
+        vec![
+            TodayWidgetInstance::new("today.timeline", TodayWidgetKind::TIMELINE, 1),
+            TodayWidgetInstance::new("today.usage", TodayWidgetKind::APPLICATION_USAGE, 1),
+            TodayWidgetInstance::new("today.distribution", TodayWidgetKind::TIME_DISTRIBUTION, 1),
+            TodayWidgetInstance::new("today.focus", TodayWidgetKind::FOCUS, 1),
+        ]
     }
 }
 
-/// One renderer input pairing a fixed widget with the shared immutable context.
+/// One renderer input pairing a restored widget with the shared immutable context.
 #[derive(Clone, Debug)]
 pub struct TodayWidgetBinding {
     instance: TodayWidgetInstance,
+    resolution: TodayWidgetResolution,
     context: Arc<TodayViewContext>,
 }
 
 impl TodayWidgetBinding {
-    /// Returns the fixed widget instance to render.
+    /// Returns the restored widget instance to render or recover.
     #[must_use]
-    pub const fn instance(&self) -> TodayWidgetInstance {
-        self.instance
+    pub fn instance(&self) -> &TodayWidgetInstance {
+        &self.instance
+    }
+    /// Returns whether a compatible renderer is available for this instance.
+    #[must_use]
+    pub const fn resolution(&self) -> TodayWidgetResolution {
+        self.resolution
     }
 
     /// Returns the same immutable context object supplied to every Today widget.
@@ -272,16 +496,16 @@ impl TodayWidgetBinding {
     }
 }
 
-/// The complete fixed Today widget input set for one normal UI frame.
+/// The complete registered Today widget input set for one normal UI frame.
 #[derive(Clone, Debug)]
 pub struct TodayWidgetBindings {
-    widgets: [TodayWidgetBinding; 3],
+    widgets: Vec<TodayWidgetBinding>,
 }
 
 impl TodayWidgetBindings {
-    /// Returns the fixed widgets in their deterministic bootstrap order.
+    /// Returns widgets in deterministic restored-layout order.
     #[must_use]
-    pub const fn widgets(&self) -> &[TodayWidgetBinding; 3] {
+    pub fn widgets(&self) -> &[TodayWidgetBinding] {
         &self.widgets
     }
 }
@@ -294,13 +518,13 @@ pub struct TodayController {
 }
 
 impl TodayController {
-    /// Creates a controller with the fixed three-widget bootstrap registry.
+    /// Creates a controller with the registered first-party widget definitions.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns the fixed bootstrap registry used by this controller.
+    /// Returns the first-party widget registry used by this controller.
     #[must_use]
     pub const fn registry(&self) -> &TodayWidgetRegistry {
         &self.registry
@@ -319,15 +543,51 @@ impl TodayController {
         crate::reducer::reduce(model, crate::UiAction::Today(action));
     }
 
-    /// Builds fixed renderer inputs whose widgets all share one immutable context object.
+    /// Builds renderer inputs whose widgets all share one immutable context object.
     #[must_use]
     pub fn widget_bindings<T>(&self, model: &UiModel<T>) -> TodayWidgetBindings {
+        self.widget_bindings_for_instances(model, TodayWidgetRegistry::default_instances())
+    }
+
+    /// Builds bindings for a validated persisted layout without requiring a renderer for every row.
+    #[must_use]
+    pub fn widget_bindings_for_layout<T>(
+        &self,
+        model: &UiModel<T>,
+        layout: &LayoutDefinition,
+    ) -> TodayWidgetBindings {
+        let mut widgets = layout.widgets.clone();
+        widgets.sort_by_key(|widget| (widget.order, widget.instance_id.clone()));
+        self.widget_bindings_for_instances(
+            model,
+            widgets
+                .into_iter()
+                .map(|widget| {
+                    TodayWidgetInstance::from_layout(
+                        widget.instance_id,
+                        widget.kind_id,
+                        widget.kind_schema_version,
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn widget_bindings_for_instances<T>(
+        &self,
+        model: &UiModel<T>,
+        instances: Vec<TodayWidgetInstance>,
+    ) -> TodayWidgetBindings {
         let context = Arc::new(model.today_view_context().clone());
         TodayWidgetBindings {
-            widgets: self.registry.instances.map(|instance| TodayWidgetBinding {
-                instance,
-                context: Arc::clone(&context),
-            }),
+            widgets: instances
+                .into_iter()
+                .map(|instance| TodayWidgetBinding {
+                    resolution: self.registry.resolve(&instance),
+                    instance,
+                    context: Arc::clone(&context),
+                })
+                .collect(),
         }
     }
 
@@ -383,11 +643,14 @@ mod tests {
         AppEvent, CommandId, DataRevision, EventEnvelope, MutationConfirmation, MutationOutcome,
         MutationRejection, MutationRejectionReason, OrderingKey, SchemaRevision, TrackingEvent,
     };
-    use openmanic_domain::{ActivityState, ApplicationId, HalfOpenInterval, UtcMicros};
+    use openmanic_domain::{
+        ActivityState, ApplicationId, HalfOpenInterval, LayoutDocument, UtcMicros,
+    };
 
     use super::{
         TodayAction, TodayCategoryFilter, TodayController, TodayNarrowingCriterion,
-        TodayTrackingRequest, TodayWidgetInstanceId, TodayWidgetKind, TrackingControlAction,
+        TodayTrackingRequest, TodayWidgetKind, TodayWidgetRegistry, TodayWidgetRegistryError,
+        TodayWidgetResolution, TrackingControlAction,
     };
     use crate::{InboundMessage, MutationStatus, UiController, UiModel};
 
@@ -495,24 +758,28 @@ mod tests {
     }
 
     #[test]
-    fn fixed_bootstrap_registry_has_exactly_three_instances_with_one_shared_context() {
+    fn registered_widgets_share_one_context_and_include_the_focus_widget() {
         let controller = TodayController::new();
         let model = UiModel::<()>::default();
         let widgets = controller.widget_bindings(&model);
 
-        assert_eq!(controller.registry().instances().len(), 3);
+        assert_eq!(controller.registry().definitions().len(), 4);
         assert_eq!(
-            controller.registry().instances()[0].id(),
-            TodayWidgetInstanceId::Timeline
+            widgets.widgets()[0].instance().id().as_str(),
+            "today.timeline"
         );
         assert_eq!(
-            controller.registry().instances()[1].kind(),
-            TodayWidgetKind::ApplicationUsage
+            widgets.widgets()[1].instance().kind_id(),
+            TodayWidgetKind::APPLICATION_USAGE.id()
         );
         assert_eq!(
-            controller.registry().instances()[2].id(),
-            TodayWidgetInstanceId::TimeDistribution
+            widgets.widgets()[3].instance().kind_id(),
+            TodayWidgetKind::FOCUS.id()
         );
+        assert!(matches!(
+            widgets.widgets()[0].resolution(),
+            TodayWidgetResolution::Available(_)
+        ));
         assert!(Arc::ptr_eq(
             widgets.widgets()[0].context(),
             widgets.widgets()[1].context()
@@ -520,6 +787,35 @@ mod tests {
         assert!(Arc::ptr_eq(
             widgets.widgets()[1].context(),
             widgets.widgets()[2].context()
+        ));
+    }
+
+    #[test]
+    fn registry_rejects_duplicate_stable_kind_ids() {
+        let definitions = TodayWidgetRegistry::default().definitions().to_vec();
+        let duplicate = definitions[0];
+        assert_eq!(
+            TodayWidgetRegistry::try_new(vec![duplicate, duplicate]),
+            Err(TodayWidgetRegistryError::DuplicateKind)
+        );
+    }
+
+    #[test]
+    fn restored_unknown_layout_widget_stays_recoverable_without_hiding_known_widgets() {
+        let controller = TodayController::new();
+        let model = UiModel::<()>::default();
+        let mut layout = LayoutDocument::safe_default().definition();
+        layout.widgets[1].kind_id = "openmanic.future.unavailable".to_owned();
+        let bindings = controller.widget_bindings_for_layout(&model, &layout);
+
+        assert_eq!(bindings.widgets().len(), 4);
+        assert_eq!(
+            bindings.widgets()[1].resolution(),
+            TodayWidgetResolution::MissingRenderer
+        );
+        assert!(matches!(
+            bindings.widgets()[0].resolution(),
+            TodayWidgetResolution::Available(_)
         ));
     }
 

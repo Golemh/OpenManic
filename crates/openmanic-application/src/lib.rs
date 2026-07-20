@@ -14,6 +14,7 @@ mod errors;
 mod events;
 mod focus;
 mod ids;
+mod layout;
 mod overview;
 mod ports;
 mod projection;
@@ -57,6 +58,9 @@ pub use focus::{
 pub use ids::{
     CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
     ProjectionSlot, RequestId, SchemaRevision,
+};
+pub use layout::{
+    LayoutMutation, LayoutPersistence, LayoutPersistenceError, LayoutService, LayoutSnapshot,
 };
 pub use openmanic_domain::{ApplicationId, FocusSessionId, PowerTransitionEvidence, UtcMicros};
 pub use overview::{

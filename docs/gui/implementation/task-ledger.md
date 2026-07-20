@@ -53,6 +53,7 @@ This ledger is the source of truth for delegated implementation ownership and in
 | OM-402 | primary integration branch | `F:\\claude\\projects\\OpenManic` | `23243ac` | `crates/openmanic-ui-egui/src/overview.rs` | Pure Overview presentation consumes immutable snapshots, exact totals/ranges, and typed saved-view effects without storage access. | Integrated at `c04104c`; reducer/presentation tests and G4 quality pass |
 | OM-411 | primary integration branch | `F:\\claude\\projects\\OpenManic` | `0f73ea4` | `crates/openmanic-ui-egui/src/calendar.rs`, `crates/openmanic/src/composition.rs` | Calendar renders immutable activity/focus/schedule blocks with date controls, dense-period selection, exact details, and activity navigation through the shared Timeline context. | Integrated at `8d30834` and durable composition seam `e3c562d`; focused UI tests and G4 quality pass |
 | OM-412 | primary integration branch | `F:\\claude\\projects\\OpenManic` | `e3c562d` | `crates/openmanic/src/composition.rs` | Calendar reuses Timeline's schedule snapshots, drafts, edit/delete scopes, service commands, and occurrence identities; it owns no second editor or persistence path. | Integrated at `5b2b1e0`; shared Calendar-to-Timeline occurrence-contract test and G4 quality pass |
+| OM-500 | primary integration branch | `F:\\claude\\projects\\OpenManic` | `fe43ce8` | `crates/openmanic-ui-egui/src/{today.rs,lib.rs}` | Phase 5 batch started: replace the fixed Today bootstrap with a versioned first-party widget registry before layout persistence/editing. | In progress; broad formatting/linting deferred to G5 |
 
 ## Completed and integrated work
 
@@ -154,3 +155,19 @@ Primary decision:
 Integration SHA:
 Remaining risk or waiver:
 ```
+
+## OM-500 through OM-520 — Phase 5 customization foundation
+
+- **Objective:** establish persisted dashboard-widget layout, explicit layout editing, deterministic
+  responsive reflow, and built-in appearance selection.
+- **Requirement/spec references:** implementation plan §17; UI implementation §§4, 5, 9, and 13.
+- **Branch/worktree:** `codex/openmanic-mvp-implementation-continuation`, primary integration checkout.
+- **Base SHA:** `fe43ce8365d129a2741f6aa449f9f8fd5476df67`.
+- **Owned paths:** application layout boundary; SQLite layout/theme persistence; domain layout document;
+  egui registry, editor, reflow, theme, shell; composition; Phase 5 documentation.
+- **Evidence:** `cargo +stable-x86_64-pc-windows-msvc xtask quality` passed with
+  `CARGO_TARGET_DIR=target-msvc` on 2026-07-20. This includes formatting, workspace check,
+  Clippy with warnings denied, full workspace tests, rustdoc warnings denied, and docs validation.
+- **Remaining risk / waiver:** live operating-system theme observation and narrow-window touch
+  affordances are explicitly deferred in `phase-5-edge-cases.md`; no external theme documents are
+  accepted in this MVP phase.

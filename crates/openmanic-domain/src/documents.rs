@@ -88,6 +88,205 @@ impl LayoutDocument {
     pub fn widget_count(&self) -> usize {
         self.envelope.payload.widgets.len()
     }
+
+    /// Returns the complete transport-neutral layout definition.
+    #[must_use]
+    pub fn definition(&self) -> LayoutDefinition {
+        LayoutDefinition {
+            widgets: self
+                .envelope
+                .payload
+                .widgets
+                .iter()
+                .map(LayoutWidgetDefinition::from_internal)
+                .collect(),
+        }
+    }
+
+    /// Creates a validated current-version dashboard layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError`] when widget IDs, order, spans, or versioned fields are invalid.
+    pub fn try_new(definition: LayoutDefinition, revision: u64) -> Result<Self, DocumentError> {
+        let payload = LayoutPayload {
+            widgets: definition
+                .widgets
+                .into_iter()
+                .map(LayoutWidgetDefinition::into_internal)
+                .collect(),
+        };
+        validate_layout(&payload)?;
+        Ok(Self {
+            envelope: Envelope::new(LAYOUT_SCHEMA, revision, payload),
+        })
+    }
+}
+
+/// Transport-neutral complete state restored by a Today dashboard layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayoutDefinition {
+    /// Persisted widgets in their canonical desktop ordering.
+    pub widgets: Vec<LayoutWidgetDefinition>,
+}
+
+/// One stable widget placement and its versioned configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayoutWidgetDefinition {
+    /// Stable widget-instance identity.
+    pub instance_id: String,
+    /// Stable reverse-domain widget-kind identifier.
+    pub kind_id: String,
+    /// Persisted widget configuration schema version.
+    pub kind_schema_version: u16,
+    /// Deterministic canonical ordering position.
+    pub order: u32,
+    /// Canonical width span in the 12-column desktop grid.
+    pub width_span: u8,
+    /// Persisted semantic height class.
+    pub height: LayoutHeight,
+    /// Versioned widget-specific configuration.
+    pub configuration: LayoutFields,
+    /// Optional versioned approved appearance overrides.
+    pub appearance_overrides: Option<LayoutFields>,
+}
+
+impl LayoutWidgetDefinition {
+    fn from_internal(widget: &LayoutWidget) -> Self {
+        Self {
+            instance_id: widget.instance_id.clone(),
+            kind_id: widget.kind_id.clone(),
+            kind_schema_version: widget.kind_schema_version,
+            order: widget.order,
+            width_span: widget.width_span,
+            height: widget.height.into(),
+            configuration: LayoutFields::from_internal(&widget.configuration),
+            appearance_overrides: widget
+                .appearance_overrides
+                .as_ref()
+                .map(LayoutFields::from_internal),
+        }
+    }
+
+    fn into_internal(self) -> LayoutWidget {
+        LayoutWidget {
+            instance_id: self.instance_id,
+            kind_id: self.kind_id,
+            kind_schema_version: self.kind_schema_version,
+            order: self.order,
+            width_span: self.width_span,
+            height: self.height.into(),
+            configuration: self.configuration.into_internal(),
+            appearance_overrides: self.appearance_overrides.map(LayoutFields::into_internal),
+        }
+    }
+}
+
+/// Supported semantic height classes for a dashboard widget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutHeight {
+    /// Compact height for narrow summaries.
+    Compact,
+    /// Standard dashboard-card height.
+    Standard,
+    /// Tall height for detailed visualizations.
+    Tall,
+}
+
+/// Versioned scalar configuration or appearance fields for a dashboard widget.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayoutFields {
+    /// Schema revision of the field collection.
+    pub schema_version: u16,
+    /// Named scalar values.
+    pub fields: Vec<LayoutField>,
+}
+
+impl LayoutFields {
+    /// Returns an empty current-version field collection.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            schema_version: 1,
+            fields: Vec::new(),
+        }
+    }
+
+    fn from_internal(fields: &VersionedFields) -> Self {
+        Self {
+            schema_version: fields.schema_version,
+            fields: fields
+                .fields
+                .iter()
+                .map(LayoutField::from_internal)
+                .collect(),
+        }
+    }
+
+    fn into_internal(self) -> VersionedFields {
+        VersionedFields {
+            schema_version: self.schema_version,
+            fields: self
+                .fields
+                .into_iter()
+                .map(LayoutField::into_internal)
+                .collect(),
+        }
+    }
+}
+
+/// One named scalar dashboard widget field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LayoutField {
+    /// Stable field name.
+    pub name: String,
+    /// Scalar field value.
+    pub value: LayoutScalar,
+}
+
+impl LayoutField {
+    fn from_internal(field: &DocumentField) -> Self {
+        Self {
+            name: field.name.clone(),
+            value: LayoutScalar::from_internal(&field.value),
+        }
+    }
+
+    fn into_internal(self) -> DocumentField {
+        DocumentField {
+            name: self.name,
+            value: self.value.into_internal(),
+        }
+    }
+}
+
+/// Supported scalar value in a dashboard widget document.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LayoutScalar {
+    /// Boolean value.
+    Boolean(bool),
+    /// Signed integer value.
+    Integer(i64),
+    /// Text value.
+    Text(String),
+}
+
+impl LayoutScalar {
+    fn from_internal(value: &Scalar) -> Self {
+        match value {
+            Scalar::Boolean(value) => Self::Boolean(*value),
+            Scalar::Integer(value) => Self::Integer(*value),
+            Scalar::Text(value) => Self::Text(value.clone()),
+        }
+    }
+
+    fn into_internal(self) -> Scalar {
+        match self {
+            Self::Boolean(value) => Scalar::Boolean(value),
+            Self::Integer(value) => Scalar::Integer(value),
+            Self::Text(value) => Scalar::Text(value),
+        }
+    }
 }
 
 /// A normalized saved Overview-view value without dashboard-layout ownership.
@@ -668,6 +867,26 @@ enum Height {
     Compact,
     Standard,
     Tall,
+}
+
+impl From<Height> for LayoutHeight {
+    fn from(value: Height) -> Self {
+        match value {
+            Height::Compact => Self::Compact,
+            Height::Standard => Self::Standard,
+            Height::Tall => Self::Tall,
+        }
+    }
+}
+
+impl From<LayoutHeight> for Height {
+    fn from(value: LayoutHeight) -> Self {
+        match value {
+            LayoutHeight::Compact => Self::Compact,
+            LayoutHeight::Standard => Self::Standard,
+            LayoutHeight::Tall => Self::Tall,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

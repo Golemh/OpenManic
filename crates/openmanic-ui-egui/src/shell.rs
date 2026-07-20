@@ -1,66 +1,37 @@
 //! Initial egui shell rendering using only ordinary egui controls.
 
-use eframe::egui::{self, Align, Color32, Context, RichText, Theme};
+use eframe::egui::{self, Align, RichText};
 
 use crate::{
-    DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, UiAction, UiModel,
+    DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, ThemeTokens, UiAction,
+    UiModel,
 };
 
-const CANVAS: Color32 = Color32::from_rgb(18, 22, 31);
-const PANEL: Color32 = Color32::from_rgb(27, 33, 45);
-const CONTENT: Color32 = Color32::from_rgb(238, 242, 250);
-const SECONDARY: Color32 = Color32::from_rgb(176, 188, 208);
-const ACCENT: Color32 = Color32::from_rgb(121, 151, 255);
-const SUCCESS: Color32 = Color32::from_rgb(107, 201, 139);
-const WARNING: Color32 = Color32::from_rgb(236, 190, 93);
-const ERROR: Color32 = Color32::from_rgb(237, 113, 113);
-
-/// Applies the provisional dark visual direction resolved by the G0 spike.
-///
-/// This is intentionally a renderer-only bridge, not a persisted theme
-/// schema. The versioned theme resolver remains owned by the later theme task.
-pub(crate) fn apply_initial_dark_theme(context: &Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.window_fill = PANEL;
-    visuals.panel_fill = CANVAS;
-    visuals.faint_bg_color = PANEL;
-    visuals.extreme_bg_color = CANVAS;
-    visuals.override_text_color = Some(CONTENT);
-    visuals.selection.bg_fill = ACCENT;
-    visuals.error_fg_color = ERROR;
-    context.set_visuals(visuals);
-
-    let mut style = (*context.style_of(Theme::Dark)).clone();
-    style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-    style.spacing.button_padding = egui::vec2(10.0, 6.0);
-    context.set_style_of(Theme::Dark, style);
-}
-
 /// Renders the application shell and returns whether ordinary input changed state.
-pub(crate) fn render<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
+pub(crate) fn render<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: ThemeTokens) -> bool {
     let mut changed = false;
     egui::Frame::new()
-        .fill(PANEL)
-        .show(ui, |ui| changed |= render_navigation(ui, model));
+        .fill(tokens.panel())
+        .show(ui, |ui| changed |= render_navigation(ui, model, tokens));
 
-    egui::Frame::new().fill(CANVAS).show(ui, |ui| {
-        changed |= render_presentation_state(ui, model.data());
-        changed |= render_mutation_state(ui, model);
-        changed |= render_route(ui, model);
+    egui::Frame::new().fill(tokens.canvas()).show(ui, |ui| {
+        changed |= render_presentation_state(ui, model.data(), tokens);
+        changed |= render_mutation_state(ui, model, tokens);
+        changed |= render_route(ui, model, tokens);
     });
     changed
 }
 
-fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
+fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: ThemeTokens) -> bool {
     let mut changed = false;
     ui.horizontal_wrapped(|ui| {
-        ui.strong(RichText::new("OpenManic").color(CONTENT));
+        ui.strong(RichText::new("OpenManic").color(tokens.content_primary()));
         ui.separator();
         for route in Route::all() {
             changed |= select_route(ui, model, route);
         }
         ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            ui.colored_label(SUCCESS, "Tracking status will appear here");
+            ui.colored_label(tokens.success(), "Tracking status will appear here");
         });
     });
     changed
@@ -77,20 +48,29 @@ fn select_route<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, route: Route) -> b
     true
 }
 
-fn render_presentation_state<T>(ui: &mut egui::Ui, data: &PresentableData<T>) -> bool {
+fn render_presentation_state<T>(
+    ui: &mut egui::Ui,
+    data: &PresentableData<T>,
+    tokens: ThemeTokens,
+) -> bool {
     let (message, color) = match data {
-        PresentableData::InitialLoading => ("Loading data…".to_owned(), WARNING),
+        PresentableData::InitialLoading => ("Loading data…".to_owned(), tokens.warning()),
         PresentableData::Ready(_) => return false,
         PresentableData::Refreshing { .. } => (
             "Refreshing. Current data remains visible.".to_owned(),
-            ACCENT,
+            tokens.interaction_primary(),
         ),
-        PresentableData::Empty(reason) => (empty_message(*reason).to_owned(), SECONDARY),
-        PresentableData::Partial { limitations, .. } => (partial_message(limitations), WARNING),
-        PresentableData::Failed { error, .. } => (error.message(), ERROR),
-        PresentableData::Recovered { notice, .. } => (notice.clone(), SUCCESS),
+        PresentableData::Empty(reason) => (
+            empty_message(*reason).to_owned(),
+            tokens.content_secondary(),
+        ),
+        PresentableData::Partial { limitations, .. } => {
+            (partial_message(limitations), tokens.warning())
+        }
+        PresentableData::Failed { error, .. } => (error.message(), tokens.error()),
+        PresentableData::Recovered { notice, .. } => (notice.clone(), tokens.success()),
     };
-    egui::Frame::new().fill(PANEL).show(ui, |ui| {
+    egui::Frame::new().fill(tokens.panel()).show(ui, |ui| {
         ui.colored_label(color, message);
         if matches!(data, PresentableData::Failed { .. }) {
             ui.small("Technical details can be added by the route controller.");
@@ -111,18 +91,24 @@ fn partial_message(limitations: &[DataLimitation]) -> String {
     }
 }
 
-fn render_mutation_state<T>(ui: &mut egui::Ui, model: &UiModel<T>) -> bool {
+fn render_mutation_state<T>(ui: &mut egui::Ui, model: &UiModel<T>, tokens: ThemeTokens) -> bool {
     let Some((command_id, status)) = latest_mutation(model) else {
         return false;
     };
     let (message, color) = match status {
-        MutationStatus::Pending => ("A change is waiting for confirmation.".to_owned(), WARNING),
-        MutationStatus::Confirmed { .. } => ("The last change was saved.".to_owned(), SUCCESS),
-        MutationStatus::Rejected { reason } => {
-            (format!("The last change was not saved: {reason}."), ERROR)
+        MutationStatus::Pending => (
+            "A change is waiting for confirmation.".to_owned(),
+            tokens.warning(),
+        ),
+        MutationStatus::Confirmed { .. } => {
+            ("The last change was saved.".to_owned(), tokens.success())
         }
+        MutationStatus::Rejected { reason } => (
+            format!("The last change was not saved: {reason}."),
+            tokens.error(),
+        ),
     };
-    egui::Frame::new().fill(PANEL).show(ui, |ui| {
+    egui::Frame::new().fill(tokens.panel()).show(ui, |ui| {
         ui.colored_label(color, message);
         ui.small(format!("Command {}", command_id.get()));
     });
@@ -136,11 +122,11 @@ fn latest_mutation<T>(
     model.latest_mutation()
 }
 
-fn render_route<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
+fn render_route<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: ThemeTokens) -> bool {
     let route = model.route();
     let mut changed = false;
-    ui.heading(RichText::new(route.label()).color(CONTENT));
-    ui.colored_label(SECONDARY, route_description(route));
+    ui.heading(RichText::new(route.label()).color(tokens.content_primary()));
+    ui.colored_label(tokens.content_secondary(), route_description(route));
     ui.add_space(12.0);
 
     ui.horizontal(|ui| {
@@ -188,7 +174,7 @@ fn render_route<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
         .show(ui, |ui| {
             ui.add_space(24.0);
             ui.colored_label(
-                SECONDARY,
+                tokens.content_secondary(),
                 "This initial shell retains navigation context while later tasks add route content.",
             );
             ui.add_space(320.0);

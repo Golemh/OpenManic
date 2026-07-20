@@ -9,9 +9,11 @@ use openmanic_application::{
 use openmanic_domain::{
     ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
     ApplicationName, Category, CategoryId, CategoryName, FocusSessionId, FocusSessionState,
-    HalfOpenInterval, OneTimeScheduleId, PowerTransitionEvidence, SavedViewDefinition,
-    SavedViewField, SavedViewFields, SavedViewRange, SavedViewRelativeRange, SavedViewScalar,
-    SavedViewTimeZoneBehavior, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+    HalfOpenInterval, LayoutDefinition, LayoutDocument, LayoutField, LayoutFields, LayoutHeight,
+    LayoutScalar, LayoutWidgetDefinition, OneTimeScheduleId, PowerTransitionEvidence,
+    SavedViewDefinition, SavedViewField, SavedViewFields, SavedViewRange, SavedViewRelativeRange,
+    SavedViewScalar, SavedViewTimeZoneBehavior, ScheduleRule, ScheduleSeriesId, TrackerRunId,
+    UtcMicros,
 };
 use rusqlite::Transaction;
 
@@ -980,6 +982,195 @@ impl<'a> SavedViewParts<'a> {
         self.offset = self.source.len() - value.len() + length;
         Ok(value[..length].to_owned())
     }
+    fn finished(&self) -> bool {
+        self.offset == self.source.len()
+    }
+}
+
+pub(crate) fn encode_layout_definition(definition: &LayoutDefinition) -> String {
+    let mut output = String::from("OMLY1");
+    push_layout_part(&mut output, &definition.widgets.len().to_string());
+    for widget in &definition.widgets {
+        push_layout_part(&mut output, &widget.instance_id);
+        push_layout_part(&mut output, &widget.kind_id);
+        push_layout_part(&mut output, &widget.kind_schema_version.to_string());
+        push_layout_part(&mut output, &widget.order.to_string());
+        push_layout_part(&mut output, &widget.width_span.to_string());
+        push_layout_part(
+            &mut output,
+            match widget.height {
+                LayoutHeight::Compact => "compact",
+                LayoutHeight::Standard => "standard",
+                LayoutHeight::Tall => "tall",
+            },
+        );
+        encode_layout_fields(&mut output, &widget.configuration);
+        match &widget.appearance_overrides {
+            Some(overrides) => {
+                push_layout_part(&mut output, "overrides");
+                encode_layout_fields(&mut output, overrides);
+            }
+            None => push_layout_part(&mut output, "no-overrides"),
+        }
+    }
+    output
+}
+
+pub(crate) fn decode_layout_document(
+    source: &str,
+    revision: u64,
+) -> Result<LayoutDocument, StorageError> {
+    let mut parts = LayoutParts::new(source)?;
+    let count: usize = parse_layout_number(&parts.next()?, "layout widget count")?;
+    let mut widgets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let instance_id = parts.next()?;
+        let kind_id = parts.next()?;
+        let kind_schema_version = parse_layout_number(&parts.next()?, "layout kind schema")?;
+        let order = parse_layout_number(&parts.next()?, "layout widget order")?;
+        let width_span = parse_layout_number(&parts.next()?, "layout width span")?;
+        let height = match parts.next()?.as_str() {
+            "compact" => LayoutHeight::Compact,
+            "standard" => LayoutHeight::Standard,
+            "tall" => LayoutHeight::Tall,
+            _ => return invalid_layout(),
+        };
+        let configuration = decode_layout_fields(&mut parts)?;
+        let appearance_overrides = match parts.next()?.as_str() {
+            "overrides" => Some(decode_layout_fields(&mut parts)?),
+            "no-overrides" => None,
+            _ => return invalid_layout(),
+        };
+        widgets.push(LayoutWidgetDefinition {
+            instance_id,
+            kind_id,
+            kind_schema_version,
+            order,
+            width_span,
+            height,
+            configuration,
+            appearance_overrides,
+        });
+    }
+    if !parts.finished() {
+        return invalid_layout();
+    }
+    LayoutDocument::try_new(LayoutDefinition { widgets }, revision).map_err(|_| {
+        StorageError::InvalidStoredValue {
+            field: "layout document",
+        }
+    })
+}
+
+fn push_layout_part(output: &mut String, part: &str) {
+    output.push('|');
+    output.push_str(&part.len().to_string());
+    output.push(':');
+    output.push_str(part);
+}
+
+fn encode_layout_fields(output: &mut String, fields: &LayoutFields) {
+    push_layout_part(output, &fields.schema_version.to_string());
+    push_layout_part(output, &fields.fields.len().to_string());
+    for field in &fields.fields {
+        push_layout_part(output, &field.name);
+        match &field.value {
+            LayoutScalar::Boolean(value) => {
+                push_layout_part(output, "boolean");
+                push_layout_part(output, if *value { "true" } else { "false" });
+            }
+            LayoutScalar::Integer(value) => {
+                push_layout_part(output, "integer");
+                push_layout_part(output, &value.to_string());
+            }
+            LayoutScalar::Text(value) => {
+                push_layout_part(output, "text");
+                push_layout_part(output, value);
+            }
+        }
+    }
+}
+
+fn decode_layout_fields(parts: &mut LayoutParts<'_>) -> Result<LayoutFields, StorageError> {
+    let schema_version = parse_layout_number(&parts.next()?, "layout field schema")?;
+    let count: usize = parse_layout_number(&parts.next()?, "layout field count")?;
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = parts.next()?;
+        let value = match parts.next()?.as_str() {
+            "boolean" => match parts.next()?.as_str() {
+                "true" => LayoutScalar::Boolean(true),
+                "false" => LayoutScalar::Boolean(false),
+                _ => return invalid_layout(),
+            },
+            "integer" => {
+                LayoutScalar::Integer(parse_layout_number(&parts.next()?, "layout integer")?)
+            }
+            "text" => LayoutScalar::Text(parts.next()?),
+            _ => return invalid_layout(),
+        };
+        fields.push(LayoutField { name, value });
+    }
+    Ok(LayoutFields {
+        schema_version,
+        fields,
+    })
+}
+
+fn parse_layout_number<T: std::str::FromStr>(
+    value: &str,
+    field: &'static str,
+) -> Result<T, StorageError> {
+    value
+        .parse()
+        .map_err(|_| StorageError::InvalidStoredValue { field })
+}
+
+fn invalid_layout<T>() -> Result<T, StorageError> {
+    Err(StorageError::InvalidStoredValue {
+        field: "layout document",
+    })
+}
+
+struct LayoutParts<'a> {
+    source: &'a str,
+    offset: usize,
+}
+
+impl<'a> LayoutParts<'a> {
+    fn new(source: &'a str) -> Result<Self, StorageError> {
+        if !source.starts_with("OMLY1") {
+            return invalid_layout();
+        }
+        Ok(Self { source, offset: 5 })
+    }
+
+    fn next(&mut self) -> Result<String, StorageError> {
+        let remainder = self
+            .source
+            .get(self.offset..)
+            .ok_or(StorageError::InvalidStoredValue {
+                field: "layout document",
+            })?;
+        let remainder = remainder
+            .strip_prefix('|')
+            .ok_or(StorageError::InvalidStoredValue {
+                field: "layout document",
+            })?;
+        let (length, value) =
+            remainder
+                .split_once(':')
+                .ok_or(StorageError::InvalidStoredValue {
+                    field: "layout document",
+                })?;
+        let length: usize = parse_layout_number(length, "layout part length")?;
+        if value.len() < length || !value.is_char_boundary(length) {
+            return invalid_layout();
+        }
+        self.offset = self.source.len() - value.len() + length;
+        Ok(value[..length].to_owned())
+    }
+
     fn finished(&self) -> bool {
         self.offset == self.source.len()
     }

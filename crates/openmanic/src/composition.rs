@@ -25,22 +25,22 @@ use openmanic_application::{
     CatalogService, CommandEnvelope, CommandId, CommandReceipt, DataRevision, EntityRevision,
     EventEnvelope, FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort,
     FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot, LaneCapacities,
-    LaneReceive, LaneSubmit, LatestMailbox, LatestMailboxReceiver, MailboxReceive, MutationOutcome,
-    OrderingKey, PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
-    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
-    RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
-    ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
-    ScheduleService, ScheduleSnapshot, SchemaRevision, ShutdownCoordinator, ShutdownPhase,
-    ShutdownStep, SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext,
-    TimelineProjector, TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity,
-    TitleObservationResult, TitleStabilizer, TrackingCommand, TrackingEvidence,
-    TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
-    WorkLane, bounded_runtime_lanes, latest_mailbox,
+    LaneReceive, LaneSubmit, LatestMailbox, LatestMailboxReceiver, LayoutPersistence,
+    LayoutSnapshot, MailboxReceive, MutationOutcome, OrderingKey, PortFailureReason,
+    ProjectionContextKey, ProjectionRequest, ProjectionSlot, RecurringOccurrenceOverride,
+    RecurringScheduleEdit, RecurringScheduleRuleChange, RuntimeLaneReceiver, RuntimeLanes,
+    RuntimeSupervisor, RuntimeWorker, ScheduleCommand, ScheduleId, ScheduleOccurrenceId,
+    SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
+    SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep, SnapshotEnvelope, ThreadRoot,
+    TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
+    TimelineSnapshot, TimelineSourceActivity, TitleObservationResult, TitleStabilizer,
+    TrackingCommand, TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
+    TrackingPersistenceSubmit, TrackingService, WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
-    FocusSessionId, FocusSessionState, HalfOpenInterval, OneTimeScheduleId, ScheduleEditScope,
-    ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+    FocusSessionId, FocusSessionState, HalfOpenInterval, LayoutDocument, LayoutHeight,
+    OneTimeScheduleId, ScheduleEditScope, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -58,9 +58,10 @@ use openmanic_ui_egui::timeline::{TimelineRenderAction, TimelineRenderer};
 use openmanic_ui_egui::{
     ApplicationUsage, ApplicationUsageSnapshot, CalendarAction, CalendarBlockKind,
     CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
-    MutationStatus, OpenManicApp, PresentableData, TodayController, TodayTrackingRequest,
-    TrackingControlAction, UiAction, UiController, UiModel, render_distribution_snapshot,
-    render_usage_snapshot,
+    LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp,
+    PresentableData, TodayController, TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution,
+    TrackingControlAction, UiAction, UiController, UiModel, reflow_dashboard,
+    render_distribution_snapshot, render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
@@ -181,6 +182,15 @@ enum WriterWork {
     Catalog(CommandEnvelope<CatalogCommand>),
     Schedule(CommandEnvelope<ScheduleCommand>),
     Focus(CommandEnvelope<FocusCommand>),
+    Layout {
+        document: LayoutDocument,
+        expected_revision: Option<EntityRevision>,
+        observed_at_utc: UtcMicros,
+    },
+    Theme {
+        theme_mode: u8,
+        observed_at_utc: UtcMicros,
+    },
     WindowTitle(WindowTitleObservation),
 }
 
@@ -189,7 +199,12 @@ impl WriterWork {
         match self {
             Self::System(command) | Self::CatalogForeground { command, .. } => (command, false),
             Self::Ui(command) => (command, true),
-            Self::Catalog(_) | Self::Schedule(_) | Self::Focus(_) | Self::WindowTitle(_) => {
+            Self::Catalog(_)
+            | Self::Schedule(_)
+            | Self::Focus(_)
+            | Self::Layout { .. }
+            | Self::Theme { .. }
+            | Self::WindowTitle(_) => {
                 unreachable!("typed commands use their own application service")
             }
         }
@@ -978,6 +993,8 @@ struct RuntimeResources {
     #[cfg(windows)]
     focus_notice_receiver: Option<Receiver<()>>,
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
+    layout_snapshot: Arc<Mutex<LayoutSnapshot>>,
+    theme_mode: Arc<Mutex<u8>>,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
     supervisor: RuntimeSupervisor,
@@ -1012,7 +1029,7 @@ impl RuntimeResources {
         clippy::too_many_lines,
         reason = "construction names every owned runtime boundary so startup and shutdown ownership stay auditable."
     )]
-    fn start(store: SqliteStore) -> Result<RuntimeStartResult, CompositionError> {
+    fn start(mut store: SqliteStore) -> Result<RuntimeStartResult, CompositionError> {
         let capacities = LaneCapacities::try_new(
             WRITER_CRITICAL_CAPACITY,
             WRITER_NORMAL_CAPACITY,
@@ -1033,10 +1050,32 @@ impl RuntimeResources {
         let focus_completion_pending = Arc::new(AtomicBool::new(false));
         let (focus_notice_sender, focus_notice_receiver) = mpsc::sync_channel(1);
         let focus_snapshot = Arc::new(Mutex::new(None));
+        // A corrupt or superseded optional layout must not prevent the core tracker
+        // from starting. The editor exposes Reset so the safe default can be saved.
+        let initial_layout = LayoutPersistence::load_layout(store.writer())
+            .unwrap_or(None)
+            .unwrap_or_else(|| {
+                LayoutSnapshot::new(
+                    LayoutDocument::safe_default(),
+                    EntityRevision::new(0),
+                    UtcMicros::new(utc_now_micros()),
+                )
+            });
+        let layout_snapshot = Arc::new(Mutex::new(initial_layout));
+        let initial_theme_mode = store
+            .writer()
+            .theme_mode()
+            // Theme preferences are optional presentation state. Retain the
+            // complete built-in default when an older or invalid value is found.
+            .unwrap_or(None)
+            .unwrap_or(0);
+        let theme_mode = Arc::new(Mutex::new(initial_theme_mode));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
         let worker_focus_completion_pending = Arc::clone(&focus_completion_pending);
         let worker_focus_snapshot = Arc::clone(&focus_snapshot);
+        let worker_layout_snapshot = Arc::clone(&layout_snapshot);
+        let worker_theme_mode = Arc::clone(&theme_mode);
         let writer_handle = thread::Builder::new()
             .name(ThreadRoot::new(RuntimeWorker::Writer).name().to_owned())
             .spawn(move || {
@@ -1053,6 +1092,8 @@ impl RuntimeResources {
                     worker_focus_completion_pending,
                     focus_notice_sender,
                     worker_focus_snapshot,
+                    worker_layout_snapshot,
+                    worker_theme_mode,
                 );
             })
             .map_err(|_| CompositionError::Runtime)?;
@@ -1072,6 +1113,8 @@ impl RuntimeResources {
                 #[cfg(windows)]
                 focus_notice_receiver: Some(focus_notice_receiver),
                 focus_snapshot,
+                layout_snapshot,
+                theme_mode,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
                 supervisor: RuntimeSupervisor::new([
@@ -1199,6 +1242,40 @@ impl RuntimeResources {
         }
         self.ui_inbox.remove_pending(command_id);
         None
+    }
+
+    fn try_submit_layout(
+        &self,
+        document: LayoutDocument,
+        expected_revision: Option<EntityRevision>,
+        observed_at_utc: UtcMicros,
+    ) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && matches!(
+                self.lanes.try_submit(
+                    WorkLane::Normal,
+                    WriterWork::Layout {
+                        document,
+                        expected_revision,
+                        observed_at_utc,
+                    },
+                ),
+                LaneSubmit::Enqueued
+            )
+    }
+
+    fn try_submit_theme(&self, theme_mode: u8, observed_at_utc: UtcMicros) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && matches!(
+                self.lanes.try_submit(
+                    WorkLane::Normal,
+                    WriterWork::Theme {
+                        theme_mode,
+                        observed_at_utc,
+                    },
+                ),
+                LaneSubmit::Enqueued
+            )
     }
 
     fn reject_nonessential_work(&self) {
@@ -1561,6 +1638,8 @@ fn run_writer_worker(
     focus_completion_pending: Arc<AtomicBool>,
     focus_notice_sender: SyncSender<()>,
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
+    layout_snapshot: Arc<Mutex<LayoutSnapshot>>,
+    theme_mode: Arc<Mutex<u8>>,
 ) {
     let store = Arc::new(Mutex::new(store));
     let mut services = writer_services(
@@ -1609,6 +1688,8 @@ fn run_writer_worker(
                     &snapshots,
                     &ui_inbox,
                     &focus_snapshot,
+                    &layout_snapshot,
+                    &theme_mode,
                 );
                 let event = services.tracking.handle(system_checkpoint());
                 let persisted = event.committed_data_revision().is_some()
@@ -1634,6 +1715,8 @@ fn run_writer_worker(
                     &snapshots,
                     &ui_inbox,
                     &focus_snapshot,
+                    &layout_snapshot,
+                    &theme_mode,
                 );
                 if let Some(request) = current_calendar_projection.as_ref() {
                     publish_calendar_snapshot(&store, request, &calendar_snapshots);
@@ -1690,6 +1773,10 @@ fn writer_services(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "worker lanes retain explicit independently owned runtime boundaries"
+)]
 fn drain_writer_lanes(
     lanes: &RuntimeLaneReceiver<WriterWork>,
     services: &mut WriterServices,
@@ -1698,6 +1785,8 @@ fn drain_writer_lanes(
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
     focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
+    layout_snapshot: &Arc<Mutex<LayoutSnapshot>>,
+    theme_mode: &Arc<Mutex<u8>>,
 ) {
     while let LaneReceive::Work { work, .. } = lanes.try_receive() {
         process_writer_work(
@@ -1708,6 +1797,8 @@ fn drain_writer_lanes(
             snapshots,
             ui_inbox,
             focus_snapshot,
+            layout_snapshot,
+            theme_mode,
         );
     }
 }
@@ -1715,6 +1806,10 @@ fn drain_writer_lanes(
 #[expect(
     clippy::too_many_lines,
     reason = "the dispatch remains explicit so each typed work item reaches its sole authoritative service."
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "writer dispatch receives explicit independent runtime boundaries"
 )]
 fn process_writer_work(
     work: WriterWork,
@@ -1724,7 +1819,40 @@ fn process_writer_work(
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
     focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
+    layout_snapshot: &Arc<Mutex<LayoutSnapshot>>,
+    theme_mode: &Arc<Mutex<u8>>,
 ) {
+    if let WriterWork::Layout {
+        document,
+        expected_revision,
+        observed_at_utc,
+    } = work
+    {
+        process_layout_replacement(
+            document,
+            expected_revision,
+            observed_at_utc,
+            store,
+            layout_snapshot,
+        );
+        return;
+    }
+    if let WriterWork::Theme {
+        theme_mode: selected_theme_mode,
+        observed_at_utc,
+    } = work
+    {
+        if let Ok(mut writer_store) = store.lock()
+            && writer_store
+                .writer()
+                .set_theme_mode(selected_theme_mode, observed_at_utc)
+                .is_ok()
+            && let Ok(mut current) = theme_mode.lock()
+        {
+            *current = selected_theme_mode;
+        }
+        return;
+    }
     if let WriterWork::WindowTitle(observation) = work {
         process_window_title_observation(&observation, services, store);
         return;
@@ -1806,6 +1934,34 @@ fn process_writer_work(
         snapshots,
         ui_inbox,
     );
+}
+
+fn process_layout_replacement(
+    document: LayoutDocument,
+    expected_revision: Option<EntityRevision>,
+    observed_at_utc: UtcMicros,
+    store: &Arc<Mutex<SqliteStore>>,
+    layout_snapshot: &Arc<Mutex<LayoutSnapshot>>,
+) {
+    let Ok(mut writer_store) = store.lock() else {
+        return;
+    };
+    let snapshot = LayoutSnapshot::new(
+        document,
+        expected_revision.unwrap_or(EntityRevision::new(0)),
+        observed_at_utc,
+    );
+    if LayoutPersistence::replace_layout(writer_store.writer(), &snapshot, expected_revision)
+        .is_err()
+    {
+        return;
+    }
+    let Ok(Some(updated)) = LayoutPersistence::load_layout(writer_store.writer()) else {
+        return;
+    };
+    if let Ok(mut latest) = layout_snapshot.lock() {
+        *latest = updated;
+    }
 }
 
 fn process_window_title_observation(
@@ -2485,6 +2641,9 @@ struct VerticalSliceApp {
     runtime: RuntimeResources,
     shutdown: ShutdownCoordinator,
     today: TodayController,
+    layout_editor: LayoutEditor,
+    pending_layout_save: Option<LayoutDocument>,
+    theme_key: String,
     calendar: CalendarController,
     calendar_data: PresentableData<CalendarDaySnapshot>,
     calendar_projection_sequence: u64,
@@ -2585,14 +2744,31 @@ impl VerticalSlice {
     }
 
     fn into_native_app(self) -> VerticalSliceApp {
+        let layout = self.runtime.layout_snapshot.lock().map_or_else(
+            |_| LayoutDocument::safe_default(),
+            |snapshot| snapshot.document().clone(),
+        );
+        let theme_key = self
+            .runtime
+            .theme_mode
+            .lock()
+            .map_or("openmanic.dark", |mode| match *mode {
+                1 => "openmanic.light",
+                2 => "openmanic.system",
+                _ => "openmanic.dark",
+            })
+            .to_owned();
         VerticalSliceApp {
             bootstrap: self.bootstrap,
-            app: OpenManicApp::new(self.ui),
+            app: OpenManicApp::new_with_theme(self.ui, theme_key.clone()),
             snapshots: self.snapshots,
             calendar_snapshots: self.calendar_snapshots,
             runtime: self.runtime,
             shutdown: self.shutdown,
             today: TodayController::new(),
+            layout_editor: LayoutEditor::new(layout),
+            pending_layout_save: None,
+            theme_key,
             calendar: CalendarController::default(),
             calendar_data: PresentableData::InitialLoading,
             calendar_projection_sequence: 0,
@@ -2849,6 +3025,11 @@ impl VerticalSliceApp {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        clippy::excessive_nesting,
+        reason = "the Today view keeps widget binding and explicit edit controls together"
+    )]
     fn render_today_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Today {
             return;
@@ -2868,7 +3049,7 @@ impl VerticalSliceApp {
                 ui.label(tracking_status_label(acknowledgement.status()));
             }
         });
-        self.render_focus_controls(ui);
+        self.render_layout_editor_controls(ui);
         let data = self
             .app
             .controller()
@@ -2881,18 +3062,265 @@ impl VerticalSliceApp {
             return;
         };
 
-        ui.separator();
+        let layout = self
+            .layout_editor
+            .draft()
+            .cloned()
+            .unwrap_or_else(|| self.layout_editor.active().definition());
+        let bindings = self
+            .today
+            .widget_bindings_for_layout(self.app.controller().model(), &layout);
+        let reflow = reflow_dashboard(&layout, self.today.registry(), ui.available_width());
+        for placement in reflow.placements() {
+            let Some(binding) = bindings
+                .widgets()
+                .iter()
+                .find(|binding| binding.instance().id().as_str() == placement.instance_id())
+            else {
+                continue;
+            };
+            ui.separator();
+            ui.label(format!(
+                "Responsive placement: row {}, column {}, span {}/{}",
+                placement.row(),
+                placement.column(),
+                placement.span(),
+                reflow.columns().count(),
+            ));
+            if self.layout_editor.is_editing() {
+                ui.horizontal(|ui| {
+                    ui.label(binding.instance().id().as_str());
+                    if ui.button("Move earlier").clicked() {
+                        let _ = self.layout_editor.apply(
+                            LayoutEditAction::MoveEarlier {
+                                instance_id: binding.instance().id().as_str().to_owned(),
+                            },
+                            self.today.registry(),
+                        );
+                    }
+                    if ui.button("Move later").clicked() {
+                        let _ = self.layout_editor.apply(
+                            LayoutEditAction::MoveLater {
+                                instance_id: binding.instance().id().as_str().to_owned(),
+                            },
+                            self.today.registry(),
+                        );
+                    }
+                    if ui.button("Remove").clicked() {
+                        let _ = self.layout_editor.apply(
+                            LayoutEditAction::Remove {
+                                instance_id: binding.instance().id().as_str().to_owned(),
+                            },
+                            self.today.registry(),
+                        );
+                    }
+                    ui.label("Width:");
+                    for width_span in [3, 4, 6, 8, 9, 12] {
+                        if ui.button(width_span.to_string()).clicked() {
+                            let _ = self.layout_editor.apply(
+                                LayoutEditAction::Resize {
+                                    instance_id: binding.instance().id().as_str().to_owned(),
+                                    width_span,
+                                },
+                                self.today.registry(),
+                            );
+                        }
+                    }
+                    ui.label("Height:");
+                    for (label, height) in [
+                        ("Compact", LayoutHeight::Compact),
+                        ("Standard", LayoutHeight::Standard),
+                        ("Tall", LayoutHeight::Tall),
+                    ] {
+                        if ui.button(label).clicked() {
+                            let _ = self.layout_editor.apply(
+                                LayoutEditAction::SetHeight {
+                                    instance_id: binding.instance().id().as_str().to_owned(),
+                                    height,
+                                },
+                                self.today.registry(),
+                            );
+                        }
+                    }
+                });
+            }
+            match binding.resolution() {
+                TodayWidgetResolution::MissingRenderer => {
+                    ui.group(|ui| {
+                        ui.strong("Unavailable dashboard widget");
+                        ui.label(binding.instance().kind_id());
+                        ui.label(
+                            "This widget can be removed or the layout can be reset in Edit layout.",
+                        );
+                    });
+                }
+                TodayWidgetResolution::Available(definition) => {
+                    ui.heading(definition.display_name());
+                    self.render_today_widget(ui, definition.kind(), &snapshot, &context);
+                }
+            }
+        }
+    }
+
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the explicit layout editor retains its actions next to their egui controls"
+    )]
+    fn render_layout_editor_controls(&mut self, ui: &mut eframe::egui::Ui) {
+        if !self.layout_editor.is_editing() {
+            if ui.button("Edit layout").clicked() {
+                let _ = self
+                    .layout_editor
+                    .apply(LayoutEditAction::Begin, self.today.registry());
+            }
+            return;
+        }
         ui.horizontal(|ui| {
-            ui.heading("Timeline");
+            ui.strong("Editing layout");
+            if ui.button("Reset").clicked() {
+                let _ = self
+                    .layout_editor
+                    .apply(LayoutEditAction::Reset, self.today.registry());
+            }
+            if ui.button("Cancel").clicked() {
+                let _ = self
+                    .layout_editor
+                    .apply(LayoutEditAction::Cancel, self.today.registry());
+            }
+            if ui.button("Save").clicked()
+                && let Some(LayoutEditEffect::Save(document)) = self
+                    .layout_editor
+                    .apply(LayoutEditAction::Save, self.today.registry())
+            {
+                let expected_revision = self
+                    .runtime
+                    .layout_snapshot
+                    .lock()
+                    .ok()
+                    .map(|snapshot| snapshot.entity_revision());
+                if self.runtime.try_submit_layout(
+                    document.clone(),
+                    expected_revision,
+                    UtcMicros::new(utc_now_micros()),
+                ) {
+                    self.pending_layout_save = Some(document);
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Add widget:");
+            for definition in self.today.registry().definitions() {
+                if ui.button(definition.display_name()).clicked() {
+                    let instance_id = format!("layout-{}", utc_now_micros());
+                    let _ = self.layout_editor.apply(
+                        LayoutEditAction::Add {
+                            instance_id,
+                            kind: definition.kind(),
+                        },
+                        self.today.registry(),
+                    );
+                }
+            }
+        });
+    }
+
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the small built-in appearance picker keeps persistence submission beside selection"
+    )]
+    fn render_settings_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
+        if self.app.controller().model().route() != openmanic_ui_egui::Route::Settings {
+            return;
+        }
+        ui.add_space(16.0);
+        ui.heading("Appearance");
+        ui.label(
+            "Choose a built-in theme. A rejected selection keeps the current complete appearance.",
+        );
+        ui.horizontal(|ui| {
+            for (key, label) in [
+                ("openmanic.dark", "Dark"),
+                ("openmanic.light", "Light"),
+                ("openmanic.system", "Follow system"),
+            ] {
+                if ui.selectable_label(self.theme_key == key, label).clicked()
+                    && self.runtime.try_submit_theme(
+                        match key {
+                            "openmanic.dark" => 0,
+                            "openmanic.light" => 1,
+                            "openmanic.system" => 2,
+                            _ => return,
+                        },
+                        UtcMicros::new(utc_now_micros()),
+                    )
+                {
+                    ui.label("Saving appearance...");
+                }
+            }
+        });
+    }
+
+    fn reconcile_persisted_appearance(&mut self, context: &eframe::egui::Context) {
+        let Some(theme_key) = self.runtime.theme_mode.lock().ok().map(|mode| match *mode {
+            1 => "openmanic.light",
+            2 => "openmanic.system",
+            _ => "openmanic.dark",
+        }) else {
+            return;
+        };
+        if theme_key != self.theme_key && self.app.apply_theme(context, theme_key, true).is_ok() {
+            self.theme_key = theme_key.to_owned();
+        }
+    }
+
+    fn reconcile_persisted_layout(&mut self) {
+        let Some(pending) = self.pending_layout_save.as_ref() else {
+            return;
+        };
+        let Ok(snapshot) = self.runtime.layout_snapshot.lock() else {
+            return;
+        };
+        if snapshot.document() == pending {
+            self.layout_editor.confirm_saved(pending.clone());
+            self.pending_layout_save = None;
+        }
+    }
+
+    fn render_today_widget(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        kind: TodayWidgetKind,
+        snapshot: &TodaySnapshot,
+        context: &openmanic_ui_egui::TodayViewContext,
+    ) {
+        if kind == TodayWidgetKind::TIMELINE {
+            self.render_timeline_widget(ui, snapshot, context);
+        } else if kind == TodayWidgetKind::APPLICATION_USAGE {
+            render_usage_snapshot(ui, snapshot.usage());
+        } else if kind == TodayWidgetKind::TIME_DISTRIBUTION {
+            render_distribution_snapshot(ui, snapshot.distribution());
+        } else if kind == TodayWidgetKind::FOCUS {
+            self.render_focus_controls(ui);
+        }
+    }
+
+    fn render_timeline_widget(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        snapshot: &TodaySnapshot,
+        context: &openmanic_ui_egui::TodayViewContext,
+    ) {
+        ui.horizontal(|ui| {
             ui.toggle_value(&mut self.create_schedule_mode, "Create schedule");
             if self.create_schedule_mode {
                 ui.label("Drag on the timeline to choose exact start and end times.");
             }
         });
+        self.timeline.set_theme_tokens(self.app.theme_tokens());
         let output = self.timeline.show_snapshot(
             ui,
             snapshot.timeline(),
-            &context,
+            context,
             self.create_schedule_mode,
         );
         for action in output.actions().iter().copied() {
@@ -2916,13 +3344,7 @@ impl VerticalSliceApp {
             }
         }
         self.render_schedule_editor(ui);
-        self.render_existing_schedule_controls(ui, &snapshot);
-        ui.add_space(12.0);
-        ui.heading("Application usage");
-        render_usage_snapshot(ui, snapshot.usage());
-        ui.add_space(12.0);
-        ui.heading("Time distribution");
-        render_distribution_snapshot(ui, snapshot.distribution());
+        self.render_existing_schedule_controls(ui, snapshot);
     }
 
     #[expect(
@@ -3944,10 +4366,13 @@ impl eframe::App for VerticalSliceApp {
         // process-owned while the viewport is hidden or stalled.
         let _ = (&self.bootstrap, &self.runtime.supervisor, &*frame);
         self.drain_worker_ingress();
+        self.reconcile_persisted_appearance(ui.ctx());
+        self.reconcile_persisted_layout();
         eframe::App::ui(&mut self.app, ui, frame);
         self.render_today_dashboard(ui);
         self.render_categories_dashboard(ui);
         self.render_calendar_dashboard(ui);
+        self.render_settings_dashboard(ui);
         self.publish_day_projection();
         self.dispatch_ui_commands();
         let context = ui.ctx().clone();

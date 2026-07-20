@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use openmanic_application::{
     AcceptedWindowTitle, ApplicationError, ApplicationPort, CatalogPersistence,
     CatalogPersistenceError, DataRevision, EntityRevision, FocusKind, FocusPersistence,
-    FocusPersistenceError, FocusSnapshot, PortFailureReason, SavedViewId, SavedViewPersistence,
+    FocusPersistenceError, FocusSnapshot, LayoutPersistence, LayoutPersistenceError,
+    LayoutSnapshot, PortFailureReason, SavedViewId, SavedViewPersistence,
     SavedViewPersistenceError, SavedViewSnapshot, ScheduleId, SchedulePersistence,
     SchedulePersistenceError, ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
     TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
@@ -13,13 +14,14 @@ use openmanic_application::{
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
-    CategoryId, CategoryName, FocusSessionId, FocusSessionState, HalfOpenInterval,
+    CategoryId, CategoryName, FocusSessionId, FocusSessionState, HalfOpenInterval, LayoutDocument,
     ScheduleOccurrenceException, ScheduleSegment, TrackerRunId, UtcMicros,
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
 use crate::repository::{
-    database_error, encode_saved_view_definition, load_saved_views, read_schedule_snapshot,
+    database_error, decode_layout_document, encode_layout_definition, encode_saved_view_definition,
+    load_saved_views, read_schedule_snapshot,
 };
 use crate::{
     ConnectionConfiguration, SqliteReadSession, SqliteWriter, StorageError, StoreOpenOptions,
@@ -448,6 +450,72 @@ impl StorageWriter {
             Some(_) => Err(StorageError::InvalidStoredValue {
                 field: "window title collection setting",
             }),
+        }
+    }
+
+    /// Persists one approved built-in theme mode through the singleton settings record.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the mode is unsupported or the atomic settings update fails.
+    pub fn set_theme_mode(
+        &mut self,
+        theme_mode: u8,
+        updated_at_utc: UtcMicros,
+    ) -> Result<DataRevision, StorageError> {
+        if theme_mode > 2 {
+            return Err(StorageError::InvalidStoredValue {
+                field: "theme mode",
+            });
+        }
+        let transaction = self.begin_writer_transaction("begin theme settings update")?;
+        let revision = next_revision(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO user_settings(
+                singleton_id, schema_version, first_launch_consent_revision,
+                start_tracking_automatically, start_at_login, close_to_tray,
+                idle_threshold_seconds, idle_policy, collect_window_titles,
+                time_zone_mode, manual_time_zone_id, theme_mode, density,
+                notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged,
+                revision, updated_utc_us
+             ) VALUES (1, 1, 0, 1, 0, 1, 300, 1, 0, 0, NULL, ?1, 1, 1, 1, 0, 0, ?2)
+             ON CONFLICT(singleton_id) DO UPDATE SET theme_mode = excluded.theme_mode,
+                 revision = user_settings.revision + 1, updated_utc_us = excluded.updated_utc_us",
+                params![i64::from(theme_mode), updated_at_utc.get()],
+            )
+            .map_err(|error| database_error(&error, "persist theme mode"))?;
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit theme settings update"))?;
+        Ok(revision)
+    }
+
+    /// Returns the approved built-in theme mode, or no value before settings are first saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the stored mode is outside the supported built-in range.
+    pub fn theme_mode(&mut self) -> Result<Option<u8>, StorageError> {
+        let mode: Option<i64> = self
+            .writer
+            .connection_mut()
+            .query_row(
+                "SELECT theme_mode FROM user_settings WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| database_error(&error, "read theme mode"))?;
+        match mode {
+            None => Ok(None),
+            Some(mode) => match u8::try_from(mode) {
+                Ok(mode @ 0..=2) => Ok(Some(mode)),
+                _ => Err(StorageError::InvalidStoredValue {
+                    field: "theme mode",
+                }),
+            },
         }
     }
 
@@ -937,6 +1005,124 @@ impl SavedViewPersistence for &mut StorageWriter {
         expected_revision: EntityRevision,
     ) -> Result<DataRevision, SavedViewPersistenceError> {
         <StorageWriter as SavedViewPersistence>::delete_saved_view(*self, id, expected_revision)
+    }
+}
+
+impl LayoutPersistence for StorageWriter {
+    fn load_layout(&mut self) -> Result<Option<LayoutSnapshot>, LayoutPersistenceError> {
+        let row: Option<(i64, i64, String, i64)> = self
+            .writer
+            .connection_mut()
+            .query_row(
+                "SELECT schema_version, revision, document_json, updated_utc_us FROM dashboard_layout WHERE id = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|_| LayoutPersistenceError::Failed)?;
+        row.map(|(schema_version, revision, source, updated_at_utc)| {
+            let schema_version = u16::try_from(schema_version)
+                .map_err(|_| LayoutPersistenceError::InvalidDocument)?;
+            let revision =
+                u64::try_from(revision).map_err(|_| LayoutPersistenceError::InvalidDocument)?;
+            let document = decode_layout_document(&source, revision)
+                .map_err(|_| LayoutPersistenceError::InvalidDocument)?;
+            if document.schema_version() != schema_version {
+                return Err(LayoutPersistenceError::InvalidDocument);
+            }
+            Ok(LayoutSnapshot::new(
+                document,
+                EntityRevision::new(revision),
+                UtcMicros::new(updated_at_utc),
+            ))
+        })
+        .transpose()
+    }
+
+    fn replace_layout(
+        &mut self,
+        snapshot: &LayoutSnapshot,
+        expected_revision: Option<EntityRevision>,
+    ) -> Result<DataRevision, LayoutPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin dashboard layout replacement")
+            .map_err(|_| LayoutPersistenceError::Failed)?;
+        let existing: Option<i64> = transaction
+            .query_row(
+                "SELECT revision FROM dashboard_layout WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| LayoutPersistenceError::Failed)?;
+        let existing = existing
+            .map(|revision| {
+                u64::try_from(revision)
+                    .map(EntityRevision::new)
+                    .map_err(|_| LayoutPersistenceError::InvalidDocument)
+            })
+            .transpose()?;
+        if existing != expected_revision {
+            return Err(LayoutPersistenceError::RevisionConflict);
+        }
+        let entity_revision = expected_revision
+            .map_or(0, EntityRevision::get)
+            .checked_add(u64::from(existing.is_some()))
+            .ok_or(LayoutPersistenceError::Failed)?;
+        let document = LayoutDocument::try_new(snapshot.document().definition(), entity_revision)
+            .map_err(|_| LayoutPersistenceError::InvalidDocument)?;
+        let revision = next_revision(&transaction).map_err(|_| LayoutPersistenceError::Failed)?;
+        if existing.is_some() {
+            transaction
+                .execute(
+                    "UPDATE dashboard_layout SET schema_version = ?1, revision = ?2, document_json = ?3, updated_utc_us = ?4 WHERE id = 1",
+                    params![
+                        i64::from(document.schema_version()),
+                        i64::try_from(entity_revision).map_err(|_| LayoutPersistenceError::Failed)?,
+                        encode_layout_definition(&document.definition()),
+                        snapshot.updated_at_utc().get(),
+                    ],
+                )
+                .map_err(|_| LayoutPersistenceError::Failed)?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO dashboard_layout(id, schema_version, revision, document_json, updated_utc_us) VALUES (1, ?1, ?2, ?3, ?4)",
+                    params![
+                        i64::from(document.schema_version()),
+                        i64::try_from(entity_revision).map_err(|_| LayoutPersistenceError::Failed)?,
+                        encode_layout_definition(&document.definition()),
+                        snapshot.updated_at_utc().get(),
+                    ],
+                )
+                .map_err(|_| LayoutPersistenceError::Failed)?;
+        }
+        update_revision(&transaction, revision).map_err(|_| LayoutPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| LayoutPersistenceError::Failed)?;
+        Ok(revision)
+    }
+}
+
+impl LayoutPersistence for &mut StorageWriter {
+    fn load_layout(&mut self) -> Result<Option<LayoutSnapshot>, LayoutPersistenceError> {
+        <StorageWriter as LayoutPersistence>::load_layout(*self)
+    }
+
+    fn replace_layout(
+        &mut self,
+        snapshot: &LayoutSnapshot,
+        expected_revision: Option<EntityRevision>,
+    ) -> Result<DataRevision, LayoutPersistenceError> {
+        <StorageWriter as LayoutPersistence>::replace_layout(*self, snapshot, expected_revision)
     }
 }
 
@@ -2371,17 +2557,18 @@ mod tests {
     use openmanic_application::{
         CommandEnvelope, CommandId, EntityRevision, FocusCommand, FocusKind,
         FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
-        FocusSnapshot, OrderingKey, SavedViewId, SavedViewPersistence, SavedViewSnapshot,
-        ScheduleId, SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot,
-        SchemaRevision, TitleObservationResult, TitleStabilizer, TrackingCheckpoint,
-        TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit,
+        FocusSnapshot, LayoutPersistence, LayoutSnapshot, OrderingKey, SavedViewId,
+        SavedViewPersistence, SavedViewSnapshot, ScheduleId, SchedulePersistence,
+        SchedulePersistenceError, ScheduleSnapshot, SchemaRevision, TitleObservationResult,
+        TitleStabilizer, TrackingCheckpoint, TrackingPersistenceIntent, TrackingPersistencePort,
+        TrackingPersistenceSubmit,
     };
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application,
         ApplicationId, ApplicationName, Category, CategoryId, CategoryName, FocusSessionId,
-        FocusSessionState, HalfOpenInterval, OneTimeScheduleId, SavedViewDefinition,
-        SavedViewFields, SavedViewRange, SavedViewRelativeRange, ScheduleRule, ScheduleSeriesId,
-        TrackerRunId, UtcMicros,
+        FocusSessionState, HalfOpenInterval, LayoutDocument, OneTimeScheduleId,
+        SavedViewDefinition, SavedViewFields, SavedViewRange, SavedViewRelativeRange, ScheduleRule,
+        ScheduleSeriesId, TrackerRunId, UtcMicros,
     };
     use rusqlite::Connection;
 
@@ -3308,6 +3495,46 @@ mod tests {
             SavedViewPersistence::delete_saved_view(store.writer(), id, EntityRevision::new(0)),
             Ok(revision(2))
         );
+    }
+
+    #[test]
+    fn dashboard_layout_round_trips_atomically_and_rejects_stale_replacements() {
+        let database = TemporaryDatabase::new("dashboard-layout");
+        let mut store = open_store(database.path(), 18);
+        let document = LayoutDocument::safe_default();
+        let initial = LayoutSnapshot::new(document.clone(), EntityRevision::new(0), time(10));
+
+        assert_eq!(LayoutPersistence::load_layout(store.writer()), Ok(None));
+        assert_eq!(
+            LayoutPersistence::replace_layout(store.writer(), &initial, None),
+            Ok(revision(1))
+        );
+        let loaded = LayoutPersistence::load_layout(store.writer())
+            .expect("stored layout should load")
+            .expect("initial save should create the singleton layout");
+        assert_eq!(loaded.document(), &document);
+        assert_eq!(loaded.entity_revision(), EntityRevision::new(0));
+        assert_eq!(loaded.updated_at_utc(), time(10));
+
+        let replacement = LayoutSnapshot::new(document, EntityRevision::new(0), time(20));
+        assert_eq!(
+            LayoutPersistence::replace_layout(
+                store.writer(),
+                &replacement,
+                Some(EntityRevision::new(0))
+            ),
+            Ok(revision(2))
+        );
+        assert_eq!(
+            LayoutPersistence::replace_layout(store.writer(), &replacement, None),
+            Err(openmanic_application::LayoutPersistenceError::RevisionConflict)
+        );
+        let updated = LayoutPersistence::load_layout(store.writer())
+            .expect("stored replacement should load")
+            .expect("layout remains present");
+        assert_eq!(updated.entity_revision(), EntityRevision::new(1));
+        assert_eq!(updated.updated_at_utc(), time(20));
+        assert_eq!(updated.document().revision(), 1);
     }
 
     #[test]

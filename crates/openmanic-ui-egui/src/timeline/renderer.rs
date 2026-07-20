@@ -19,7 +19,7 @@ use super::{
     TimelineGestureEvent, TimelineInteraction, TimelinePaintPlan, TimelineTransform, hit_test,
     prepare_schedule_overlays,
 };
-use crate::{DataLimitation, PresentableData, TodayAction, TodayViewContext};
+use crate::{DataLimitation, PresentableData, ThemeTokens, TodayAction, TodayViewContext};
 
 const BAND_LABEL_WIDTH: f32 = 108.0;
 const BAND_HEIGHT: f32 = 26.0;
@@ -30,7 +30,6 @@ const DETAIL_WIDTH: f32 = 320.0;
 const DETAIL_LINE_HEIGHT: f32 = 16.0;
 
 const CANVAS: Color32 = Color32::from_rgb(18, 22, 31);
-const BAND_BACKGROUND: Color32 = Color32::from_rgb(37, 45, 61);
 const BAND_BORDER: Color32 = Color32::from_rgb(99, 114, 137);
 const LABEL: Color32 = Color32::from_rgb(222, 230, 241);
 const MUTED: Color32 = Color32::from_rgb(170, 184, 204);
@@ -39,7 +38,6 @@ const HOVER_BACKGROUND: Color32 = Color32::from_rgb(27, 33, 45);
 const ERROR: Color32 = Color32::from_rgb(237, 113, 113);
 const WARNING: Color32 = Color32::from_rgb(236, 190, 93);
 const SUCCESS: Color32 = Color32::from_rgb(107, 201, 139);
-const SCHEDULE_BRACKET: Color32 = Color32::from_rgb(133, 201, 255);
 
 /// An action emitted by the timeline renderer for its owning controller to reduce.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,12 +99,13 @@ pub struct TimelineRenderer {
     pressed_band: Option<TimelineBand>,
     last_pointer: Option<Pos2>,
     snapshot_range: Option<HalfOpenInterval>,
+    theme_tokens: ThemeTokens,
 }
 
 impl TimelineRenderer {
     /// Creates an empty renderer that initializes itself from its first immutable snapshot.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             interaction: None,
             persistent_detail: None,
@@ -115,7 +114,13 @@ impl TimelineRenderer {
             pressed_band: None,
             last_pointer: None,
             snapshot_range: None,
+            theme_tokens: ThemeTokens::default(),
         }
+    }
+
+    /// Replaces the complete semantic palette used by custom timeline paint.
+    pub fn set_theme_tokens(&mut self, theme_tokens: ThemeTokens) {
+        self.theme_tokens = theme_tokens;
     }
 
     /// Renders one frame from presentation data without querying a port or mutating data.
@@ -351,14 +356,14 @@ impl TimelineRenderer {
         band_rects: BandRects,
         context: &TodayViewContext,
     ) {
-        painter.rect_filled(canvas, 4.0, CANVAS);
-        paint_band_labels(painter, band_rects);
-        paint_ticks(painter, canvas, transform);
+        painter.rect_filled(canvas, 4.0, self.theme_tokens.canvas());
+        paint_band_labels(painter, band_rects, self.theme_tokens);
+        paint_ticks(painter, canvas, transform, self.theme_tokens);
         let plan = TimelinePaintPlan::from_snapshot(transform, snapshot);
         paint_category_band(painter, plan.category(), band_rects.category);
         paint_activity_band(painter, plan.activity(), band_rects.activity);
         paint_application_band(painter, plan.application(), band_rects.application);
-        paint_schedule_overlays(painter, transform, band_rects, snapshot);
+        paint_schedule_overlays(painter, transform, band_rects, snapshot, self.theme_tokens);
         paint_selection(painter, transform, band_rects, context.timeline_selection());
         paint_persistent_selection(painter, transform, band_rects, self.persistent_detail);
         paint_completeness(painter, canvas, snapshot.completeness());
@@ -395,6 +400,7 @@ fn paint_schedule_overlays(
     transform: TimelineTransform,
     band_rects: BandRects,
     snapshot: &TimelineSnapshot,
+    theme_tokens: ThemeTokens,
 ) {
     for overlay in prepare_schedule_overlays(
         transform,
@@ -407,7 +413,10 @@ fn paint_schedule_overlays(
         let pixels = overlay.bracket().range().pixels();
         let top = band_rects.category.min.y + 2.0;
         let bottom = band_rects.application.max.y - 2.0;
-        let stroke = Stroke::new(if adjusted { 2.0 } else { 1.0 }, SCHEDULE_BRACKET);
+        let stroke = Stroke::new(
+            if adjusted { 2.0 } else { 1.0 },
+            theme_tokens.schedule_bracket(),
+        );
         painter.line_segment(
             [
                 Pos2::new(pixels.start_x(), top),
@@ -585,7 +594,7 @@ fn contains_range(outer: HalfOpenInterval, inner: HalfOpenInterval) -> bool {
     outer.start() <= inner.start() && inner.end() <= outer.end()
 }
 
-fn paint_band_labels(painter: &Painter, bands: BandRects) {
+fn paint_band_labels(painter: &Painter, bands: BandRects, theme_tokens: ThemeTokens) {
     for (band, rect) in [
         (TimelineBand::Category, bands.category),
         (TimelineBand::Activity, bands.activity),
@@ -596,21 +605,26 @@ fn paint_band_labels(painter: &Painter, bands: BandRects) {
             Align2::LEFT_CENTER,
             band.label(),
             FontId::proportional(12.0),
-            LABEL,
+            theme_tokens.content_primary(),
         );
-        painter.rect_filled(rect, 2.0, BAND_BACKGROUND);
+        painter.rect_filled(rect, 2.0, theme_tokens.panel());
         painter.line_segment(
             [rect.left_top(), rect.right_top()],
-            Stroke::new(1.0, BAND_BORDER),
+            Stroke::new(1.0, theme_tokens.timeline_grid()),
         );
         painter.line_segment(
             [rect.left_bottom(), rect.right_bottom()],
-            Stroke::new(1.0, BAND_BORDER),
+            Stroke::new(1.0, theme_tokens.timeline_grid()),
         );
     }
 }
 
-fn paint_ticks(painter: &Painter, canvas: Rect, transform: TimelineTransform) {
+fn paint_ticks(
+    painter: &Painter,
+    canvas: Rect,
+    transform: TimelineTransform,
+    theme_tokens: ThemeTokens,
+) {
     let Ok(layout) = super::AdaptiveTickLayout::try_new(56.0, 8.0) else {
         return;
     };
@@ -620,14 +634,14 @@ fn paint_ticks(painter: &Painter, canvas: Rect, transform: TimelineTransform) {
                 Pos2::new(tick.x(), canvas.min.y + TICK_HEIGHT - 5.0),
                 Pos2::new(tick.x(), canvas.min.y + TICK_HEIGHT),
             ],
-            Stroke::new(1.0, MUTED),
+            Stroke::new(1.0, theme_tokens.timeline_grid()),
         );
         painter.text(
             Pos2::new(tick.x(), canvas.min.y + 2.0),
             Align2::CENTER_TOP,
             format!("UTC {}", tick.instant().get()),
             FontId::monospace(10.0),
-            MUTED,
+            theme_tokens.content_secondary(),
         );
     }
 }

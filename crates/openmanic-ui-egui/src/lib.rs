@@ -16,11 +16,14 @@ mod app;
 mod calendar;
 mod controller;
 mod distribution;
+mod layout;
+mod layout_editor;
 mod model;
 mod overview;
 mod reducer;
 mod repaint;
 mod shell;
+mod theme;
 pub mod timeline;
 mod today;
 mod usage;
@@ -38,6 +41,8 @@ pub use distribution::{
     DistributionBuildError, DistributionContribution, DistributionGrouping, DistributionSnapshot,
     render_distribution_snapshot,
 };
+pub use layout::{DashboardColumnCount, DashboardPlacement, DashboardReflow, reflow_dashboard};
+pub use layout_editor::{LayoutEditAction, LayoutEditEffect, LayoutEditor};
 pub use model::{
     DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
     SnapshotReception, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext, UiAction,
@@ -47,6 +52,9 @@ pub use overview::{
     OverviewAction, OverviewController, OverviewDataState, OverviewEffect,
     OverviewPresentedAllocation, OverviewSavedViewItem, OverviewViewModel,
 };
+pub use theme::{
+    BuiltInThemeMode, ResolvedTheme, ThemeController, ThemeResolutionError, ThemeTokens,
+};
 pub use timeline::{
     AdaptiveTickLayout, BandSegmentGeometry, PixelRange, ScheduleBracketGeometry, TickGeneration,
     TickLayoutError, TimelineHit, TimelineRangeGeometry, TimelineTick, TimelineTransform,
@@ -54,7 +62,8 @@ pub use timeline::{
 };
 pub use today::{
     TodayAction, TodayController, TodayTrackingRequest, TodayWidgetBinding, TodayWidgetBindings,
-    TodayWidgetInstance, TodayWidgetInstanceId, TodayWidgetKind, TodayWidgetRegistry,
+    TodayWidgetDefinition, TodayWidgetInstance, TodayWidgetInstanceId, TodayWidgetKind,
+    TodayWidgetRegistry, TodayWidgetRegistryError, TodayWidgetResolution, TodayWidgetSizePolicy,
     TrackingControlAcknowledgement, TrackingControlAction,
 };
 pub use usage::{ApplicationUsage, ApplicationUsageSnapshot, render_usage_snapshot};
