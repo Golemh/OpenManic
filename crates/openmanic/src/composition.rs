@@ -23,6 +23,7 @@ use openmanic_application::{
     LatestMailboxReceiver, MailboxReceive, OrderingKey, PortFailureReason, ProjectionContextKey,
     ProjectionRequest, ProjectionSlot, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
     RuntimeWorker, SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
+    SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
     TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
@@ -446,6 +447,40 @@ impl TrackingPersistencePort for WriterPersistence {
             }
             Err(_) => persistence_failure(PortFailureReason::Failed),
         }
+    }
+}
+
+impl SchedulePersistence for WriterPersistence {
+    fn create_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(SchedulePersistenceError::Failed);
+        };
+        store.writer().create_schedule(snapshot)
+    }
+
+    fn replace_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+        expected_revision: openmanic_application::EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(SchedulePersistenceError::Failed);
+        };
+        store.writer().replace_schedule(snapshot, expected_revision)
+    }
+
+    fn delete_schedule(
+        &mut self,
+        schedule_id: openmanic_application::ScheduleId,
+        expected_revision: openmanic_application::EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(SchedulePersistenceError::Failed);
+        };
+        store.writer().delete_schedule(schedule_id, expected_revision)
     }
 }
 
