@@ -698,6 +698,37 @@ impl SchedulePersistence for StorageWriter {
             .map_err(|_| SchedulePersistenceError::Failed)?;
         Ok(revision)
     }
+
+    fn replace_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin schedule replacement")
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        if schedule_revision(&transaction, snapshot.id())
+            .map_err(|_| SchedulePersistenceError::Failed)?
+            != Some(expected_revision)
+        {
+            return Err(SchedulePersistenceError::RevisionConflict);
+        }
+        delete_schedule_snapshot(&transaction, snapshot.id())
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        if schedule_conflicts_with_one_time_intervals(&transaction, snapshot)
+            .map_err(|_| SchedulePersistenceError::Failed)?
+        {
+            return Err(SchedulePersistenceError::Conflict);
+        }
+        let revision = next_revision(&transaction).map_err(|_| SchedulePersistenceError::Failed)?;
+        insert_schedule_snapshot(&transaction, snapshot)
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        update_revision(&transaction, revision).map_err(|_| SchedulePersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        Ok(revision)
+    }
 }
 
 impl SchedulePersistence for &mut StorageWriter {
@@ -707,6 +738,72 @@ impl SchedulePersistence for &mut StorageWriter {
     ) -> Result<DataRevision, SchedulePersistenceError> {
         <StorageWriter as SchedulePersistence>::create_schedule(*self, snapshot)
     }
+
+    fn replace_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        <StorageWriter as SchedulePersistence>::replace_schedule(*self, snapshot, expected_revision)
+    }
+}
+
+fn schedule_revision(
+    transaction: &Transaction<'_>,
+    schedule_id: ScheduleId,
+) -> Result<Option<EntityRevision>, StorageError> {
+    let (table, public_id) = match schedule_id {
+        ScheduleId::OneTime(id) => ("one_time_schedule", id.as_bytes()),
+        ScheduleId::Series(id) => ("schedule_series", id.as_bytes()),
+    };
+    transaction
+        .query_row(
+            &format!("SELECT revision FROM {table} WHERE public_id = ?1"),
+            [public_id.as_slice()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| database_error(&error, "read schedule revision"))?
+        .map(|revision| {
+            u64::try_from(revision)
+                .map(EntityRevision::new)
+                .map_err(|_| StorageError::InvalidStoredValue {
+                    field: "schedule revision",
+                })
+        })
+        .transpose()
+}
+
+fn delete_schedule_snapshot(
+    transaction: &Transaction<'_>,
+    schedule_id: ScheduleId,
+) -> Result<(), StorageError> {
+    match schedule_id {
+        ScheduleId::OneTime(id) => {
+            transaction
+                .execute("DELETE FROM one_time_schedule WHERE public_id = ?1", [id.as_bytes().as_slice()])
+                .map_err(|error| database_error(&error, "delete one-time schedule"))?;
+        }
+        ScheduleId::Series(id) => {
+            let series_row_id: i64 = transaction
+                .query_row(
+                    "SELECT id FROM schedule_series WHERE public_id = ?1",
+                    [id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
+                .map_err(|error| database_error(&error, "find schedule series for replacement"))?;
+            transaction
+                .execute("DELETE FROM schedule_exception WHERE series_id = ?1", [series_row_id])
+                .map_err(|error| database_error(&error, "delete schedule exceptions"))?;
+            transaction
+                .execute("DELETE FROM schedule_rule_segment WHERE series_id = ?1", [series_row_id])
+                .map_err(|error| database_error(&error, "delete schedule rule segments"))?;
+            transaction
+                .execute("DELETE FROM schedule_series WHERE id = ?1", [series_row_id])
+                .map_err(|error| database_error(&error, "delete schedule series"))?;
+        }
+    }
+    Ok(())
 }
 
 fn insert_schedule_snapshot(
@@ -1893,6 +1990,47 @@ mod tests {
                 .and_then(|mut reader| reader.snapshot())
                 .map(|snapshot| snapshot.revision()),
             Ok(revision(2))
+        );
+    }
+
+    #[test]
+    fn schedule_replacement_requires_the_current_revision_and_is_atomic() {
+        let database = TemporaryDatabase::new("schedule-replacement");
+        let mut store = open_store(database.path(), 26);
+        let original = one_time_schedule_snapshot(28, 100, 200);
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &original),
+            Ok(revision(1))
+        );
+        let replacement = ScheduleSnapshot::try_new(
+            original.id(),
+            ScheduleRule::one_time(
+                "Moved appointment",
+                None,
+                HalfOpenInterval::try_new(UtcMicros::new(300), UtcMicros::new(400))
+                    .expect("positive replacement interval"),
+                "Etc/UTC",
+            )
+            .expect("valid replacement rule"),
+            EntityRevision::new(1),
+            UtcMicros::new(13),
+        )
+        .expect("matching schedule identity");
+        assert_eq!(
+            SchedulePersistence::replace_schedule(
+                store.writer(),
+                &replacement,
+                EntityRevision::new(0),
+            ),
+            Ok(revision(2))
+        );
+        assert_eq!(
+            SchedulePersistence::replace_schedule(
+                store.writer(),
+                &replacement,
+                EntityRevision::new(0),
+            ),
+            Err(SchedulePersistenceError::RevisionConflict)
         );
     }
 

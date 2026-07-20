@@ -85,6 +85,8 @@ pub enum ScheduleSnapshotError {
 pub enum ScheduleCommand {
     /// Creates one validated personal schedule without mutating tracked activity.
     Create(ScheduleSnapshot),
+    /// Replaces one schedule after the caller applies its explicit edit scope to the rule.
+    Replace(ScheduleSnapshot),
 }
 
 /// Durable schedule operations required by the application service.
@@ -98,6 +100,18 @@ pub trait SchedulePersistence {
         &mut self,
         snapshot: &ScheduleSnapshot,
     ) -> Result<DataRevision, SchedulePersistenceError>;
+
+    /// Atomically replaces an existing schedule after checking its optimistic entity revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedulePersistenceError`] when the schedule changed, the replacement conflicts,
+    /// or the transaction cannot commit.
+    fn replace_schedule(
+        &mut self,
+        snapshot: &ScheduleSnapshot,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError>;
 }
 
 /// Stable persistence failures exposed by the schedule boundary.
@@ -105,6 +119,8 @@ pub trait SchedulePersistence {
 pub enum SchedulePersistenceError {
     /// A persisted schedule or resolved occurrence conflicts with an existing personal schedule.
     Conflict,
+    /// The targeted schedule no longer exists or has a different entity revision.
+    RevisionConflict,
     /// The persistence adapter failed without committing the requested mutation.
     Failed,
 }
@@ -178,10 +194,34 @@ where
                 Err(SchedulePersistenceError::Conflict) => {
                     ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
                 }
+                Err(SchedulePersistenceError::RevisionConflict) => {
+                    ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
+                }
                 Err(SchedulePersistenceError::Failed) => {
                     ScheduleMutation::rejected(command, MutationRejectionReason::PersistenceFailure)
                 }
             },
+            ScheduleCommand::Replace(snapshot) => {
+                let Some(expected_revision) = command.expected_entity_revision() else {
+                    return ScheduleMutation::rejected(
+                        command,
+                        MutationRejectionReason::RevisionConflict,
+                    );
+                };
+                match self.persistence.replace_schedule(snapshot, expected_revision) {
+                    Ok(revision) => ScheduleMutation::confirmed(command, revision, snapshot.clone()),
+                    Err(SchedulePersistenceError::Conflict) => {
+                        ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
+                    }
+                    Err(SchedulePersistenceError::RevisionConflict) => {
+                        ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
+                    }
+                    Err(SchedulePersistenceError::Failed) => ScheduleMutation::rejected(
+                        command,
+                        MutationRejectionReason::PersistenceFailure,
+                    ),
+                }
+            }
         }
     }
 }
