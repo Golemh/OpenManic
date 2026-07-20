@@ -195,15 +195,24 @@ mod tests {
     }
 
     #[test]
-    fn rapid_title_churn_and_exclusion_never_accept_a_title() {
-        let mut stabilizer = TitleStabilizer::default();
+    fn rapid_title_churn_at_all_required_rates_and_exclusion_never_accept_a_title() {
         let application = ApplicationId::from_bytes([2; 16]);
-        for change in 0..100 {
-            assert!(matches!(
-                stabilizer.observe(application, UtcMicros::new(change * 10_000), &format!("Page {change}"), true, false),
-                TitleObservationResult::Ignored
-            ));
+        for interval_us in [100_000, 20_000, 10_000] {
+            let mut stabilizer = TitleStabilizer::default();
+            for change in 0..100 {
+                assert!(matches!(
+                    stabilizer.observe(
+                        application,
+                        UtcMicros::new(change * interval_us),
+                        &format!("Page {change}"),
+                        true,
+                        false,
+                    ),
+                    TitleObservationResult::Ignored
+                ));
+            }
         }
+        let mut stabilizer = TitleStabilizer::default();
         assert!(matches!(
             stabilizer.observe(application, UtcMicros::new(3_000_000), "Private", true, true),
             TitleObservationResult::Ignored
