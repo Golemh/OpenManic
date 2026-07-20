@@ -20,6 +20,7 @@ mod schedule;
 mod schedule_time;
 mod timeline_projection;
 mod tracking;
+mod title_stabilizer;
 
 // Platform adapters consume only this crate's facade. Re-export the domain values
 // already present in normalized tracking evidence so that boundary remains intact.
@@ -80,6 +81,10 @@ pub use timeline_projection::{
 pub use tracking::{
     TRACKING_CHECKPOINT_INTERVAL_US, TrackingCheckpoint, TrackingCheckpointError,
     TrackingPersistenceIntent, TrackingPersistenceIntentError, TrackingService,
+};
+pub use title_stabilizer::{
+    AcceptedWindowTitle, MAX_WINDOW_TITLE_BYTES, TITLE_STABILITY_US, TitleObservationResult,
+    TitleStabilizer,
 };
 
 #[cfg(test)]
