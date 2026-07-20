@@ -657,6 +657,42 @@ impl ScheduleRule {
         validate_segment_coverage(&schedule.segments)
     }
 
+    /// Ends a recurring series immediately before `anchor_date` and discards all later rule
+    /// segments and occurrence exceptions.
+    ///
+    /// Returns `true` when the selected anchor begins the series, in which case there is no
+    /// earlier lineage to retain and the application service must delete the series atomically.
+    /// This is the domain operation for [`ScheduleEditScope::ThisAndFuture`] deletion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScheduleValidationError`] when this is not a repeating rule or no segment
+    /// covers the selected anchor date.
+    pub fn delete_this_and_future(
+        &mut self,
+        anchor_date: i32,
+    ) -> Result<bool, ScheduleValidationError> {
+        let schedule = self.recurring_mut()?;
+        let index = schedule
+            .segment_index_for_date(anchor_date)
+            .ok_or(ScheduleValidationError::NoRuleSegmentForAnchor { anchor_date })?;
+        if schedule.segments[index].effective_start_date == anchor_date {
+            if index == 0 {
+                return Ok(true);
+            }
+            schedule.segments.truncate(index);
+        } else {
+            let prior_end = anchor_date
+                .checked_sub(1)
+                .ok_or(ScheduleValidationError::AnchorDateUnderflow { anchor_date })?;
+            schedule.segments[index].effective_end_date = Some(prior_end);
+            schedule.segments.truncate(index + 1);
+        }
+        schedule.exceptions.retain(|date, _| *date < anchor_date);
+        validate_segment_coverage(&schedule.segments)?;
+        Ok(false)
+    }
+
     /// Replaces the recurring rule intent across all effective dates while preserving exceptions.
     ///
     /// This is the domain operation for [`ScheduleEditScope::EveryOccurrence`]. The caller later
@@ -1173,6 +1209,33 @@ mod tests {
         assert_eq!(rule.time_zone_for_anchor_date(119), Some("Asia/Karachi"));
         assert_eq!(rule.time_zone_for_anchor_date(120), Some("Europe/London"));
         assert!(rule.is_skipped_on(105));
+    }
+
+    #[test]
+    fn deleting_this_and_future_truncates_lineage_and_later_exceptions() {
+        let mut rule = repeating_rule();
+        rule.skip_only_this_date(105).expect("covered past anchor");
+        rule.skip_only_this_date(125).expect("covered future anchor");
+        rule.skip_only_this_date(135).expect("covered deleted anchor");
+        rule.change_this_and_future(
+            120,
+            "London hours",
+            None,
+            MONDAY,
+            8 * 3_600,
+            10 * 3_600,
+            "Europe/London",
+        )
+        .expect("valid future split");
+
+        assert_eq!(rule.delete_this_and_future(130), Ok(false));
+        assert_eq!(rule.segment_count(), 2);
+        assert!(rule.applies_on_anchor_date(129, 0));
+        assert!(!rule.applies_on_anchor_date(130, 0));
+        assert!(rule.is_skipped_on(105));
+        assert!(rule.is_skipped_on(125));
+        assert!(!rule.is_skipped_on(135));
+        assert_eq!(rule.delete_this_and_future(100), Ok(true));
     }
 
     #[test]
