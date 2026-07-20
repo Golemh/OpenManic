@@ -17,6 +17,14 @@ It cannot produce an exact historical interval without inventing time. The initi
 adapter must keep such sessions out of historical block geometry until a future model addition
 records an authoritative pause boundary or a product decision defines the presentation.
 
+## Calendar route presentation
+
+The first Calendar UI pass may defer dense coincident-block hit ordering, selection recovery after a
+deleted activity refresh, overnight continuation language, and the full date-picker/time-zone
+conversion path. It must still make distinct source types and immutable loading, empty, and error
+states visible. OM-412 owns schedule editing parity; Calendar schedule blocks do not create a
+second editor in OM-411.
+
 ## Saved-view document coverage
 
 The existing versioned `SavedViewDocument` validates and falls back deterministically, but its

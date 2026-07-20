@@ -13,6 +13,7 @@ compile_error!("select exactly one renderer: renderer-wgpu or renderer-glow");
 compile_error!("select one renderer: renderer-wgpu or renderer-glow");
 
 mod app;
+mod calendar;
 mod controller;
 mod distribution;
 mod model;
