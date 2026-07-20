@@ -468,6 +468,21 @@ impl CommandIdentifiers {
         )
     }
 
+    fn schedule_replace(
+        &self,
+        snapshot: ScheduleSnapshot,
+    ) -> CommandEnvelope<ScheduleCommand> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            Some(snapshot.entity_revision()),
+            submitted_at_utc,
+            ScheduleCommand::Replace(snapshot),
+        )
+    }
+
     fn schedule_delete_occurrence(
         &self,
         series_id: ScheduleSeriesId,
@@ -2875,19 +2890,25 @@ impl VerticalSliceApp {
     fn render_schedule_editor(&mut self, ui: &mut eframe::egui::Ui) {
         let schedule_draft_action = self.schedule_draft.as_mut().map(|draft| {
             let action = render_schedule_draft(ui, draft);
-            (action, draft.range, draft.label.clone(), draft.repeats, draft.weekday_mask)
+            (
+                action,
+                draft.range,
+                draft.label.clone(),
+                draft.repeats,
+                draft.weekday_mask,
+                draft.existing.clone(),
+            )
         });
-        let Some((action, range, label, repeats, weekday_mask)) = schedule_draft_action else {
+        let Some((action, range, label, repeats, weekday_mask, existing)) = schedule_draft_action else {
             self.render_schedule_status(ui);
             return;
         };
         let submission = match action {
-            ScheduleDraftAction::Save => Some(self.queue_schedule_draft(
-                range,
-                &label,
-                repeats,
-                weekday_mask,
-            )),
+            ScheduleDraftAction::Save => Some(if let Some(existing) = existing {
+                self.queue_schedule_replacement(existing, range, &label, repeats, weekday_mask)
+            } else {
+                self.queue_schedule_draft(range, &label, repeats, weekday_mask)
+            }),
             ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
         };
         if let Some(Ok(command_id)) = submission {
@@ -2940,10 +2961,15 @@ impl VerticalSliceApp {
                     ));
                     if ui.button("Delete…").clicked() {
                         self.schedule_delete_request = Some(ScheduleDeleteRequest {
-                            snapshot: schedule,
+                            snapshot: schedule.clone(),
                             anchor_date,
                             scope: ScheduleEditScope::OnlyThisDate,
                         });
+                    }
+                    if !schedule.rule().is_repeating()
+                        && ui.button("Edit…").clicked()
+                    {
+                        self.schedule_draft = ScheduleDraft::from_existing(schedule);
                     }
                 });
             }
@@ -3029,6 +3055,31 @@ impl VerticalSliceApp {
             .schedule_create(range, label, repeats, weekday_mask)?;
         self.runtime
             .try_submit_schedule(command)
+            .ok_or(ScheduleDraftValidationError::QueueUnavailable)
+    }
+
+    fn queue_schedule_replacement(
+        &self,
+        existing: ScheduleSnapshot,
+        range: HalfOpenInterval,
+        label: &str,
+        repeats: bool,
+        _weekday_mask: u8,
+    ) -> Result<CommandId, ScheduleDraftValidationError> {
+        if repeats || existing.rule().is_repeating() {
+            return Err(ScheduleDraftValidationError::CannotRepresent);
+        }
+        let rule = ScheduleRule::one_time(label, None, range, "Etc/UTC")
+            .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+        let replacement = ScheduleSnapshot::try_new(
+            existing.id(),
+            rule,
+            existing.entity_revision(),
+            UtcMicros::new(utc_now_micros()),
+        )
+        .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+        self.runtime
+            .try_submit_schedule(self.runtime.identifiers.schedule_replace(replacement))
             .ok_or(ScheduleDraftValidationError::QueueUnavailable)
     }
 
@@ -3118,6 +3169,7 @@ struct ScheduleDraft {
     repeats: bool,
     weekday_mask: u8,
     validation_error: Option<ScheduleDraftValidationError>,
+    existing: Option<ScheduleSnapshot>,
 }
 
 impl ScheduleDraft {
@@ -3128,7 +3180,20 @@ impl ScheduleDraft {
             repeats: false,
             weekday_mask: 0b0111_1111,
             validation_error: None,
+            existing: None,
         }
+    }
+
+    fn from_existing(snapshot: ScheduleSnapshot) -> Option<Self> {
+        let range = snapshot.rule().one_time_interval()?;
+        Some(Self {
+            range,
+            label: snapshot.rule().label().to_owned(),
+            repeats: false,
+            weekday_mask: 0b0111_1111,
+            validation_error: None,
+            existing: Some(snapshot),
+        })
     }
 }
 
@@ -3137,7 +3202,7 @@ fn render_schedule_draft(
     draft: &mut ScheduleDraft,
 ) -> ScheduleDraftAction {
     ui.group(|ui| {
-        ui.strong("New schedule");
+        ui.strong(if draft.existing.is_some() { "Edit schedule" } else { "New schedule" });
         ui.label(format!(
             "Provisional range: {} to {} UTC",
             draft.range.start().get(),
@@ -3155,7 +3220,6 @@ fn render_schedule_draft(
         if let Some(error) = draft.validation_error {
             ui.colored_label(eframe::egui::Color32::from_rgb(200, 70, 70), error.message());
         }
-        ui.label("Editing existing schedules and occurrence scopes follow next.");
         if ui
             .add_enabled(!draft.label.trim().is_empty(), eframe::egui::Button::new("Save schedule"))
             .clicked()
