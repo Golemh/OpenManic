@@ -180,14 +180,14 @@ Remaining risk or waiver:
   architecture, delivery/setup, and UI specifications.
 - **Branch/worktree:** `codex/openmanic-mvp-implementation-continuation`, primary integration checkout.
 - **Base SHA:** `c4b19bfa3b1c5bed04eb0525e62cacbcb9444e0d`.
-- **Status:** in progress. The CSV import/export worker is host-wired with explicit title disclosure,
-  verified SQLite backup and privacy-safe diagnostics export run on the same bounded worker, and the
-  Settings screen retains named data-operation job results. Integrated at `98dfe38` after the
-  consolidated MSVC quality gate on 2026-07-20.
+- **Status:** implementation complete through `54492fc`: the Settings screen hosts CSV
+  import/export with explicit title disclosure, verified backup/restore, verified data-location
+  move with persisted per-user locator, privacy-safe diagnostics export, and named recoverable
+  data-operation jobs. Restore and move quiesce the writer before storage work, retain the source
+  on move, and rebuild the local runtime after completion.
 - **Evidence:** `CARGO_TARGET_DIR=target-msvc cargo +stable-x86_64-pc-windows-msvc xtask quality`
   passed: format check, locked workspace check, strict Clippy, workspace tests, rustdoc, and docs
   validation.
-- **Remaining limitation:** restore and data-root move are intentionally not presented yet. Their
-  accepted contracts require quiescing dependent work and reopening services; the current runtime
-  has no safe coordinator for that lifecycle. Do not expose a destructive restore or move control
-  until that coordinator exists.
+- **G6 limitation:** the automated quality gate is green, but the real-Windows/manual acceptance
+  evidence is still unobserved: actual restore/move behavior, Explorer/tray recovery, autostart
+  repair, and portable-artifact replacement must be recorded before declaring G6 accepted.
