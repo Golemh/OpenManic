@@ -23,15 +23,16 @@ use openmanic_application::{
     LatestMailboxReceiver, MailboxReceive, OrderingKey, PortFailureReason, ProjectionContextKey,
     ProjectionRequest, ProjectionSlot, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
     RuntimeWorker, SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
-    SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot,
+    EntityRevision, MutationOutcome, ScheduleCommand, ScheduleId, SchedulePersistence,
+    SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
     TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
     TrackingPersistenceSubmit, TrackingService, WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
-    ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval, TrackerRunId,
-    UtcMicros,
+    ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval,
+    OneTimeScheduleId, ScheduleRule, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -143,6 +144,7 @@ enum WriterWork {
     },
     System(CommandEnvelope<TrackingCommand>),
     Ui(CommandEnvelope<TrackingCommand>),
+    Schedule(CommandEnvelope<ScheduleCommand>),
 }
 
 impl WriterWork {
@@ -150,8 +152,16 @@ impl WriterWork {
         match self {
             Self::System(command) | Self::CatalogForeground { command, .. } => (command, false),
             Self::Ui(command) => (command, true),
+            Self::Schedule(_) => unreachable!("schedule commands use the schedule service"),
         }
     }
+}
+
+/// The stateful application services which are exclusively owned by the writer worker.
+struct WriterServices {
+    tracking: TrackingService<WriterPersistence>,
+    schedules: ScheduleService<WriterPersistence>,
+    ui_event_sequence: u64,
 }
 
 /// Exclusive-worker control which is deliberately separate from ordinary ingress.
@@ -313,6 +323,29 @@ impl CommandIdentifiers {
     fn tracking_request(&self, action: TrackingControlAction) -> TodayTrackingRequest {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         TodayTrackingRequest::new(action, command_id, ordering_key, submitted_at_utc)
+    }
+
+    fn schedule_create(&self, range: HalfOpenInterval) -> Option<CommandEnvelope<ScheduleCommand>> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        let mut id_bytes = [0_u8; 16];
+        id_bytes[..8].copy_from_slice(&submitted_at_utc.get().to_be_bytes());
+        id_bytes[8..].copy_from_slice(&command_id.get().to_be_bytes());
+        let rule = ScheduleRule::one_time("New schedule", None, range, "Etc/UTC").ok()?;
+        let snapshot = ScheduleSnapshot::try_new(
+            ScheduleId::OneTime(OneTimeScheduleId::from_bytes(id_bytes)),
+            rule,
+            EntityRevision::new(0),
+            submitted_at_utc,
+        )
+        .ok()?;
+        Some(CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            None,
+            submitted_at_utc,
+            ScheduleCommand::Create(snapshot),
+        ))
     }
 
     fn next_metadata(&self) -> (CommandId, OrderingKey, UtcMicros) {
@@ -608,6 +641,25 @@ impl RuntimeResources {
         }
     }
 
+    fn try_submit_schedule(&self, command: CommandEnvelope<ScheduleCommand>) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let command_id = command.command_id();
+        if !self.ui_inbox.try_push(UiIngress::Pending(command_id)) {
+            return false;
+        }
+        if matches!(
+            self.lanes
+                .try_submit(WorkLane::Normal, WriterWork::Schedule(command)),
+            LaneSubmit::Enqueued
+        ) {
+            return true;
+        }
+        self.ui_inbox.remove_pending(command_id);
+        false
+    }
+
     fn reject_nonessential_work(&self) {
         self.accepting.store(false, Ordering::Release);
     }
@@ -813,7 +865,17 @@ fn run_writer_worker(
         store: Arc::clone(&store),
         first_write: true,
     };
-    let mut tracking = TrackingService::new(run_id, persistence);
+    let tracking = TrackingService::new(run_id, persistence);
+    let schedule_persistence = WriterPersistence {
+        store: Arc::clone(&store),
+        first_write: false,
+    };
+    let schedules = ScheduleService::new(schedule_persistence);
+    let mut services = WriterServices {
+        tracking,
+        schedules,
+        ui_event_sequence: 0,
+    };
     let mut current_projection = None;
     let mut running = true;
 
@@ -827,9 +889,9 @@ fn run_writer_worker(
 
         match control.try_recv() {
             Ok(WriterControl::Checkpoint(reply)) => {
-                let event = tracking.handle(system_checkpoint());
+                let event = services.tracking.handle(system_checkpoint());
                 let persisted = event.committed_data_revision().is_some()
-                    || tracking.pending_intent().is_none();
+                    || services.tracking.pending_intent().is_none();
                 if persisted && let Some(request) = current_projection.as_ref() {
                     publish_today_snapshot(&store, request, &snapshots);
                 }
@@ -839,15 +901,15 @@ fn run_writer_worker(
             Ok(WriterControl::Close(reply)) => {
                 drain_writer_lanes(
                     &lanes,
-                    &mut tracking,
+                    &mut services,
                     &store,
                     &mut current_projection,
                     &snapshots,
                     &ui_inbox,
                 );
-                let event = tracking.handle(system_checkpoint());
+                let event = services.tracking.handle(system_checkpoint());
                 let persisted = event.committed_data_revision().is_some()
-                    || tracking.pending_intent().is_none();
+                    || services.tracking.pending_intent().is_none();
                 let _ = reply.send(persisted);
                 running = false;
                 continue;
@@ -862,7 +924,7 @@ fn run_writer_worker(
         match lanes.try_receive() {
             LaneReceive::Work { work, .. } => process_writer_work(
                 work,
-                &mut tracking,
+                &mut services,
                 &store,
                 &mut current_projection,
                 &snapshots,
@@ -876,7 +938,7 @@ fn run_writer_worker(
 
 fn drain_writer_lanes(
     lanes: &RuntimeLaneReceiver<WriterWork>,
-    tracking: &mut TrackingService<WriterPersistence>,
+    services: &mut WriterServices,
     store: &Arc<Mutex<SqliteStore>>,
     current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
@@ -885,7 +947,7 @@ fn drain_writer_lanes(
     while let LaneReceive::Work { work, .. } = lanes.try_receive() {
         process_writer_work(
             work,
-            tracking,
+            services,
             store,
             current_projection,
             snapshots,
@@ -896,12 +958,23 @@ fn drain_writer_lanes(
 
 fn process_writer_work(
     work: WriterWork,
-    tracking: &mut TrackingService<WriterPersistence>,
+    services: &mut WriterServices,
     store: &Arc<Mutex<SqliteStore>>,
     current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
 ) {
+    if let WriterWork::Schedule(command) = work {
+        process_schedule_command(
+            &command,
+            services,
+            store,
+            current_projection,
+            snapshots,
+            ui_inbox,
+        );
+        return;
+    }
     if let WriterWork::CatalogForeground {
         application,
         command,
@@ -927,7 +1000,7 @@ fn process_writer_work(
         process_tracking_command(
             foreground_command_with_exclusion(command, excluded),
             false,
-            tracking,
+            services,
             store,
             current_projection,
             snapshots,
@@ -939,7 +1012,7 @@ fn process_writer_work(
     process_tracking_command(
         command,
         from_ui,
-        tracking,
+        services,
         store,
         current_projection,
         snapshots,
@@ -978,20 +1051,72 @@ fn foreground_command_with_exclusion(
 fn process_tracking_command(
     command: CommandEnvelope<TrackingCommand>,
     from_ui: bool,
-    tracking: &mut TrackingService<WriterPersistence>,
+    services: &mut WriterServices,
     store: &Arc<Mutex<SqliteStore>>,
     current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
 ) {
-    let event = tracking.handle(command);
+    let event = services.tracking.handle(command);
     let changed = event.committed_data_revision().is_some();
     if from_ui {
-        let _ = ui_inbox.try_push(UiIngress::Event(event));
+        let _ = ui_inbox.try_push(UiIngress::Event(resequence_ui_event(
+            event,
+            &mut services.ui_event_sequence,
+        )));
     }
     if changed && let Some(request) = current_projection.as_ref() {
         publish_today_snapshot(store, request, snapshots);
     }
+}
+
+fn process_schedule_command(
+    command: &CommandEnvelope<ScheduleCommand>,
+    services: &mut WriterServices,
+    store: &Arc<Mutex<SqliteStore>>,
+    current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
+    snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
+    ui_inbox: &UiInbox,
+) {
+    let mutation = services.schedules.handle(command);
+    let outcome = mutation.outcome().clone();
+    let committed_revision = match &outcome {
+        MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
+        MutationOutcome::Rejected(_) => None,
+    };
+    let event = EventEnvelope::new(
+        command.schema_revision(),
+        next_ui_event_sequence(&mut services.ui_event_sequence),
+        Some(command.command_id()),
+        committed_revision,
+        command.submitted_at_utc(),
+        AppEvent::Mutation(outcome),
+    );
+    let _ = ui_inbox.try_push(UiIngress::Event(event));
+    if committed_revision.is_some()
+        && let Some(request) = current_projection.as_ref()
+    {
+        publish_today_snapshot(store, request, snapshots);
+    }
+}
+
+fn resequence_ui_event(
+    event: EventEnvelope<AppEvent>,
+    ui_event_sequence: &mut u64,
+) -> EventEnvelope<AppEvent> {
+    EventEnvelope::new(
+        event.schema_revision(),
+        next_ui_event_sequence(ui_event_sequence),
+        event.causation_command_id(),
+        event.committed_data_revision(),
+        event.occurred_at_utc(),
+        event.into_payload(),
+    )
+}
+
+fn next_ui_event_sequence(ui_event_sequence: &mut u64) -> u64 {
+    *ui_event_sequence = ui_event_sequence.saturating_add(1);
+    *ui_event_sequence
 }
 
 fn system_checkpoint() -> CommandEnvelope<TrackingCommand> {
@@ -1400,10 +1525,14 @@ impl VerticalSliceApp {
                 }
             }
         }
-        if let Some(range) = self.schedule_draft_range
-            && render_schedule_draft(ui, range)
-        {
-            self.schedule_draft_range = None;
+        if let Some(range) = self.schedule_draft_range {
+            match render_schedule_draft(ui, range) {
+                ScheduleDraftAction::Save => {
+                    self.schedule_draft_range = (!self.queue_schedule_draft(range)).then_some(range);
+                }
+                ScheduleDraftAction::Cancel => self.schedule_draft_range = None,
+                ScheduleDraftAction::None => {}
+            }
         }
         ui.add_space(12.0);
         ui.heading("Application usage");
@@ -1418,6 +1547,13 @@ impl VerticalSliceApp {
         let _ = self
             .today
             .queue_tracking(self.app.controller_mut(), request);
+    }
+
+    fn queue_schedule_draft(&self, range: HalfOpenInterval) -> bool {
+        self.runtime
+            .identifiers
+            .schedule_create(range)
+            .is_some_and(|command| self.runtime.try_submit_schedule(command))
     }
 
     fn dispatch_ui_commands(&mut self) {
@@ -1492,7 +1628,17 @@ impl VerticalSliceApp {
     }
 }
 
-fn render_schedule_draft(ui: &mut eframe::egui::Ui, range: HalfOpenInterval) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduleDraftAction {
+    None,
+    Save,
+    Cancel,
+}
+
+fn render_schedule_draft(
+    ui: &mut eframe::egui::Ui,
+    range: HalfOpenInterval,
+) -> ScheduleDraftAction {
     ui.group(|ui| {
         ui.strong("New schedule");
         ui.label(format!(
@@ -1500,8 +1646,14 @@ fn render_schedule_draft(ui: &mut eframe::egui::Ui, range: HalfOpenInterval) -> 
             range.start().get(),
             range.end().get()
         ));
-        ui.label("Schedule details and save actions are being connected to the authoritative service.");
-        ui.button("Cancel").clicked()
+        ui.label("This creates a one-time schedule. Editing labels and recurrence follows next.");
+        if ui.button("Save schedule").clicked() {
+            ScheduleDraftAction::Save
+        } else if ui.button("Cancel").clicked() {
+            ScheduleDraftAction::Cancel
+        } else {
+            ScheduleDraftAction::None
+        }
     })
     .inner
 }
