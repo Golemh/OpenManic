@@ -11,6 +11,7 @@ use openmanic_application::{
     SchedulePersistenceError, ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
     TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
     schedule_rule_conflicts_with_intervals,
+    SettingsSnapshot, SettingsThemeMode,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
@@ -101,6 +102,37 @@ pub struct StorageWriter {
 }
 
 impl StorageWriter {
+    /// Loads the complete authoritative settings singleton when it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] for malformed persisted settings values or read failures.
+    pub fn settings_snapshot(&mut self) -> Result<Option<SettingsSnapshot>, StorageError> {
+        let row: Option<(i64, i64, i64, i64, i64, i64, i64, i64, Option<String>, i64, i64, i64, i64, i64, i64)> = self.writer.connection_mut().query_row(
+            "SELECT first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision FROM user_settings WHERE singleton_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?)),
+        ).optional().map_err(|error| database_error(&error, "read settings snapshot"))?;
+        row.map(|(consent, tracking, login, close, idle_seconds, idle_policy, titles, time_zone, manual_zone, theme, density, notifications, sounds, tray_acknowledged, revision)| {
+            Ok(SettingsSnapshot::new(
+                u32::try_from(consent).map_err(|_| StorageError::InvalidStoredValue { field: "settings consent revision" })?,
+                setting_bool(tracking, "settings tracking start")?,
+                setting_bool(login, "settings login start")?,
+                setting_bool(close, "settings close behavior")?,
+                u32::try_from(idle_seconds).map_err(|_| StorageError::InvalidStoredValue { field: "settings idle threshold" })?,
+                u16::try_from(idle_policy).map_err(|_| StorageError::InvalidStoredValue { field: "settings idle policy" })?,
+                setting_bool(titles, "settings title collection")?,
+                u8::try_from(time_zone).map_err(|_| StorageError::InvalidStoredValue { field: "settings time zone mode" })?,
+                manual_zone,
+                SettingsThemeMode::try_from_code(u8::try_from(theme).map_err(|_| StorageError::InvalidStoredValue { field: "settings theme mode" })?).map_err(|_| StorageError::InvalidStoredValue { field: "settings theme mode" })?,
+                u16::try_from(density).map_err(|_| StorageError::InvalidStoredValue { field: "settings density" })?,
+                setting_bool(notifications, "settings notifications")?,
+                setting_bool(sounds, "settings focus sounds")?,
+                setting_bool(tray_acknowledged, "settings tray acknowledgement")?,
+                EntityRevision::new(u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue { field: "settings revision" })?),
+            ))
+        }).transpose()
+    }
     /// Returns the verified SQLite configuration held by this serialized writer.
     #[must_use]
     pub const fn configuration(&self) -> ConnectionConfiguration {
@@ -435,23 +467,9 @@ impl StorageWriter {
     /// Returns [`StorageError`] when the settings record cannot be read or contains an invalid
     /// persisted boolean value.
     pub fn window_title_collection_enabled(&mut self) -> Result<bool, StorageError> {
-        let enabled: Option<i64> = self
-            .writer
-            .connection_mut()
-            .query_row(
-                "SELECT collect_window_titles FROM user_settings WHERE singleton_id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| database_error(&error, "read window title collection setting"))?;
-        match enabled {
-            None | Some(0) => Ok(false),
-            Some(1) => Ok(true),
-            Some(_) => Err(StorageError::InvalidStoredValue {
-                field: "window title collection setting",
-            }),
-        }
+        Ok(self
+            .settings_snapshot()?
+            .is_some_and(|settings| settings.collect_window_titles()))
     }
 
     /// Persists one approved built-in theme mode through the singleton settings record.
@@ -499,25 +517,9 @@ impl StorageWriter {
     ///
     /// Returns [`StorageError`] when the stored mode is outside the supported built-in range.
     pub fn theme_mode(&mut self) -> Result<Option<u8>, StorageError> {
-        let mode: Option<i64> = self
-            .writer
-            .connection_mut()
-            .query_row(
-                "SELECT theme_mode FROM user_settings WHERE singleton_id = 1",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| database_error(&error, "read theme mode"))?;
-        match mode {
-            None => Ok(None),
-            Some(mode) => match u8::try_from(mode) {
-                Ok(mode @ 0..=2) => Ok(Some(mode)),
-                _ => Err(StorageError::InvalidStoredValue {
-                    field: "theme mode",
-                }),
-            },
-        }
+        Ok(self
+            .settings_snapshot()?
+            .map(|settings| settings.theme_mode().code()))
     }
 
     /// Stores an application's current category association and observation bounds atomically.
@@ -1603,6 +1605,14 @@ fn schedule_occurrence_exception_from_row(
         _ => Err(StorageError::InvalidStoredValue {
             field: "schedule exception kind",
         }),
+    }
+}
+
+fn setting_bool(value: i64, field: &'static str) -> Result<bool, StorageError> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(StorageError::InvalidStoredValue { field }),
     }
 }
 
