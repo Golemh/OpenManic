@@ -359,7 +359,7 @@ impl CommandIdentifiers {
         label: &str,
         repeats: bool,
         weekday_mask: u8,
-    ) -> Option<CommandEnvelope<ScheduleCommand>> {
+    ) -> Result<CommandEnvelope<ScheduleCommand>, ScheduleDraftValidationError> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         let mut id_bytes = [0_u8; 16];
         id_bytes[..8].copy_from_slice(&submitted_at_utc.get().to_be_bytes());
@@ -372,7 +372,8 @@ impl CommandIdentifiers {
         } else {
             (
                 ScheduleId::OneTime(OneTimeScheduleId::from_bytes(id_bytes)),
-                ScheduleRule::one_time(label, None, range, "Etc/UTC").ok()?,
+                ScheduleRule::one_time(label, None, range, "Etc/UTC")
+                    .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?,
             )
         };
         let snapshot = ScheduleSnapshot::try_new(
@@ -381,8 +382,8 @@ impl CommandIdentifiers {
             EntityRevision::new(0),
             submitted_at_utc,
         )
-        .ok()?;
-        Some(CommandEnvelope::new(
+        .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+        Ok(CommandEnvelope::new(
             SchemaRevision::new(1),
             command_id,
             ordering_key,
@@ -1584,21 +1585,26 @@ fn recurring_schedule_rule(
     label: &str,
     range: HalfOpenInterval,
     weekday_mask: u8,
-) -> Option<ScheduleRule> {
+) -> Result<ScheduleRule, ScheduleDraftValidationError> {
     const DAY_US: i64 = 86_400_000_000;
     const SECOND_US: i64 = 1_000_000;
-    if weekday_mask == 0
-        || range.start().get().rem_euclid(SECOND_US) != 0
+    if weekday_mask == 0 {
+        return Err(ScheduleDraftValidationError::NoWeekdays);
+    }
+    if range.start().get().rem_euclid(SECOND_US) != 0
         || range.end().get().rem_euclid(SECOND_US) != 0
     {
-        return None;
+        return Err(ScheduleDraftValidationError::WholeSecondTimes);
     }
-    let start_second = u32::try_from(range.start().get().rem_euclid(DAY_US) / SECOND_US).ok()?;
-    let end_second = u32::try_from(range.end().get().rem_euclid(DAY_US) / SECOND_US).ok()?;
+    let start_second = u32::try_from(range.start().get().rem_euclid(DAY_US) / SECOND_US)
+        .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+    let end_second = u32::try_from(range.end().get().rem_euclid(DAY_US) / SECOND_US)
+        .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
     if start_second == end_second {
-        return None;
+        return Err(ScheduleDraftValidationError::FullDayRecurrence);
     }
-    let effective_start_date = i32::try_from(range.start().get().div_euclid(DAY_US)).ok()?;
+    let effective_start_date = i32::try_from(range.start().get().div_euclid(DAY_US))
+        .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
     ScheduleRule::repeating(
         label,
         None,
@@ -1609,7 +1615,32 @@ fn recurring_schedule_rule(
         None,
         "Etc/UTC",
     )
-    .ok()
+    .map_err(|_| ScheduleDraftValidationError::CannotRepresent)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduleDraftValidationError {
+    NoWeekdays,
+    WholeSecondTimes,
+    FullDayRecurrence,
+    QueueUnavailable,
+    CannotRepresent,
+}
+
+impl ScheduleDraftValidationError {
+    const fn message(self) -> &'static str {
+        match self {
+            Self::NoWeekdays => "Choose at least one day for a repeating schedule.",
+            Self::WholeSecondTimes => {
+                "Repeating schedules currently require start and end times on whole seconds."
+            }
+            Self::FullDayRecurrence => {
+                "A repeating schedule cannot currently run for exactly 24 hours."
+            }
+            Self::QueueUnavailable => "The schedule could not be queued. Try saving it again.",
+            Self::CannotRepresent => "This schedule cannot be saved with the current time settings.",
+        }
+    }
 }
 
 const fn tracking_status_label(status: &MutationStatus) -> &'static str {
@@ -1948,15 +1979,25 @@ impl VerticalSliceApp {
             self.render_schedule_status(ui);
             return;
         };
-        let submitted = match action {
-            ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label, repeats, weekday_mask),
+        let submission = match action {
+            ScheduleDraftAction::Save => Some(self.queue_schedule_draft(
+                range,
+                &label,
+                repeats,
+                weekday_mask,
+            )),
             ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
         };
-        if let Some(command_id) = submitted {
+        if let Some(Ok(command_id)) = submission {
             self.latest_schedule_command = Some(command_id);
         }
+        if let Some(Err(error)) = submission
+            && let Some(draft) = self.schedule_draft.as_mut()
+        {
+            draft.validation_error = Some(error);
+        }
         if matches!(action, ScheduleDraftAction::Cancel)
-            || matches!(action, ScheduleDraftAction::Save) && submitted.is_some()
+            || matches!(action, ScheduleDraftAction::Save) && matches!(submission, Some(Ok(_)))
         {
             self.schedule_draft = None;
         }
@@ -1977,11 +2018,14 @@ impl VerticalSliceApp {
         label: &str,
         repeats: bool,
         weekday_mask: u8,
-    ) -> Option<CommandId> {
-        self.runtime
+    ) -> Result<CommandId, ScheduleDraftValidationError> {
+        let command = self
+            .runtime
             .identifiers
-            .schedule_create(range, label, repeats, weekday_mask)
-            .and_then(|command| self.runtime.try_submit_schedule(command))
+            .schedule_create(range, label, repeats, weekday_mask)?;
+        self.runtime
+            .try_submit_schedule(command)
+            .ok_or(ScheduleDraftValidationError::QueueUnavailable)
     }
 
     fn dispatch_ui_commands(&mut self) {
@@ -2069,6 +2113,7 @@ struct ScheduleDraft {
     label: String,
     repeats: bool,
     weekday_mask: u8,
+    validation_error: Option<ScheduleDraftValidationError>,
 }
 
 impl ScheduleDraft {
@@ -2078,6 +2123,7 @@ impl ScheduleDraft {
             label: "New schedule".to_owned(),
             repeats: false,
             weekday_mask: 0b0111_1111,
+            validation_error: None,
         }
     }
 }
@@ -2101,6 +2147,9 @@ fn render_schedule_draft(
         if draft.repeats {
             render_weekday_selector(ui, &mut draft.weekday_mask);
             ui.label("Choose at least one day. Recurring times use UTC until local-zone editing is added.");
+        }
+        if let Some(error) = draft.validation_error {
+            ui.colored_label(eframe::egui::Color32::from_rgb(200, 70, 70), error.message());
         }
         ui.label("Editing existing schedules and occurrence scopes follow next.");
         if ui
@@ -2274,7 +2323,7 @@ mod tests {
 
     use super::{
         CommandIdentifiers, PlatformActionRouter, UiInbox, UiIngress, day_range,
-        recurring_schedule_rule, store_identity,
+        recurring_schedule_rule, store_identity, ScheduleDraftValidationError,
     };
 
     #[test]
@@ -2418,7 +2467,19 @@ mod tests {
         assert_eq!(segment.weekday_mask(), 0b0100_0001);
         assert_eq!(segment.start_second_of_day(), 23 * 3_600);
         assert_eq!(segment.end_second_of_day(), 3_600);
-        assert!(recurring_schedule_rule("No days", range, 0).is_none());
+        assert_eq!(
+            recurring_schedule_rule("No days", range, 0),
+            Err(ScheduleDraftValidationError::NoWeekdays)
+        );
+        let fractional_range = HalfOpenInterval::try_new(
+            UtcMicros::new(1),
+            UtcMicros::new(3_600_000_001),
+        )
+        .expect("positive fractional fixture");
+        assert_eq!(
+            recurring_schedule_rule("Fractional", fractional_range, 0b0000_0001),
+            Err(ScheduleDraftValidationError::WholeSecondTimes)
+        );
     }
 
     #[test]
