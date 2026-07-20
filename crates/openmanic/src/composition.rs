@@ -61,7 +61,8 @@ use openmanic_ui_egui::{
     CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
     LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp,
     PresentableData, TodayController, TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution,
-    ShutdownController, ShutdownEffect, TrackingControlAction, UiAction, UiController, UiModel,
+    SettingsAction, SettingsController, SettingsEffect, ShutdownController, ShutdownEffect,
+    TrackingControlAction, UiAction, UiController, UiModel,
     reflow_dashboard, render_shutdown_failure,
     render_distribution_snapshot, render_usage_snapshot,
 };
@@ -2728,6 +2729,7 @@ struct VerticalSliceApp {
     calendar_projection_sequence: u64,
     timeline: TimelineRenderer,
     close_to_tray: WindowsTrayController,
+    settings_controller: SettingsController,
     onboarding_submission_pending: bool,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
@@ -2839,6 +2841,10 @@ impl VerticalSlice {
             })
             .to_owned();
         let mut close_to_tray = WindowsTrayController::new();
+        let settings_controller = self.runtime.settings_snapshot.lock().map_or_else(
+            |_| SettingsController::new(SettingsSnapshot::safe_default()),
+            |settings| SettingsController::new(settings.clone()),
+        );
         if let Ok(settings) = self.runtime.settings_snapshot.lock() {
             close_to_tray.set_close_to_tray_enabled(settings.close_to_tray());
         }
@@ -2859,6 +2865,7 @@ impl VerticalSlice {
             calendar_projection_sequence: 0,
             timeline: TimelineRenderer::new(),
             close_to_tray,
+            settings_controller,
             onboarding_submission_pending: false,
             projection_sequence: 1,
             requested_range: None,
@@ -3381,29 +3388,48 @@ impl VerticalSliceApp {
             return;
         }
         ui.add_space(16.0);
-        ui.heading("Appearance");
-        ui.label(
-            "Choose a built-in theme. A rejected selection keeps the current complete appearance.",
-        );
+        ui.heading("Settings");
+        ui.label("These choices stay on this device and apply after you save them.");
+        let mut basic = self.settings_controller.basic().clone();
+        let mut automatic = basic.start_tracking_automatically();
+        let mut login = basic.start_at_login();
+        let mut close_to_tray = basic.close_to_tray();
+        let mut titles = basic.collect_window_titles();
+        let mut notifications = basic.notifications_enabled();
+        let mut sounds = basic.focus_sounds_enabled();
+        ui.checkbox(&mut automatic, "Start tracking after consent");
+        ui.checkbox(&mut login, "Start OpenManic when I sign in");
+        ui.checkbox(&mut close_to_tray, "Keep tracking in the tray when I close the window");
+        ui.checkbox(&mut titles, "Collect window titles");
+        ui.small(self.settings_controller.title_collection_disclosure());
+        ui.checkbox(&mut notifications, "Show notifications");
+        ui.checkbox(&mut sounds, "Play focus sounds");
+        basic.set_start_tracking_automatically(automatic);
+        basic.set_start_at_login(login);
+        basic.set_close_to_tray(close_to_tray);
+        basic.set_collect_window_titles(titles);
+        basic.set_notifications_enabled(notifications);
+        basic.set_focus_sounds_enabled(sounds);
         ui.horizontal(|ui| {
-            for (key, label) in [
-                ("openmanic.dark", "Dark"),
-                ("openmanic.light", "Light"),
-                ("openmanic.system", "Follow system"),
-            ] {
-                if ui.selectable_label(self.theme_key == key, label).clicked()
-                    && self.runtime.try_submit_theme(
-                        match key {
-                            "openmanic.dark" => 0,
-                            "openmanic.light" => 1,
-                            "openmanic.system" => 2,
-                            _ => return,
-                        },
-                        UtcMicros::new(utc_now_micros()),
-                    )
-                {
-                    ui.label("Saving appearance...");
+            ui.label("Appearance:");
+            for (mode, label) in [(0_u8, "Dark"), (1, "Light"), (2, "Follow system")] {
+                if ui.button(label).clicked() {
+                    let _ = self.runtime.try_submit_theme(mode, UtcMicros::new(utc_now_micros()));
                 }
+            }
+        });
+        if basic != *self.settings_controller.basic() {
+            let _ = self.settings_controller.apply(SettingsAction::SetBasic(basic));
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Save settings").clicked()
+                && let Some(SettingsEffect::Save { settings, expected_revision }) = self.settings_controller.apply(SettingsAction::Save)
+                && self.runtime.try_submit_settings(settings, Some(expected_revision))
+            {
+                ui.label("Saving settings...");
+            }
+            if ui.button("Cancel changes").clicked() {
+                let _ = self.settings_controller.apply(SettingsAction::Cancel);
             }
         });
     }
