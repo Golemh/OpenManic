@@ -1,6 +1,7 @@
 //! IANA-aware conversion between stored schedule civil values and UTC instants.
 
 use core::fmt;
+use std::collections::BTreeSet;
 
 use jiff::{Span, civil::Date, tz};
 use openmanic_domain::{CategoryId, HalfOpenInterval, ScheduleOccurrenceException, ScheduleRule, UtcMicros};
@@ -213,6 +214,81 @@ pub fn schedule_rule_conflicts_with_intervals(
     Ok(false)
 }
 
+/// Returns whether two recurring rules have any positive UTC intersection.
+///
+/// The recurring pattern repeats weekly, so each overlapping segment lineage is expanded for one
+/// full weekday cycle plus its preceding overnight anchor. Every persisted exception is also
+/// expanded in its own local neighborhood, allowing a fixed override to introduce a conflict or
+/// a skip to remove the only conflict in a bounded segment.
+///
+/// # Errors
+///
+/// Returns [`ScheduleTimeError`] when either rule does not repeat or a civil boundary cannot be
+/// resolved under the MVP's DST policy.
+pub fn repeating_schedule_rules_conflict(
+    first: &ScheduleRule,
+    second: &ScheduleRule,
+) -> Result<bool, ScheduleTimeError> {
+    if !first.is_repeating() || !second.is_repeating() {
+        return Err(ScheduleTimeError::RuleDoesNotRepeat);
+    }
+
+    let mut probe_ranges = BTreeSet::new();
+    for first_segment in first.segments() {
+        for second_segment in second.segments() {
+            let start = first_segment
+                .effective_start_date()
+                .max(second_segment.effective_start_date());
+            let end = match (
+                first_segment.effective_end_date(),
+                second_segment.effective_end_date(),
+            ) {
+                (Some(first_end), Some(second_end)) => Some(first_end.min(second_end)),
+                (Some(end), None) | (None, Some(end)) => Some(end),
+                (None, None) => None,
+            };
+            if end.is_some_and(|end| end < start) {
+                continue;
+            }
+            let probe_start = start
+                .checked_sub(1)
+                .ok_or(ScheduleTimeError::CivilDateOutOfRange)?;
+            let cycle_end = start
+                .checked_add(7)
+                .ok_or(ScheduleTimeError::CivilDateOutOfRange)?;
+            let probe_end = end.map_or(cycle_end, |end| end.min(cycle_end));
+            if probe_end >= probe_start {
+                probe_ranges.insert((probe_start, probe_end));
+            }
+        }
+    }
+    for exception in first.exceptions().into_iter().chain(second.exceptions()) {
+        let anchor = exception_anchor_date(exception);
+        let start = anchor
+            .checked_sub(1)
+            .ok_or(ScheduleTimeError::CivilDateOutOfRange)?;
+        let end = anchor
+            .checked_add(1)
+            .ok_or(ScheduleTimeError::CivilDateOutOfRange)?;
+        probe_ranges.insert((start, end));
+    }
+
+    for (start, end) in probe_ranges {
+        let first_occurrences = expand_repeating_schedule(first, start, end)?;
+        let second_occurrences = expand_repeating_schedule(second, start, end)?;
+        if first_occurrences.iter().any(|first_occurrence| {
+            second_occurrences.iter().any(|second_occurrence| {
+                first_occurrence
+                    .interval()
+                    .overlaps(second_occurrence.interval())
+            })
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn local_anchor_date(instant: UtcMicros, time_zone_id: &str) -> Result<i32, ScheduleTimeError> {
     let timestamp = jiff::Timestamp::from_microsecond(instant.get())
         .map_err(|_| ScheduleTimeError::UtcInstantOutOfRange)?;
@@ -366,7 +442,8 @@ mod tests {
 
     use super::{
         SCHEDULE_CIVIL_EPOCH, ScheduleBoundaryResolution, ScheduleTimeError,
-        expand_repeating_schedule, resolve_schedule_boundary, schedule_rule_conflicts_with_intervals,
+        expand_repeating_schedule, repeating_schedule_rules_conflict, resolve_schedule_boundary,
+        schedule_rule_conflicts_with_intervals,
     };
 
     #[test]
@@ -461,5 +538,63 @@ mod tests {
 
         assert_eq!(schedule_rule_conflicts_with_intervals(&rule, &[conflicting]), Ok(true));
         assert_eq!(schedule_rule_conflicts_with_intervals(&rule, &[adjacent]), Ok(false));
+    }
+
+    #[test]
+    fn recurring_rule_conflicts_cover_weekdays_adjacency_and_exception_dates() {
+        let daily = ScheduleRule::repeating(
+            "Daily planning",
+            None,
+            0b0111_1111,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("valid daily rule");
+        let overlapping = ScheduleRule::repeating(
+            "Standup",
+            None,
+            0b0111_1111,
+            9 * 3_600 + 30 * 60,
+            10 * 3_600 + 30 * 60,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("valid overlapping rule");
+        let adjacent = ScheduleRule::repeating(
+            "Review",
+            None,
+            0b0111_1111,
+            10 * 3_600,
+            11 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
+        )
+        .expect("valid adjacent rule");
+        let mut skipped_single_day = ScheduleRule::repeating(
+            "Skipped planning",
+            None,
+            0b0000_0001,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            Some(0),
+            "Etc/UTC",
+        )
+        .expect("valid bounded rule");
+        skipped_single_day
+            .skip_only_this_date(0)
+            .expect("valid skip");
+
+        assert_eq!(repeating_schedule_rules_conflict(&daily, &overlapping), Ok(true));
+        assert_eq!(repeating_schedule_rules_conflict(&daily, &adjacent), Ok(false));
+        assert_eq!(
+            repeating_schedule_rules_conflict(&daily, &skipped_single_day),
+            Ok(false)
+        );
     }
 }

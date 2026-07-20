@@ -7,6 +7,7 @@ use openmanic_application::{
     EntityRevision, FocusKind, FocusPersistence, FocusPersistenceError, FocusSnapshot,
     PortFailureReason, ScheduleId, SchedulePersistence, SchedulePersistenceError,
     ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
+    repeating_schedule_rules_conflict,
     schedule_rule_conflicts_with_intervals,
     TrackingPersistenceSubmit,
 };
@@ -894,16 +895,26 @@ fn schedule_conflicts_with_existing_schedules(
         return Ok(true);
     }
 
-    let Some(candidate_interval) = snapshot.rule().one_time_interval() else {
-        return Ok(false);
-    };
-    for rule in load_schedule_series_rules(transaction)? {
-        if schedule_rule_conflicts_with_intervals(&rule, &[candidate_interval]).map_err(|_| {
-            StorageError::InvalidStoredValue {
-                field: "schedule time-zone overlap validation",
+    let series_rules = load_schedule_series_rules(transaction)?;
+    if let Some(candidate_interval) = snapshot.rule().one_time_interval() {
+        for rule in &series_rules {
+            if schedule_rule_conflicts_with_intervals(rule, &[candidate_interval]).map_err(|_| {
+                StorageError::InvalidStoredValue {
+                    field: "schedule time-zone overlap validation",
+                }
+            })? {
+                return Ok(true);
             }
-        })? {
-            return Ok(true);
+        }
+    } else {
+        for rule in &series_rules {
+            if repeating_schedule_rules_conflict(snapshot.rule(), rule).map_err(|_| {
+                StorageError::InvalidStoredValue {
+                    field: "schedule time-zone overlap validation",
+                }
+            })? {
+                return Ok(true);
+            }
         }
     }
     Ok(false)
@@ -2316,6 +2327,55 @@ mod tests {
                 .and_then(|mut reader| reader.snapshot())
                 .map(|snapshot| snapshot.revision()),
             Ok(revision(1))
+        );
+    }
+
+    #[test]
+    fn schedule_persistence_rejects_recurring_conflict_with_recurring_schedule() {
+        let database = TemporaryDatabase::new("schedule-recurring-recurring-overlap");
+        let mut store = open_store(database.path(), 35);
+        let first = ScheduleSnapshot::try_new(
+            ScheduleId::Series(ScheduleSeriesId::from_bytes([35; 16])),
+            ScheduleRule::repeating(
+                "Daily planning",
+                None,
+                0b0111_1111,
+                9 * 3_600,
+                10 * 3_600,
+                0,
+                None,
+                "Etc/UTC",
+            )
+            .expect("valid first recurring rule"),
+            EntityRevision::new(0),
+            UtcMicros::new(12),
+        )
+        .expect("matching first recurring identity");
+        let second = ScheduleSnapshot::try_new(
+            ScheduleId::Series(ScheduleSeriesId::from_bytes([36; 16])),
+            ScheduleRule::repeating(
+                "Overlapping review",
+                None,
+                0b0111_1111,
+                9 * 3_600 + 30 * 60,
+                10 * 3_600 + 30 * 60,
+                0,
+                None,
+                "Etc/UTC",
+            )
+            .expect("valid second recurring rule"),
+            EntityRevision::new(0),
+            UtcMicros::new(12),
+        )
+        .expect("matching second recurring identity");
+
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &first),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &second),
+            Err(SchedulePersistenceError::Conflict)
         );
     }
 
