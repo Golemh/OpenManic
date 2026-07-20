@@ -26,7 +26,7 @@ use openmanic_application::{
     DataOperationDestination, DataOperationOutcome, DataRevision, EntityRevision, EventEnvelope,
     FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort, FocusPersistence,
     FocusPersistenceError, FocusService, FocusSnapshot, ImportBatchId, ImportDestinationScope,
-    ImportScopeOutcome, JobId, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
+    ImportScopeOutcome, JobId, JobState, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
     LatestMailboxReceiver, LayoutPersistence, LayoutSnapshot, MailboxReceive, MutationOutcome,
     OrderingKey, PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
@@ -61,11 +61,12 @@ use openmanic_ui_egui::timeline::{TimelineRenderAction, TimelineRenderer};
 use openmanic_ui_egui::{
     ApplicationUsage, ApplicationUsageSnapshot, CalendarAction, CalendarBlockKind,
     CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
-    LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp,
-    PresentableData, SettingsAction, SettingsController, SettingsEffect, ShutdownController,
-    ShutdownEffect, TodayController, TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution,
-    TrackingControlAction, UiAction, UiController, UiModel, reflow_dashboard,
-    render_distribution_snapshot, render_shutdown_failure, render_usage_snapshot,
+    JobDescriptor, JobPresentationState, JobsAction, JobsController, LayoutEditAction,
+    LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp, PresentableData, SettingsAction,
+    SettingsController, SettingsEffect, ShutdownController, ShutdownEffect, TodayController,
+    TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction,
+    UiController, UiModel, reflow_dashboard, render_distribution_snapshot, render_shutdown_failure,
+    render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
@@ -997,6 +998,7 @@ fn persistence_failure(reason: PortFailureReason) -> TrackingPersistenceSubmit {
 enum DataOperationWork {
     Export(CsvExportRequest),
     Import(CsvImportRequest),
+    Backup { job_id: JobId, destination: PathBuf },
 }
 
 /// Privacy-safe completion state made available to the host UI after a CSV operation finishes.
@@ -1009,6 +1011,9 @@ enum DataOperationResult {
     Imported {
         request: CsvImportRequest,
         outcome: ImportScopeOutcome,
+    },
+    BackedUp {
+        job_id: JobId,
     },
     Failed {
         job_id: openmanic_application::JobId,
@@ -1399,6 +1404,18 @@ impl RuntimeResources {
             && self
                 .data_operation_requests
                 .try_send(DataOperationWork::Import(request))
+                .is_ok()
+    }
+
+    /// Submits one new backup destination without blocking an egui frame.
+    fn try_submit_backup(&self, job_id: JobId, destination: PathBuf) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && self
+                .data_operation_requests
+                .try_send(DataOperationWork::Backup {
+                    job_id,
+                    destination,
+                })
                 .is_ok()
     }
 
@@ -1816,6 +1833,20 @@ fn run_data_operation_worker(
                     |outcome| DataOperationResult::Imported { request, outcome },
                 )
             }
+            DataOperationWork::Backup {
+                job_id,
+                destination,
+            } => store
+                .lock()
+                .ok()
+                .and_then(|mut store| store.create_backup(&destination).ok())
+                .map_or_else(
+                    || DataOperationResult::Failed {
+                        job_id,
+                        operation: "Backup",
+                    },
+                    |()| DataOperationResult::BackedUp { job_id },
+                ),
         };
         retain_data_operation_result(&results, result);
     }
@@ -2911,8 +2942,10 @@ struct VerticalSliceApp {
     onboarding_submission_pending: bool,
     export_destination: String,
     import_source: String,
+    backup_destination: String,
     export_includes_titles: bool,
     data_operation_message: Option<String>,
+    jobs: JobsController,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
     create_schedule_mode: bool,
@@ -3051,8 +3084,10 @@ impl VerticalSlice {
             onboarding_submission_pending: false,
             export_destination: String::new(),
             import_source: String::new(),
+            backup_destination: String::new(),
             export_includes_titles: false,
             data_operation_message: None,
+            jobs: JobsController::default(),
             projection_sequence: 1,
             requested_range: None,
             create_schedule_mode: false,
@@ -3113,32 +3148,58 @@ impl VerticalSliceApp {
             .ui_inbox
             .drain_into(self.app.controller_mut(), UI_INBOUND_CAPACITY / 2);
         while let Some(result) = self.runtime.take_data_operation_result() {
-            self.data_operation_message = Some(match result {
-                DataOperationResult::Exported { request, outcome } => format!(
-                    "Exported {} rows (window titles {}).",
-                    outcome.row_count(),
-                    if request.title_disclosure() == TitleDisclosure::IncludeAfterConfirmation {
-                        "included"
-                    } else {
-                        "excluded"
-                    }
+            let (job_id, name, message, state) = match result {
+                DataOperationResult::Exported { request, outcome } => (
+                    request.job_id(),
+                    "CSV export",
+                    format!(
+                        "Exported {} rows (window titles {}).",
+                        outcome.row_count(),
+                        if request.title_disclosure() == TitleDisclosure::IncludeAfterConfirmation {
+                            "included"
+                        } else {
+                            "excluded"
+                        }
+                    ),
+                    JobState::Succeeded,
                 ),
                 DataOperationResult::Imported { request, outcome } => {
                     let _ = request.destination_scope();
-                    format!(
-                        "Imported {} of {} validated rows; {} rejected.",
-                        outcome.committed(),
-                        outcome.parsed(),
-                        outcome.rejected()
+                    (
+                        request.job_id(),
+                        "CSV import",
+                        format!(
+                            "Imported {} of {} validated rows; {} rejected.",
+                            outcome.committed(),
+                            outcome.parsed(),
+                            outcome.rejected()
+                        ),
+                        JobState::Succeeded,
                     )
                 }
-                DataOperationResult::Failed { job_id, operation } => {
+                DataOperationResult::BackedUp { job_id } => (
+                    job_id,
+                    "Backup",
+                    "Backup finished and was verified before completion.".to_owned(),
+                    JobState::Succeeded,
+                ),
+                DataOperationResult::Failed { job_id, operation } => (
+                    job_id,
+                    operation,
                     format!(
                         "{operation} job {} did not complete. Try again.",
                         job_id.get()
-                    )
-                }
-            });
+                    ),
+                    JobState::Failed {
+                        error: ApplicationError::port_failure(
+                            ApplicationPort::Command,
+                            PortFailureReason::Failed,
+                        ),
+                    },
+                ),
+            };
+            self.observe_data_job(job_id, name, &state);
+            self.data_operation_message = Some(message);
         }
         if let MailboxReceive::Latest(snapshot) = self.snapshots.try_receive() {
             let _ = self
@@ -3148,6 +3209,51 @@ impl VerticalSliceApp {
         }
         if let MailboxReceive::Latest(snapshot) = self.calendar_snapshots.try_receive() {
             self.calendar_data = PresentableData::Ready(snapshot.shared_value());
+        }
+    }
+
+    fn observe_data_job(&mut self, job_id: JobId, name: &str, state: &JobState) {
+        self.jobs.observe_job(
+            JobDescriptor::new(job_id, name.to_owned(), "Local data operation".to_owned()),
+            state,
+            None,
+        );
+    }
+
+    fn render_data_jobs(&mut self, ui: &mut eframe::egui::Ui) {
+        let view = self.jobs.view_model();
+        if view.jobs().is_empty() {
+            return;
+        }
+        ui.add_space(8.0);
+        ui.label("Recent data operations");
+        let mut dismiss = None;
+        for job in view.jobs() {
+            let dismiss_clicked = ui
+                .horizontal(|ui| {
+                    ui.label(job.name());
+                    ui.small(match job.state() {
+                        JobPresentationState::Queued => "Queued",
+                        JobPresentationState::Running => "Running",
+                        JobPresentationState::Cancelling => "Cancelling",
+                        JobPresentationState::Succeeded => "Completed",
+                        JobPresentationState::Cancelled => "Cancelled",
+                        JobPresentationState::Failed { message } => message,
+                        JobPresentationState::Interrupted => "Interrupted",
+                    });
+                    ui.add_enabled(
+                        job.state().can_dismiss(),
+                        eframe::egui::Button::new("Dismiss"),
+                    )
+                    .clicked()
+                })
+                .inner;
+            if dismiss_clicked {
+                dismiss = Some(job.job_id());
+            }
+        }
+        if let Some(job_id) = dismiss {
+            let _ = self.jobs.apply(JobsAction::Dismiss { job_id });
         }
     }
 
@@ -3663,13 +3769,18 @@ impl VerticalSliceApp {
             } else {
                 TitleDisclosure::Exclude
             };
+            let job_id = next_data_operation_id();
             let request = CsvExportRequest::new(
-                next_data_operation_id(),
+                job_id,
                 range,
                 DataOperationDestination::new(PathBuf::from(self.export_destination.trim())),
                 disclosure,
             );
-            self.data_operation_message = Some(if self.runtime.try_submit_csv_export(request) {
+            let queued = self.runtime.try_submit_csv_export(request);
+            if queued {
+                self.observe_data_job(job_id, "CSV export", &JobState::Running);
+            }
+            self.data_operation_message = Some(if queued {
                 "Export queued. You can continue using OpenManic while it runs.".to_owned()
             } else {
                 "Export could not be queued. Try again after current work finishes.".to_owned()
@@ -3694,12 +3805,41 @@ impl VerticalSliceApp {
                 DataOperationDestination::new(PathBuf::from(self.import_source.trim())),
                 ImportDestinationScope::CurrentStore,
             );
-            self.data_operation_message = Some(if self.runtime.try_submit_csv_import(request) {
+            let queued = self.runtime.try_submit_csv_import(request);
+            if queued {
+                self.observe_data_job(job_id, "CSV import", &JobState::Running);
+            }
+            self.data_operation_message = Some(if queued {
                 "Import queued. You can continue using OpenManic while it runs.".to_owned()
             } else {
                 "Import could not be queued. Try again after current work finishes.".to_owned()
             });
         }
+        ui.horizontal(|ui| {
+            ui.label("Create verified backup at:");
+            ui.text_edit_singleline(&mut self.backup_destination);
+        });
+        if ui
+            .add_enabled(
+                !self.backup_destination.trim().is_empty(),
+                eframe::egui::Button::new("Create backup"),
+            )
+            .clicked()
+        {
+            let job_id = next_data_operation_id();
+            let queued = self
+                .runtime
+                .try_submit_backup(job_id, PathBuf::from(self.backup_destination.trim()));
+            if queued {
+                self.observe_data_job(job_id, "Backup", &JobState::Running);
+            }
+            self.data_operation_message = Some(if queued {
+                "Backup queued. The existing local data remains unchanged.".to_owned()
+            } else {
+                "Backup could not be queued. Try again after current work finishes.".to_owned()
+            });
+        }
+        self.render_data_jobs(ui);
         if let Some(message) = &self.data_operation_message {
             ui.small(message);
         }
