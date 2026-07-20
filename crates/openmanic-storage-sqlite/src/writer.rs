@@ -583,7 +583,6 @@ impl StorageWriter {
 
         let mut parsed = 0_u64;
         let mut accepted = 0_u64;
-        let mut rejected = 0_u64;
         for record in records.into_iter().skip(1) {
             parsed = parsed.saturating_add(1);
             match validate_csv_record(&record) {
@@ -596,12 +595,21 @@ impl StorageWriter {
                 }
                 Err((field, code)) => {
                     insert_import_failure(&transaction, batch_row_id, ImportFailure::try_new(record.line as u64, field.map(str::to_owned), code).expect("fixed import failure is valid"))?;
-                    rejected = rejected.saturating_add(1);
                 }
             }
         }
         let revision = next_revision(&transaction)?;
         merge_csv_stage(&transaction, revision, batch_row_id)?;
+        let rejected: u64 = transaction.query_row(
+            "SELECT COUNT(*) FROM import_error WHERE import_batch_id = ?1",
+            [batch_row_id],
+            |row| row.get::<_, i64>(0),
+        ).map_err(|error| database_error(&error, "count CSV import failures"))?
+            .try_into()
+            .map_err(|_| StorageError::InvalidStoredValue { field: "CSV rejected count" })?;
+        accepted = parsed.saturating_sub(rejected);
+        // An accepted row has either been upserted, inserted, or was already present as the
+        // exact idempotent tuple. Every rejected row is retained in `import_error` above.
         let committed = accepted;
         transaction.execute(
             "UPDATE import_batch SET state = 2, parsed_count = ?2, accepted_count = ?3,
