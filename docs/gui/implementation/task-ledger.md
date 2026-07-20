@@ -193,5 +193,8 @@ Remaining risk or waiver:
   and docs validation. Focused cancellation evidence confirms no staged entity is merged after
   cancellation.
 - **G6 limitation:** the automated quality gate is green, but the real-Windows/manual acceptance
-  evidence is still unobserved: actual restore/move behavior, Explorer/tray recovery, autostart
-  repair, and portable-artifact replacement must be recorded before declaring G6 accepted.
+  evidence is incomplete. A live debug build on Windows showed the full scrollable Settings data
+  surface; a verified backup completed and appeared as a named completed job; restore and move
+  confirmation wording was inspected and cancelled without replacing or relocating data. Actual
+  restore/move behavior, Explorer/tray recovery, autostart repair, and portable-artifact
+  replacement remain unobserved before declaring G6 accepted.
