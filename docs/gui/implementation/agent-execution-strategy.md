@@ -32,6 +32,9 @@ runner interruption.
 - A coding turn normally contains one complete work unit: focused inspection, edit, narrow
   deterministic verification, and owned-diff review. Commit only at a coherent batch boundary.
 - Never send an empty handoff or one that only says "continuing", "resuming", or "checking".
+- An empty final response is never a pause, yield, or cancellation mechanism. It still ends the
+  turn; with an auto-continuing goal it can create a continuation loop. Continue the work unit or
+  provide one substantive handoff instead.
 - Do not attribute a self-ended turn to runner termination without evidence of an actual timeout,
   cancellation, tool failure, or external interruption.
 - If a command fails, repair it or use a safe alternative in the same turn. A failed lookup,
@@ -54,7 +57,8 @@ Return chat only for a coherent verified batch boundary, a required user decisio
 phase/gate handoff, or a genuine external dependency after safe alternatives have been exhausted.
 Do not return merely because a command had a quoting/path error, reconnaissance is complete, or
 the next safe edit is already known. Automatic continuation must not compensate for an agent
-ending its own turn prematurely.
+ending its own turn prematurely. In particular, do not attempt to stop an automatic continuation
+by sending an empty final response; doing so triggers another continuation.
 
 ## Current manual-validation policy
 
