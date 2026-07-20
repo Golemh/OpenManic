@@ -71,7 +71,10 @@ use openmanic_ui_egui::{
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
 use crate::cli::{CliError, parse_process_cli};
-use crate::data_root::{LocalDataRootValidator, RejectKnownNetworkShares};
+use crate::{
+    data_root::{LocalDataRootValidator, RejectKnownNetworkShares},
+    diagnostics::export_diagnostics_bundle,
+};
 
 const UI_INBOUND_CAPACITY: usize = 64;
 const UI_OUTBOUND_CAPACITY: usize = 32;
@@ -999,6 +1002,7 @@ enum DataOperationWork {
     Export(CsvExportRequest),
     Import(CsvImportRequest),
     Backup { job_id: JobId, destination: PathBuf },
+    Diagnostics { job_id: JobId, destination: PathBuf },
 }
 
 /// Privacy-safe completion state made available to the host UI after a CSV operation finishes.
@@ -1013,6 +1017,9 @@ enum DataOperationResult {
         outcome: ImportScopeOutcome,
     },
     BackedUp {
+        job_id: JobId,
+    },
+    DiagnosticsExported {
         job_id: JobId,
     },
     Failed {
@@ -1093,7 +1100,10 @@ impl RuntimeResources {
         clippy::too_many_lines,
         reason = "construction names every owned runtime boundary so startup and shutdown ownership stay auditable."
     )]
-    fn start(mut store: SqliteStore) -> Result<RuntimeStartResult, CompositionError> {
+    fn start(
+        mut store: SqliteStore,
+        data_root: PathBuf,
+    ) -> Result<RuntimeStartResult, CompositionError> {
         let capacities = LaneCapacities::try_new(
             WRITER_CRITICAL_CAPACITY,
             WRITER_NORMAL_CAPACITY,
@@ -1146,6 +1156,7 @@ impl RuntimeResources {
         let data_operation_results = Arc::new(Mutex::new(VecDeque::new()));
         let data_operation_handle = spawn_data_operation_worker(
             Arc::clone(&store),
+            data_root,
             data_operation_receiver,
             data_operation_stop_receiver,
             Arc::clone(&data_operation_results),
@@ -1413,6 +1424,18 @@ impl RuntimeResources {
             && self
                 .data_operation_requests
                 .try_send(DataOperationWork::Backup {
+                    job_id,
+                    destination,
+                })
+                .is_ok()
+    }
+
+    /// Submits a privacy-safe diagnostics export without blocking an egui frame.
+    fn try_submit_diagnostics(&self, job_id: JobId, destination: PathBuf) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && self
+                .data_operation_requests
+                .try_send(DataOperationWork::Diagnostics {
                     job_id,
                     destination,
                 })
@@ -1773,13 +1796,14 @@ fn run_metadata_worker(
 
 fn spawn_data_operation_worker(
     store: Arc<Mutex<SqliteStore>>,
+    data_root: PathBuf,
     requests: Receiver<DataOperationWork>,
     stop: Receiver<()>,
     results: Arc<Mutex<VecDeque<DataOperationResult>>>,
 ) -> Result<JoinHandle<()>, CompositionError> {
     thread::Builder::new()
         .name("openmanic-data-operations".to_owned())
-        .spawn(move || run_data_operation_worker(store, requests, stop, results))
+        .spawn(move || run_data_operation_worker(store, data_root, requests, stop, results))
         .map_err(|_| CompositionError::Runtime)
 }
 
@@ -1789,6 +1813,7 @@ fn spawn_data_operation_worker(
 )]
 fn run_data_operation_worker(
     store: Arc<Mutex<SqliteStore>>,
+    data_root: PathBuf,
     requests: Receiver<DataOperationWork>,
     stop: Receiver<()>,
     results: Arc<Mutex<VecDeque<DataOperationResult>>>,
@@ -1847,6 +1872,16 @@ fn run_data_operation_worker(
                     },
                     |()| DataOperationResult::BackedUp { job_id },
                 ),
+            DataOperationWork::Diagnostics {
+                job_id,
+                destination,
+            } => export_diagnostics_bundle(&data_root, &destination).map_or_else(
+                |_| DataOperationResult::Failed {
+                    job_id,
+                    operation: "Diagnostics export",
+                },
+                |_| DataOperationResult::DiagnosticsExported { job_id },
+            ),
         };
         retain_data_operation_result(&results, result);
     }
@@ -2943,6 +2978,7 @@ struct VerticalSliceApp {
     export_destination: String,
     import_source: String,
     backup_destination: String,
+    diagnostics_destination: String,
     export_includes_titles: bool,
     data_operation_message: Option<String>,
     jobs: JobsController,
@@ -3003,7 +3039,8 @@ impl VerticalSlice {
             UI_OUTBOUND_CAPACITY,
         )
         .map_err(|_| CompositionError::Runtime)?;
-        let (mut runtime, snapshots, calendar_snapshots) = RuntimeResources::start(store)?;
+        let (mut runtime, snapshots, calendar_snapshots) =
+            RuntimeResources::start(store, bootstrap.data_root().path().to_path_buf())?;
         #[cfg(windows)]
         runtime.start_windows(&instance_owner)?;
         let Some(initial_range) = day_range(0) else {
@@ -3085,6 +3122,7 @@ impl VerticalSlice {
             export_destination: String::new(),
             import_source: String::new(),
             backup_destination: String::new(),
+            diagnostics_destination: String::new(),
             export_includes_titles: false,
             data_operation_message: None,
             jobs: JobsController::default(),
@@ -3181,6 +3219,12 @@ impl VerticalSliceApp {
                     job_id,
                     "Backup",
                     "Backup finished and was verified before completion.".to_owned(),
+                    JobState::Succeeded,
+                ),
+                DataOperationResult::DiagnosticsExported { job_id } => (
+                    job_id,
+                    "Diagnostics export",
+                    "Privacy-safe diagnostics bundle created.".to_owned(),
                     JobState::Succeeded,
                 ),
                 DataOperationResult::Failed { job_id, operation } => (
@@ -3837,6 +3881,35 @@ impl VerticalSliceApp {
                 "Backup queued. The existing local data remains unchanged.".to_owned()
             } else {
                 "Backup could not be queued. Try again after current work finishes.".to_owned()
+            });
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label("Advanced diagnostics");
+        ui.label("The bundle excludes application names, file paths, and window titles.");
+        ui.horizontal(|ui| {
+            ui.label("Create diagnostics bundle at:");
+            ui.text_edit_singleline(&mut self.diagnostics_destination);
+        });
+        if ui
+            .add_enabled(
+                !self.diagnostics_destination.trim().is_empty(),
+                eframe::egui::Button::new("Create diagnostics bundle"),
+            )
+            .clicked()
+        {
+            let job_id = next_data_operation_id();
+            let queued = self
+                .runtime
+                .try_submit_diagnostics(job_id, PathBuf::from(self.diagnostics_destination.trim()));
+            if queued {
+                self.observe_data_job(job_id, "Diagnostics export", &JobState::Running);
+            }
+            self.data_operation_message = Some(if queued {
+                "Diagnostics export queued.".to_owned()
+            } else {
+                "Diagnostics export could not be queued. Try again after current work finishes."
+                    .to_owned()
             });
         }
         self.render_data_jobs(ui);
