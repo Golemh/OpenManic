@@ -3,9 +3,30 @@
 ## Resume point
 
 - Branch: `codex/openmanic-mvp-implementation-continuation`
-- Start from the branch tip, not an old task worktree.
+- Start from branch tip `55ae7a9` (`docs: add phase 6 diagnostics evidence`), not an old task worktree.
 - The implementation ledger at `docs/gui/implementation/task-ledger.md` is the ownership and integration record.
 - The canonical next-work authority is `docs/gui/spec/implementation-plan.md`.
+
+## Active resume: Phase 6 gate
+
+Phase 6 implementation is integrated through `2661fd1` and its non-destructive Windows evidence
+is recorded through `55ae7a9`. The Settings screen exposes CSV import/export, verified backup,
+restore, data-location move, diagnostics, and named job presentation; CSV cancellation is wired
+through the UI, worker, and transactional storage merge. The consolidated MSVC quality gate passed:
+
+```powershell
+$env:CARGO_TARGET_DIR='target-msvc'; cargo +stable-x86_64-pc-windows-msvc xtask quality
+```
+
+Live Windows evidence confirms the scrollable Settings surface, a completed verified backup, a
+completed privacy-safe diagnostics export, and explicit restore/move confirmation scopes. Actual
+restore and move execution has not occurred, because both may replace or relocate data. Explorer
+tray recovery, autostart repair, and portable-artifact replacement are also still unobserved.
+
+On the next user continuation of phases, ask exactly whether they want to run the restore and
+move test against isolated throwaway data roots. Do not execute either destructive action unless
+the user explicitly confirms that test at that time. Keep the G6 limitation in the ledger until
+the resulting evidence is recorded.
 
 ## User-directed execution cadence
 
@@ -47,7 +68,9 @@ The real-machine Windows lifecycle checklist remains deferred to the UI/UX-compl
 
 ## Next phase
 
-Proceed with Phase 4 in the canonical order: OM-400 through OM-402 for Overview, and OM-410 through OM-412 for Calendar. Start from this branch tip and preserve the ledger's one-writer/disjoint-path rule.
+Before advancing to the next canonical phase, follow the explicit Phase 6 continuation prompt
+above for the restore/move test. Then use `docs/gui/spec/implementation-plan.md` to select the
+next incomplete canonical work and preserve the ledger's one-writer/disjoint-path rule.
 
 ## Workspace hygiene
 
