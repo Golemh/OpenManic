@@ -2374,6 +2374,13 @@ impl VerticalSliceApp {
                 TimelineRenderAction::ScheduleRequested { range } => {
                     self.schedule_draft = Some(ScheduleDraft::new(range));
                 }
+                TimelineRenderAction::OpenCategories { application_id } => {
+                    self.selected_category_applications.clear();
+                    self.selected_category_applications.insert(application_id);
+                    self.app
+                        .controller_mut()
+                        .reduce_local(UiAction::Navigate(openmanic_ui_egui::Route::Categories));
+                }
             }
         }
         self.render_schedule_editor(ui);

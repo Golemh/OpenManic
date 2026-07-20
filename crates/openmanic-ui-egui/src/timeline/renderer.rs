@@ -12,7 +12,7 @@ use eframe::egui::{
 use openmanic_application::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, TimelineSnapshot,
 };
-use openmanic_domain::{ActivityState, HalfOpenInterval};
+use openmanic_domain::{ActivityState, ApplicationId, HalfOpenInterval};
 
 use super::{
     PaintFill, PaintPrimitive, TimelineBand, TimelineDetail, TimelineDetailValue, TimelineGesture,
@@ -55,6 +55,11 @@ pub enum TimelineRenderAction {
     ScheduleRequested {
         /// Exact provisional schedule boundaries.
         range: HalfOpenInterval,
+    },
+    /// Opens the selected application's category and privacy controls.
+    OpenCategories {
+        /// Stable application selected from an immutable timeline detail.
+        application_id: ApplicationId,
     },
 }
 
@@ -371,6 +376,15 @@ impl TimelineRenderer {
                 && ui.button(label).clicked()
             {
                 output.actions.push(TimelineRenderAction::Today(action));
+            }
+            if let TimelineDetailValue::Application(ApplicationBandValue::Application(
+                application_id,
+            )) = detail.value()
+                && ui.button("Edit this application in Categories").clicked()
+            {
+                output
+                    .actions
+                    .push(TimelineRenderAction::OpenCategories { application_id });
             }
         });
     }
