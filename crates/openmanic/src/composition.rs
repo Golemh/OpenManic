@@ -2215,7 +2215,13 @@ const fn schedule_status_label(status: &MutationStatus) -> &'static str {
     match status {
         MutationStatus::Pending => "Saving schedule…",
         MutationStatus::Confirmed { .. } => "Schedule saved.",
-        MutationStatus::Rejected { .. } => "Schedule was not saved. Check that it does not overlap another schedule.",
+        MutationStatus::Rejected {
+            reason: openmanic_application::MutationRejectionReason::Conflict,
+        } => "Schedule was not saved because it overlaps another schedule.",
+        MutationStatus::Rejected {
+            reason: openmanic_application::MutationRejectionReason::RevisionConflict,
+        } => "Schedule changed elsewhere. Review it and try again.",
+        MutationStatus::Rejected { .. } => "Schedule was not saved. Review the schedule details and try again.",
     }
 }
 

@@ -292,7 +292,7 @@ where
             ScheduleCommand::Create(snapshot) => match self.persistence.create_schedule(snapshot) {
                 Ok(revision) => ScheduleMutation::confirmed(command, revision, snapshot.clone()),
                 Err(SchedulePersistenceError::Conflict) => {
-                    ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
+                    ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
                 }
                 Err(SchedulePersistenceError::RevisionConflict) => {
                     ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
@@ -311,7 +311,7 @@ where
                 match self.persistence.replace_schedule(snapshot, expected_revision) {
                     Ok(revision) => ScheduleMutation::confirmed(command, revision, snapshot.clone()),
                     Err(SchedulePersistenceError::Conflict) => {
-                        ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
+                        ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
                     }
                     Err(SchedulePersistenceError::RevisionConflict) => {
                         ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
@@ -335,7 +335,7 @@ where
                         ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
                     }
                     Err(SchedulePersistenceError::Conflict) => {
-                        ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
+                        ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
                     }
                     Err(SchedulePersistenceError::Failed) => ScheduleMutation::rejected(
                         command,
@@ -505,7 +505,7 @@ where
         match self.persistence.replace_schedule(&replacement, expected_revision) {
             Ok(revision) => ScheduleMutation::confirmed(command, revision, replacement),
             Err(SchedulePersistenceError::Conflict) => {
-                ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
+                ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
             }
             Err(SchedulePersistenceError::RevisionConflict) => {
                 ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
@@ -528,7 +528,7 @@ where
                 ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
             }
             Err(SchedulePersistenceError::Conflict) => {
-                ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
+                ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
             }
             Err(SchedulePersistenceError::Failed) => {
                 ScheduleMutation::rejected(command, MutationRejectionReason::PersistenceFailure)

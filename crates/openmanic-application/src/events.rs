@@ -156,6 +156,8 @@ impl MutationRejection {
 pub enum MutationRejectionReason {
     /// The requested value failed domain or application validation.
     Validation,
+    /// The requested mutation conflicts with authoritative stored data.
+    Conflict,
     /// The command's expected entity revision no longer matched persisted state.
     RevisionConflict,
     /// Persistence could not commit the authoritative mutation.
@@ -200,6 +202,7 @@ impl fmt::Display for MutationRejectionReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let description = match self {
             Self::Validation => "validation failed",
+            Self::Conflict => "the mutation conflicts with stored data",
             Self::RevisionConflict => "the entity revision changed",
             Self::PersistenceFailure => "persistence could not commit the mutation",
             Self::ServiceUnavailable => "the application service is unavailable",
