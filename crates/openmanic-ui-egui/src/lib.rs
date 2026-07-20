@@ -16,9 +16,9 @@ mod app;
 mod calendar;
 mod controller;
 mod distribution;
+mod jobs;
 mod layout;
 mod layout_editor;
-mod jobs;
 mod model;
 mod overview;
 mod reducer;
@@ -44,12 +44,12 @@ pub use distribution::{
     DistributionBuildError, DistributionContribution, DistributionGrouping, DistributionSnapshot,
     render_distribution_snapshot,
 };
-pub use layout::{DashboardColumnCount, DashboardPlacement, DashboardReflow, reflow_dashboard};
-pub use layout_editor::{LayoutEditAction, LayoutEditEffect, LayoutEditor};
 pub use jobs::{
     DestructiveConfirmation, JobDescriptor, JobPresentation, JobPresentationState, JobProgress,
     JobsAction, JobsController, JobsEffect, JobsViewModel,
 };
+pub use layout::{DashboardColumnCount, DashboardPlacement, DashboardReflow, reflow_dashboard};
+pub use layout_editor::{LayoutEditAction, LayoutEditEffect, LayoutEditor};
 pub use model::{
     DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
     SnapshotReception, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext, UiAction,
@@ -59,13 +59,13 @@ pub use overview::{
     OverviewAction, OverviewController, OverviewDataState, OverviewEffect,
     OverviewPresentedAllocation, OverviewSavedViewItem, OverviewViewModel,
 };
-pub use shutdown::{
-    ShutdownAction, ShutdownController, ShutdownEffect, ShutdownFailureViewModel,
-    render_shutdown_failure,
-};
 pub use settings::{
     SettingsAction, SettingsAdvancedDraft, SettingsBasicDraft, SettingsController, SettingsEffect,
     TITLE_COLLECTION_DISCLOSURE,
+};
+pub use shutdown::{
+    ShutdownAction, ShutdownController, ShutdownEffect, ShutdownFailureViewModel,
+    render_shutdown_failure,
 };
 pub use theme::{
     BuiltInThemeMode, ResolvedTheme, ThemeController, ThemeResolutionError, ThemeTokens,

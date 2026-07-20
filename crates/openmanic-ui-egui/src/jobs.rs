@@ -394,7 +394,11 @@ mod tests {
         controller.observe_job(
             descriptor(8),
             &JobState::Running,
-            Some(JobProgress::new(4, Some(10), Some("Writing CSV".to_owned()))),
+            Some(JobProgress::new(
+                4,
+                Some(10),
+                Some("Writing CSV".to_owned()),
+            )),
         );
         controller.observe_job(descriptor(3), &JobState::Cancelling, None);
 
@@ -403,16 +407,32 @@ mod tests {
         assert_eq!(view.jobs()[0].job_id(), JobId::new(3));
         assert_eq!(view.jobs()[1].name(), "Export 8");
         assert_eq!(view.jobs()[1].scope(), "1 Jan 2026 through 31 Jan 2026");
-        assert_eq!(view.jobs()[1].progress().map(JobProgress::completed), Some(4));
-        assert!(matches!(view.jobs()[0].state(), JobPresentationState::Cancelling));
+        assert_eq!(
+            view.jobs()[1].progress().map(JobProgress::completed),
+            Some(4)
+        );
+        assert!(matches!(
+            view.jobs()[0].state(),
+            JobPresentationState::Cancelling
+        ));
     }
 
     #[test]
     fn retry_and_dismiss_are_limited_to_recoverable_terminal_states() {
         let mut controller = JobsController::default();
         controller.observe_job(descriptor(5), &JobState::Running, None);
-        assert_eq!(controller.apply(JobsAction::Retry { job_id: JobId::new(5) }), None);
-        assert_eq!(controller.apply(JobsAction::Dismiss { job_id: JobId::new(5) }), None);
+        assert_eq!(
+            controller.apply(JobsAction::Retry {
+                job_id: JobId::new(5)
+            }),
+            None
+        );
+        assert_eq!(
+            controller.apply(JobsAction::Dismiss {
+                job_id: JobId::new(5)
+            }),
+            None
+        );
 
         controller.observe_job(
             descriptor(5),
@@ -425,10 +445,19 @@ mod tests {
             None,
         );
         assert_eq!(
-            controller.apply(JobsAction::Retry { job_id: JobId::new(5) }),
-            Some(JobsEffect::RetryRequested { job_id: JobId::new(5) })
+            controller.apply(JobsAction::Retry {
+                job_id: JobId::new(5)
+            }),
+            Some(JobsEffect::RetryRequested {
+                job_id: JobId::new(5)
+            })
         );
-        assert_eq!(controller.apply(JobsAction::Dismiss { job_id: JobId::new(5) }), None);
+        assert_eq!(
+            controller.apply(JobsAction::Dismiss {
+                job_id: JobId::new(5)
+            }),
+            None
+        );
         assert!(controller.view_model().jobs().is_empty());
     }
 
@@ -442,10 +471,15 @@ mod tests {
             "Restore".to_owned(),
         );
         assert_eq!(
-            controller.apply(JobsAction::RequestDestructiveConfirmation(confirmation.clone())),
+            controller.apply(JobsAction::RequestDestructiveConfirmation(
+                confirmation.clone()
+            )),
             None
         );
-        assert_eq!(controller.view_model().destructive_confirmation(), Some(&confirmation));
+        assert_eq!(
+            controller.view_model().destructive_confirmation(),
+            Some(&confirmation)
+        );
         assert_eq!(
             controller.apply(JobsAction::ConfirmDestructive {
                 action_id: "another-action".to_owned(),

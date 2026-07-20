@@ -1,18 +1,20 @@
 //! Serialized authoritative writes and checkpoint recovery for the local store.
 
-use std::{fs, path::{Path, PathBuf}};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use openmanic_application::{
     AcceptedWindowTitle, ApplicationError, ApplicationPort, CatalogPersistence,
-    CatalogPersistenceError, DataRevision, EntityRevision, FocusKind, FocusPersistence,
-    FocusPersistenceError, FocusSnapshot, LayoutPersistence, LayoutPersistenceError,
-    LayoutSnapshot, PortFailureReason, SavedViewId, SavedViewPersistence,
-    SavedViewPersistenceError, SavedViewSnapshot, ScheduleId, SchedulePersistence,
-    SchedulePersistenceError, ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
-    TrackingPersistenceSubmit, CsvImportRequest, ImportFailure, ImportScopeOutcome,
-    repeating_schedule_rules_conflict,
+    CatalogPersistenceError, CsvImportRequest, DataRevision, EntityRevision, FocusKind,
+    FocusPersistence, FocusPersistenceError, FocusSnapshot, ImportFailure, ImportScopeOutcome,
+    LayoutPersistence, LayoutPersistenceError, LayoutSnapshot, PortFailureReason, SavedViewId,
+    SavedViewPersistence, SavedViewPersistenceError, SavedViewSnapshot, ScheduleId,
+    SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot, SettingsPersistence,
+    SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode, TrackingPersistenceIntent,
+    TrackingPersistencePort, TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
     schedule_rule_conflicts_with_intervals,
-    SettingsPersistence, SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
@@ -21,11 +23,11 @@ use openmanic_domain::{
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
+use crate::backup::{create_user_backup, restore_user_backup};
 use crate::repository::{
     database_error, decode_layout_document, encode_layout_definition, encode_saved_view_definition,
     load_saved_views, read_schedule_snapshot,
 };
-use crate::backup::{create_user_backup, restore_user_backup};
 use crate::{
     ConnectionConfiguration, SqliteReadSession, SqliteWriter, StorageError, StoreOpenOptions,
 };
@@ -102,6 +104,24 @@ pub struct StorageWriter {
     writer: SqliteWriter,
 }
 
+type StoredSettingsRow = (
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    Option<String>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+);
+
 impl StorageWriter {
     /// Loads the complete authoritative settings singleton when it exists.
     ///
@@ -109,30 +129,70 @@ impl StorageWriter {
     ///
     /// Returns [`StorageError`] for malformed persisted settings values or read failures.
     pub fn settings_snapshot(&mut self) -> Result<Option<SettingsSnapshot>, StorageError> {
-        let row: Option<(i64, i64, i64, i64, i64, i64, i64, i64, Option<String>, i64, i64, i64, i64, i64, i64)> = self.writer.connection_mut().query_row(
+        let row: Option<StoredSettingsRow> = self.writer.connection_mut().query_row(
             "SELECT first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision FROM user_settings WHERE singleton_id = 1",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?)),
         ).optional().map_err(|error| database_error(&error, "read settings snapshot"))?;
-        row.map(|(consent, tracking, login, close, idle_seconds, idle_policy, titles, time_zone, manual_zone, theme, density, notifications, sounds, tray_acknowledged, revision)| {
-            Ok(SettingsSnapshot::new(
-                u32::try_from(consent).map_err(|_| StorageError::InvalidStoredValue { field: "settings consent revision" })?,
-                setting_bool(tracking, "settings tracking start")?,
-                setting_bool(login, "settings login start")?,
-                setting_bool(close, "settings close behavior")?,
-                u32::try_from(idle_seconds).map_err(|_| StorageError::InvalidStoredValue { field: "settings idle threshold" })?,
-                u16::try_from(idle_policy).map_err(|_| StorageError::InvalidStoredValue { field: "settings idle policy" })?,
-                setting_bool(titles, "settings title collection")?,
-                u8::try_from(time_zone).map_err(|_| StorageError::InvalidStoredValue { field: "settings time zone mode" })?,
+        row.map(
+            |(
+                consent,
+                tracking,
+                login,
+                close,
+                idle_seconds,
+                idle_policy,
+                titles,
+                time_zone,
                 manual_zone,
-                SettingsThemeMode::try_from_code(u8::try_from(theme).map_err(|_| StorageError::InvalidStoredValue { field: "settings theme mode" })?).map_err(|_| StorageError::InvalidStoredValue { field: "settings theme mode" })?,
-                u16::try_from(density).map_err(|_| StorageError::InvalidStoredValue { field: "settings density" })?,
-                setting_bool(notifications, "settings notifications")?,
-                setting_bool(sounds, "settings focus sounds")?,
-                setting_bool(tray_acknowledged, "settings tray acknowledgement")?,
-                EntityRevision::new(u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue { field: "settings revision" })?),
-            ))
-        }).transpose()
+                theme,
+                density,
+                notifications,
+                sounds,
+                tray_acknowledged,
+                revision,
+            )| {
+                Ok(SettingsSnapshot::new(
+                    u32::try_from(consent).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "settings consent revision",
+                    })?,
+                    setting_bool(tracking, "settings tracking start")?,
+                    setting_bool(login, "settings login start")?,
+                    setting_bool(close, "settings close behavior")?,
+                    u32::try_from(idle_seconds).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "settings idle threshold",
+                    })?,
+                    u16::try_from(idle_policy).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "settings idle policy",
+                    })?,
+                    setting_bool(titles, "settings title collection")?,
+                    u8::try_from(time_zone).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "settings time zone mode",
+                    })?,
+                    manual_zone,
+                    SettingsThemeMode::try_from_code(u8::try_from(theme).map_err(|_| {
+                        StorageError::InvalidStoredValue {
+                            field: "settings theme mode",
+                        }
+                    })?)
+                    .map_err(|_| StorageError::InvalidStoredValue {
+                        field: "settings theme mode",
+                    })?,
+                    u16::try_from(density).map_err(|_| StorageError::InvalidStoredValue {
+                        field: "settings density",
+                    })?,
+                    setting_bool(notifications, "settings notifications")?,
+                    setting_bool(sounds, "settings focus sounds")?,
+                    setting_bool(tray_acknowledged, "settings tray acknowledgement")?,
+                    EntityRevision::new(u64::try_from(revision).map_err(|_| {
+                        StorageError::InvalidStoredValue {
+                            field: "settings revision",
+                        }
+                    })?),
+                ))
+            },
+        )
+        .transpose()
     }
     /// Returns the verified SQLite configuration held by this serialized writer.
     #[must_use]
@@ -535,14 +595,19 @@ impl StorageWriter {
     ///
     /// Returns [`StorageError`] if the local source cannot be read or SQLite cannot persist the
     /// batch, job, failures, or accepted records.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one transaction deliberately owns the complete CSV import lifecycle"
+    )]
     pub fn import_csv(
         &mut self,
         request: &CsvImportRequest,
         completed_at_utc: UtcMicros,
     ) -> Result<ImportScopeOutcome, StorageError> {
-        let bytes = fs::read(request.source().path()).map_err(|_| StorageError::DataOperationFailed {
-            operation: "read CSV import",
-        })?;
+        let bytes =
+            fs::read(request.source().path()).map_err(|_| StorageError::DataOperationFailed {
+                operation: "read CSV import",
+            })?;
         let records = parse_csv_records(&bytes)?;
         let fingerprint = csv_fingerprint(&bytes);
         let transaction = self.begin_writer_transaction("begin CSV import")?;
@@ -575,10 +640,18 @@ impl StorageWriter {
                  completed_utc_us = NULL, error_report_reference = NULL",
             params![request.batch_id().as_bytes().as_slice(), fingerprint.as_slice(), completed_at_utc.get()],
         ).map_err(|error| database_error(&error, "create CSV import batch"))?;
-        let batch_row_id: i64 = transaction.query_row(
-            "SELECT id FROM import_batch WHERE public_id = ?1", [request.batch_id().as_bytes().as_slice()], |row| row.get(0),
-        ).map_err(|error| database_error(&error, "find CSV import batch"))?;
-        transaction.execute("DELETE FROM import_error WHERE import_batch_id = ?1", [batch_row_id])
+        let batch_row_id: i64 = transaction
+            .query_row(
+                "SELECT id FROM import_batch WHERE public_id = ?1",
+                [request.batch_id().as_bytes().as_slice()],
+                |row| row.get(0),
+            )
+            .map_err(|error| database_error(&error, "find CSV import batch"))?;
+        transaction
+            .execute(
+                "DELETE FROM import_error WHERE import_batch_id = ?1",
+                [batch_row_id],
+            )
             .map_err(|error| database_error(&error, "clear CSV import errors"))?;
 
         let mut parsed = 0_u64;
@@ -594,36 +667,69 @@ impl StorageWriter {
                     accepted = accepted.saturating_add(1);
                 }
                 Err((field, code)) => {
-                    insert_import_failure(&transaction, batch_row_id, ImportFailure::try_new(record.line as u64, field.map(str::to_owned), code).expect("fixed import failure is valid"))?;
+                    let failure = ImportFailure::try_new(
+                        record.line.cast_unsigned(),
+                        field.map(str::to_owned),
+                        code,
+                    )
+                    .map_err(|_| StorageError::DataOperationFailed {
+                        operation: "create CSV import failure",
+                    })?;
+                    insert_import_failure(&transaction, batch_row_id, &failure)?;
                 }
             }
         }
         let revision = next_revision(&transaction)?;
         merge_csv_stage(&transaction, revision, batch_row_id)?;
-        let rejected: u64 = transaction.query_row(
-            "SELECT COUNT(*) FROM import_error WHERE import_batch_id = ?1",
-            [batch_row_id],
-            |row| row.get::<_, i64>(0),
-        ).map_err(|error| database_error(&error, "count CSV import failures"))?
+        let rejected: u64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM import_error WHERE import_batch_id = ?1",
+                [batch_row_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| database_error(&error, "count CSV import failures"))?
             .try_into()
-            .map_err(|_| StorageError::InvalidStoredValue { field: "CSV rejected count" })?;
+            .map_err(|_| StorageError::InvalidStoredValue {
+                field: "CSV rejected count",
+            })?;
         accepted = parsed.saturating_sub(rejected);
         // An accepted row has either been upserted, inserted, or was already present as the
         // exact idempotent tuple. Every rejected row is retained in `import_error` above.
         let committed = accepted;
-        transaction.execute(
-            "UPDATE import_batch SET state = 2, parsed_count = ?2, accepted_count = ?3,
+        transaction
+            .execute(
+                "UPDATE import_batch SET state = 2, parsed_count = ?2, accepted_count = ?3,
                  rejected_count = ?4, committed_count = ?5, completed_utc_us = ?6 WHERE id = ?1",
-            params![batch_row_id, as_i64(parsed, "CSV parsed count")?, as_i64(accepted, "CSV accepted count")?, as_i64(rejected, "CSV rejected count")?, as_i64(committed, "CSV committed count")?, completed_at_utc.get()],
-        ).map_err(|error| database_error(&error, "complete CSV import batch"))?;
-        transaction.execute(
-            "UPDATE job_record SET state = 2, progress_current = ?2, progress_total = ?2,
+                params![
+                    batch_row_id,
+                    as_i64(parsed, "CSV parsed count")?,
+                    as_i64(accepted, "CSV accepted count")?,
+                    as_i64(rejected, "CSV rejected count")?,
+                    as_i64(committed, "CSV committed count")?,
+                    completed_at_utc.get()
+                ],
+            )
+            .map_err(|error| database_error(&error, "complete CSV import batch"))?;
+        transaction
+            .execute(
+                "UPDATE job_record SET state = 2, progress_current = ?2, progress_total = ?2,
                  safe_checkpoint = 'merged', completed_utc_us = ?3 WHERE public_id = ?1",
-            params![job_public_id(request.job_id().get()).as_slice(), as_i64(parsed, "CSV progress")?, completed_at_utc.get()],
-        ).map_err(|error| database_error(&error, "complete CSV import job"))?;
+                params![
+                    job_public_id(request.job_id().get()).as_slice(),
+                    as_i64(parsed, "CSV progress")?,
+                    completed_at_utc.get()
+                ],
+            )
+            .map_err(|error| database_error(&error, "complete CSV import job"))?;
         update_revision(&transaction, revision)?;
-        transaction.commit().map_err(|error| database_error(&error, "commit CSV import"))?;
-        ImportScopeOutcome::try_new(parsed, accepted, rejected, committed).map_err(|_| StorageError::InvalidStoredValue { field: "CSV import counts" })
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit CSV import"))?;
+        ImportScopeOutcome::try_new(parsed, accepted, rejected, committed).map_err(|_| {
+            StorageError::InvalidStoredValue {
+                field: "CSV import counts",
+            }
+        })
     }
 
     /// Stores an application's current category association and observation bounds atomically.
@@ -1235,7 +1341,8 @@ impl LayoutPersistence for &mut StorageWriter {
 
 impl SettingsPersistence for StorageWriter {
     fn load_settings(&mut self) -> Result<Option<SettingsSnapshot>, SettingsPersistenceError> {
-        self.settings_snapshot().map_err(settings_persistence_error)
+        self.settings_snapshot()
+            .map_err(|error| settings_persistence_error(&error))
     }
 
     fn replace_settings(
@@ -1270,7 +1377,7 @@ impl SettingsPersistence for StorageWriter {
             .ok_or(SettingsPersistenceError::Failed)?;
         let revision = next_revision(&transaction).map_err(|_| SettingsPersistenceError::Failed)?;
         let parameters = params![
-            i64::try_from(settings.consent_revision()).map_err(|_| SettingsPersistenceError::Failed)?,
+            i64::from(settings.consent_revision()),
             i64::from(u8::from(settings.start_tracking_automatically())),
             i64::from(u8::from(settings.start_at_login())),
             i64::from(u8::from(settings.close_to_tray())),
@@ -1323,7 +1430,7 @@ impl SettingsPersistence for &mut StorageWriter {
     }
 }
 
-fn settings_persistence_error(error: StorageError) -> SettingsPersistenceError {
+fn settings_persistence_error(error: &StorageError) -> SettingsPersistenceError {
     match error {
         StorageError::InvalidStoredValue { .. } => SettingsPersistenceError::InvalidDocument,
         _ => SettingsPersistenceError::Failed,
@@ -2401,104 +2508,258 @@ fn parse_csv_records(bytes: &[u8]) -> Result<Vec<CsvRecord>, StorageError> {
             }
             '\n' if !quoted => {
                 fields.push(std::mem::take(&mut field));
-                records.push(CsvRecord { line: record_line, fields: std::mem::take(&mut fields) });
+                records.push(CsvRecord {
+                    line: record_line,
+                    fields: std::mem::take(&mut fields),
+                });
                 line += 1;
                 record_line = line;
             }
-            '\n' => { field.push(character); line += 1; }
+            '\n' => {
+                field.push(character);
+                line += 1;
+            }
             '\r' if !quoted && characters.peek() == Some(&'\n') => {}
             other => field.push(other),
         }
     }
-    if quoted { return Err(StorageError::DataOperationFailed { operation: "parse CSV import" }); }
+    if quoted {
+        return Err(StorageError::DataOperationFailed {
+            operation: "parse CSV import",
+        });
+    }
     if !field.is_empty() || !fields.is_empty() {
         fields.push(field);
-        records.push(CsvRecord { line: record_line, fields });
+        records.push(CsvRecord {
+            line: record_line,
+            fields,
+        });
     }
-    if records.first().is_none_or(|record| record.fields.first().map(String::as_str) != Some("record_type")) {
-        return Err(StorageError::DataOperationFailed { operation: "validate CSV import header" });
+    if records
+        .first()
+        .is_none_or(|record| record.fields.first().map(String::as_str) != Some("record_type"))
+    {
+        return Err(StorageError::DataOperationFailed {
+            operation: "validate CSV import header",
+        });
     }
     Ok(records)
 }
 
 fn validate_csv_record(record: &CsvRecord) -> Result<&[String], (Option<&str>, &'static str)> {
     let fields = record.fields.as_slice();
-    if fields.len() != 12 { return Err((None, "invalid_column_count")); }
-    if fields[1] != "1" { return Err((Some("format_version"), "unsupported_format_version")); }
+    if fields.len() != 12 {
+        return Err((None, "invalid_column_count"));
+    }
+    if fields[1] != "1" {
+        return Err((Some("format_version"), "unsupported_format_version"));
+    }
     match fields[0].as_str() {
-        "category" => if hex_id_bytes(&fields[2]).is_some() && !fields[11].trim().is_empty() { Ok(fields) } else { Err((Some("stable_id"), "invalid_category")) },
+        "category" => {
+            if hex_id_bytes(&fields[2]).is_some() && !fields[11].trim().is_empty() {
+                Ok(fields)
+            } else {
+                Err((Some("stable_id"), "invalid_category"))
+            }
+        }
         "application" => {
-            if hex_id_bytes(&fields[2]).is_none() || hex_id_bytes(&fields[9]).is_none() || (!fields[10].is_empty() && hex_id_bytes(&fields[10]).is_none()) || fields[11].trim().is_empty() {
+            if hex_id_bytes(&fields[2]).is_none()
+                || hex_id_bytes(&fields[9]).is_none()
+                || (!fields[10].is_empty() && hex_id_bytes(&fields[10]).is_none())
+                || fields[11].trim().is_empty()
+            {
                 Err((Some("stable_id"), "invalid_application"))
-            } else { Ok(fields) }
+            } else {
+                Ok(fields)
+            }
         }
         "activity" => {
             let times_ok = fields[5].parse::<i64>().is_ok() && fields[6].parse::<i64>().is_ok();
-            let codes_ok = fields[7].parse::<i64>().is_ok_and(|code| (0..=6).contains(&code)) && fields[8].parse::<i64>().is_ok_and(|code| (0..=14).contains(&code));
+            let codes_ok = fields[7]
+                .parse::<i64>()
+                .is_ok_and(|code| (0..=6).contains(&code))
+                && fields[8]
+                    .parse::<i64>()
+                    .is_ok_and(|code| (0..=14).contains(&code));
             let application_ok = fields[9].is_empty() || hex_id_bytes(&fields[9]).is_some();
-            if times_ok && codes_ok && application_ok && activity_tracker_id(&fields[2]).is_some() { Ok(fields) } else { Err((Some("activity"), "invalid_activity")) }
+            if times_ok && codes_ok && application_ok && activity_tracker_id(&fields[2]).is_some() {
+                Ok(fields)
+            } else {
+                Err((Some("activity"), "invalid_activity"))
+            }
         }
         _ => Err((Some("record_type"), "unsupported_record_type")),
     }
 }
 
-fn insert_import_failure(transaction: &Transaction<'_>, batch_row_id: i64, failure: ImportFailure) -> Result<(), StorageError> {
+fn insert_import_failure(
+    transaction: &Transaction<'_>,
+    batch_row_id: i64,
+    failure: &ImportFailure,
+) -> Result<(), StorageError> {
+    let source_line =
+        i64::try_from(failure.line()).map_err(|_| StorageError::InvalidStoredValue {
+            field: "CSV import failure line",
+        })?;
     transaction.execute(
         "INSERT INTO import_error(import_batch_id, source_line, field_name, error_code, summary) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![batch_row_id, failure.line() as i64, failure.field(), failure.code(), "CSV row rejected"],
+        params![batch_row_id, source_line, failure.field(), failure.code(), "CSV row rejected"],
     ).map_err(|error| database_error(&error, "record CSV import error"))?;
     Ok(())
 }
 
-fn merge_csv_stage(transaction: &Transaction<'_>, revision: DataRevision, batch_row_id: i64) -> Result<(), StorageError> {
-    let mut categories = transaction.prepare("SELECT stable_id, display_name FROM import_stage_v1 WHERE record_type = 'category'")
+#[expect(
+    clippy::too_many_lines,
+    reason = "the transactional category, application, then activity merge order is deliberately explicit"
+)]
+fn merge_csv_stage(
+    transaction: &Transaction<'_>,
+    revision: DataRevision,
+    batch_row_id: i64,
+) -> Result<(), StorageError> {
+    let mut categories = transaction
+        .prepare(
+            "SELECT stable_id, display_name FROM import_stage_v1 WHERE record_type = 'category'",
+        )
         .map_err(|error| database_error(&error, "read staged CSV categories"))?;
-    let categories = categories.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+    let categories = categories
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| database_error(&error, "iterate staged CSV categories"))?;
     for category in categories {
-        let (id, name) = category.map_err(|error| database_error(&error, "read staged CSV category"))?;
-        transaction.execute("INSERT INTO category(public_id, display_name, archived, revision, updated_utc_us) VALUES (?1, ?2, 0, 0, 0) ON CONFLICT(public_id) DO UPDATE SET display_name = excluded.display_name", params![hex_id_bytes(&id).expect("validated staged category").as_slice(), name])
+        let (id, name) =
+            category.map_err(|error| database_error(&error, "read staged CSV category"))?;
+        let category_id = hex_id_bytes(&id).ok_or(StorageError::DataOperationFailed {
+            operation: "decode staged CSV category",
+        })?;
+        transaction.execute("INSERT INTO category(public_id, display_name, archived, revision, updated_utc_us) VALUES (?1, ?2, 0, 0, 0) ON CONFLICT(public_id) DO UPDATE SET display_name = excluded.display_name", params![category_id.as_slice(), name])
             .map_err(|error| database_error(&error, "merge CSV category"))?;
     }
     let mut applications = transaction.prepare("SELECT stable_id, category_id, display_name FROM import_stage_v1 WHERE record_type = 'application'")
         .map_err(|error| database_error(&error, "read staged CSV applications"))?;
-    let applications = applications.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))
+    let applications = applications
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
         .map_err(|error| database_error(&error, "iterate staged CSV applications"))?;
     for application in applications {
-        let (id, category, name) = application.map_err(|error| database_error(&error, "read staged CSV application"))?;
-        let category_row: Option<i64> = if category.is_empty() { None } else { transaction.query_row("SELECT id FROM category WHERE public_id = ?1", [hex_id_bytes(&category).expect("validated staged category").as_slice()], |row| row.get(0)).optional().map_err(|error| database_error(&error, "find staged CSV category"))? };
-        transaction.execute("INSERT INTO application(public_id, display_name, display_name_override, category_id, exclusion_policy, first_seen_utc_us, last_seen_utc_us, icon_digest) VALUES (?1, ?2, NULL, ?3, 0, 0, 0, NULL) ON CONFLICT(public_id) DO UPDATE SET display_name = excluded.display_name, category_id = excluded.category_id", params![hex_id_bytes(&id).expect("validated staged application").as_slice(), name, category_row])
+        let (id, category, name) =
+            application.map_err(|error| database_error(&error, "read staged CSV application"))?;
+        let category_row: Option<i64> = if category.is_empty() {
+            None
+        } else {
+            let category_id = hex_id_bytes(&category).ok_or(StorageError::DataOperationFailed {
+                operation: "decode staged CSV application category",
+            })?;
+            transaction
+                .query_row(
+                    "SELECT id FROM category WHERE public_id = ?1",
+                    [category_id.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| database_error(&error, "find staged CSV category"))?
+        };
+        let application_id = hex_id_bytes(&id).ok_or(StorageError::DataOperationFailed {
+            operation: "decode staged CSV application",
+        })?;
+        transaction.execute("INSERT INTO application(public_id, display_name, display_name_override, category_id, exclusion_policy, first_seen_utc_us, last_seen_utc_us, icon_digest) VALUES (?1, ?2, NULL, ?3, 0, 0, 0, NULL) ON CONFLICT(public_id) DO UPDATE SET display_name = excluded.display_name, category_id = excluded.category_id", params![application_id.as_slice(), name, category_row])
             .map_err(|error| database_error(&error, "merge CSV application"))?;
     }
     let mut statement = transaction.prepare(
         "SELECT source_line, stable_id, start_utc_us, end_utc_us, activity_state, activity_cause, application_id FROM import_stage_v1 WHERE record_type = 'activity' ORDER BY source_line",
     ).map_err(|error| database_error(&error, "read staged CSV activities"))?;
-    let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?)))
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
         .map_err(|error| database_error(&error, "iterate staged CSV activities"))?;
     for row in rows {
-        let (line, stable, start, end, state, cause, application) = row.map_err(|error| database_error(&error, "read staged CSV activity"))?;
-        let tracker = activity_tracker_id(&stable).expect("validated staged tracker ID");
-        let start = start.parse::<i64>().expect("validated staged start");
-        let end = end.parse::<i64>().expect("validated staged end");
-        let state = state.parse::<i64>().expect("validated staged state");
-        let cause = cause.parse::<i64>().expect("validated staged cause");
+        let (line, stable, start, end, state, cause, application) =
+            row.map_err(|error| database_error(&error, "read staged CSV activity"))?;
+        let tracker = activity_tracker_id(&stable).ok_or(StorageError::DataOperationFailed {
+            operation: "decode staged CSV activity tracker",
+        })?;
+        let start = start
+            .parse::<i64>()
+            .map_err(|_| StorageError::DataOperationFailed {
+                operation: "decode staged CSV activity start",
+            })?;
+        let end = end
+            .parse::<i64>()
+            .map_err(|_| StorageError::DataOperationFailed {
+                operation: "decode staged CSV activity end",
+            })?;
+        let state = state
+            .parse::<i64>()
+            .map_err(|_| StorageError::DataOperationFailed {
+                operation: "decode staged CSV activity state",
+            })?;
+        let cause = cause
+            .parse::<i64>()
+            .map_err(|_| StorageError::DataOperationFailed {
+                operation: "decode staged CSV activity cause",
+            })?;
         transaction.execute(
             "INSERT INTO tracker_run(public_id, started_utc_us, ended_utc_us, clean_end, platform_session_marker, adapter_version, end_evidence)
              VALUES (?1, ?2, NULL, 1, NULL, 'csv-import-v1', NULL) ON CONFLICT(public_id) DO NOTHING",
             params![tracker.as_slice(), start],
         ).map_err(|error| database_error(&error, "create CSV import tracker"))?;
-        let tracker_row: i64 = transaction.query_row("SELECT id FROM tracker_run WHERE public_id = ?1", [tracker.as_slice()], |row| row.get(0))
+        let tracker_row: i64 = transaction
+            .query_row(
+                "SELECT id FROM tracker_run WHERE public_id = ?1",
+                [tracker.as_slice()],
+                |row| row.get(0),
+            )
             .map_err(|error| database_error(&error, "find CSV import tracker"))?;
-        let application_row: Option<i64> = if application.is_empty() { None } else { transaction.query_row("SELECT id FROM application WHERE public_id = ?1", [hex_id_bytes(&application).expect("validated staged application").as_slice()], |row| row.get(0)).optional().map_err(|error| database_error(&error, "find CSV import application"))? };
+        let application_row: Option<i64> = if application.is_empty() {
+            None
+        } else {
+            let application_id =
+                hex_id_bytes(&application).ok_or(StorageError::DataOperationFailed {
+                    operation: "decode staged CSV activity application",
+                })?;
+            transaction
+                .query_row(
+                    "SELECT id FROM application WHERE public_id = ?1",
+                    [application_id.as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| database_error(&error, "find CSV import application"))?
+        };
         let exact_exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM activity_interval WHERE tracker_run_id = ?1 AND start_utc_us = ?2 AND end_utc_us = ?3 AND state = ?4 AND cause = ?5 AND application_id IS ?6)",
             params![tracker_row, start, end, state, cause, application_row], |row| row.get::<_, i64>(0),
         ).map_err(|error| database_error(&error, "check CSV activity idempotency"))? != 0;
-        if exact_exists { continue; }
+        if exact_exists {
+            continue;
+        }
         let overlap: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM activity_interval WHERE start_utc_us < ?1 AND end_utc_us > ?2)", params![end, start], |row| row.get::<_, i64>(0))
             .map_err(|error| database_error(&error, "check CSV activity overlap"))? != 0;
         if overlap {
-            insert_import_failure(transaction, batch_row_id, ImportFailure::try_new(line as u64, Some("activity".to_owned()), "overlapping_activity").expect("fixed failure valid"))?;
+            let failure = ImportFailure::try_new(
+                line.cast_unsigned(),
+                Some("activity".to_owned()),
+                "overlapping_activity",
+            )
+            .map_err(|_| StorageError::DataOperationFailed {
+                operation: "create CSV overlap failure",
+            })?;
+            insert_import_failure(transaction, batch_row_id, &failure)?;
             continue;
         }
         transaction.execute(
@@ -2510,23 +2771,42 @@ fn merge_csv_stage(transaction: &Transaction<'_>, revision: DataRevision, batch_
 }
 
 fn hex_id_bytes(value: &str) -> Option<[u8; 16]> {
-    if value.len() != 32 { return None; }
+    if value.len() != 32 {
+        return None;
+    }
     let mut result = [0; 16];
-    for (index, byte) in result.iter_mut().enumerate() { *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?; }
+    for (index, byte) in result.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
     Some(result)
 }
 
-fn activity_tracker_id(stable_id: &str) -> Option<[u8; 16]> { stable_id.split(':').next().and_then(hex_id_bytes) }
-
-fn csv_fingerprint(bytes: &[u8]) -> [u8; 16] {
-    let mut first = 0xcbf29ce484222325_u64; let mut second = 0x9e3779b97f4a7c15_u64;
-    for byte in bytes { first = (first ^ u64::from(*byte)).wrapping_mul(0x100000001b3); second = second.rotate_left(5) ^ u64::from(*byte); }
-    let mut output = [0; 16]; output[..8].copy_from_slice(&first.to_le_bytes()); output[8..].copy_from_slice(&second.to_le_bytes()); output
+fn activity_tracker_id(stable_id: &str) -> Option<[u8; 16]> {
+    stable_id.split(':').next().and_then(hex_id_bytes)
 }
 
-fn as_i64(value: u64, field: &'static str) -> Result<i64, StorageError> { i64::try_from(value).map_err(|_| StorageError::InvalidStoredValue { field }) }
+fn csv_fingerprint(bytes: &[u8]) -> [u8; 16] {
+    let mut first = 0xcbf2_9ce4_8422_2325_u64;
+    let mut second = 0x9e37_79b9_7f4a_7c15_u64;
+    for byte in bytes {
+        first = (first ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+        second = second.rotate_left(5) ^ u64::from(*byte);
+    }
+    let mut output = [0; 16];
+    output[..8].copy_from_slice(&first.to_le_bytes());
+    output[8..].copy_from_slice(&second.to_le_bytes());
+    output
+}
 
-fn job_public_id(value: u64) -> [u8; 16] { let mut id = [0; 16]; id[..8].copy_from_slice(&value.to_le_bytes()); id }
+fn as_i64(value: u64, field: &'static str) -> Result<i64, StorageError> {
+    i64::try_from(value).map_err(|_| StorageError::InvalidStoredValue { field })
+}
+
+fn job_public_id(value: u64) -> [u8; 16] {
+    let mut id = [0; 16];
+    id[..8].copy_from_slice(&value.to_le_bytes());
+    id
+}
 
 fn next_revision(transaction: &Transaction<'_>) -> Result<DataRevision, StorageError> {
     let current: i64 = transaction

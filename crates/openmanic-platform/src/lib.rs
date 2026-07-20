@@ -12,11 +12,11 @@ compile_error!("select exactly one platform family: platform-windows or platform
 mod adapter;
 mod capabilities;
 mod fake;
+#[cfg(windows)]
+mod windows_autostart;
 mod windows_control;
 mod windows_identity;
 mod windows_lifecycle;
-#[cfg(windows)]
-mod windows_autostart;
 #[cfg(windows)]
 mod windows_metadata;
 mod windows_raw;
@@ -33,6 +33,8 @@ pub use capabilities::{
     FieldSupport, FocusScope, HelperRequirement, PermissionModel, PlatformCapabilities,
 };
 pub use fake::{FakeEvidenceSink, FakeEvidenceSinkError, FakePlatformAdapter};
+#[cfg(windows)]
+pub use windows_autostart::{WindowsAutostart, WindowsAutostartError, WindowsAutostartStatus};
 pub use windows_control::{
     WINDOWS_FOREGROUND_INGRESS_CAPACITY, WindowsControlAdapter, WindowsControlDrain,
 };
@@ -43,8 +45,6 @@ pub use windows_control::{
 };
 #[cfg(windows)]
 pub use windows_metadata::extract_application_icon;
-#[cfg(windows)]
-pub use windows_autostart::{WindowsAutostart, WindowsAutostartError, WindowsAutostartStatus};
 pub use windows_single_instance::{
     ActivationCommandDecode, LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT,
 };

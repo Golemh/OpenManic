@@ -6,11 +6,14 @@
 use openmanic_application::{EntityRevision, SettingsSnapshot, SettingsThemeMode};
 
 /// Plain-language disclosure shown beside the title-collection control.
-pub const TITLE_COLLECTION_DISCLOSURE: &str =
-    "Window titles can contain sensitive text. Keep this off unless you explicitly want OpenManic to collect them on this device.";
+pub const TITLE_COLLECTION_DISCLOSURE: &str = "Window titles can contain sensitive text. Keep this off unless you explicitly want OpenManic to collect them on this device.";
 
 /// The frequently used settings controls.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the editable projection deliberately groups independent checkbox preferences"
+)]
 pub struct SettingsBasicDraft {
     start_tracking_automatically: bool,
     start_at_login: bool,
@@ -27,40 +30,64 @@ impl SettingsBasicDraft {
         self.start_tracking_automatically = value;
     }
     /// Replaces the Windows-login selection in this local draft.
-    pub fn set_start_at_login(&mut self, value: bool) { self.start_at_login = value; }
+    pub fn set_start_at_login(&mut self, value: bool) {
+        self.start_at_login = value;
+    }
     /// Replaces the close-to-tray selection in this local draft.
-    pub fn set_close_to_tray(&mut self, value: bool) { self.close_to_tray = value; }
+    pub fn set_close_to_tray(&mut self, value: bool) {
+        self.close_to_tray = value;
+    }
     /// Replaces the explicit title-collection consent in this local draft.
     pub fn set_collect_window_titles(&mut self, value: bool) {
         self.collect_window_titles = value;
     }
     /// Replaces the selected built-in appearance mode in this local draft.
-    pub fn set_theme_mode(&mut self, value: SettingsThemeMode) { self.theme_mode = value; }
+    pub fn set_theme_mode(&mut self, value: SettingsThemeMode) {
+        self.theme_mode = value;
+    }
     /// Replaces the notification selection in this local draft.
-    pub fn set_notifications_enabled(&mut self, value: bool) { self.notifications_enabled = value; }
+    pub fn set_notifications_enabled(&mut self, value: bool) {
+        self.notifications_enabled = value;
+    }
     /// Replaces the focus-sound selection in this local draft.
-    pub fn set_focus_sounds_enabled(&mut self, value: bool) { self.focus_sounds_enabled = value; }
+    pub fn set_focus_sounds_enabled(&mut self, value: bool) {
+        self.focus_sounds_enabled = value;
+    }
     /// Returns whether tracking starts after consent.
     #[must_use]
-    pub const fn start_tracking_automatically(&self) -> bool { self.start_tracking_automatically }
+    pub const fn start_tracking_automatically(&self) -> bool {
+        self.start_tracking_automatically
+    }
     /// Returns whether Windows login start is requested.
     #[must_use]
-    pub const fn start_at_login(&self) -> bool { self.start_at_login }
+    pub const fn start_at_login(&self) -> bool {
+        self.start_at_login
+    }
     /// Returns whether closing the window keeps the app in the tray.
     #[must_use]
-    pub const fn close_to_tray(&self) -> bool { self.close_to_tray }
+    pub const fn close_to_tray(&self) -> bool {
+        self.close_to_tray
+    }
     /// Returns whether privacy-sensitive window titles are collected.
     #[must_use]
-    pub const fn collect_window_titles(&self) -> bool { self.collect_window_titles }
+    pub const fn collect_window_titles(&self) -> bool {
+        self.collect_window_titles
+    }
     /// Returns the selected built-in appearance mode.
     #[must_use]
-    pub const fn theme_mode(&self) -> SettingsThemeMode { self.theme_mode }
+    pub const fn theme_mode(&self) -> SettingsThemeMode {
+        self.theme_mode
+    }
     /// Returns whether notifications are enabled.
     #[must_use]
-    pub const fn notifications_enabled(&self) -> bool { self.notifications_enabled }
+    pub const fn notifications_enabled(&self) -> bool {
+        self.notifications_enabled
+    }
     /// Returns whether focus sounds are enabled.
     #[must_use]
-    pub const fn focus_sounds_enabled(&self) -> bool { self.focus_sounds_enabled }
+    pub const fn focus_sounds_enabled(&self) -> bool {
+        self.focus_sounds_enabled
+    }
 }
 
 /// Less frequently changed operational and display settings.
@@ -77,46 +104,68 @@ pub struct SettingsAdvancedDraft {
 
 impl SettingsAdvancedDraft {
     /// Replaces the accepted consent-document revision in this local draft.
-    pub fn set_consent_revision(&mut self, value: u32) { self.consent_revision = value; }
+    pub fn set_consent_revision(&mut self, value: u32) {
+        self.consent_revision = value;
+    }
     /// Replaces the inactivity threshold in this local draft.
     pub fn set_idle_threshold_seconds(&mut self, value: u32) {
         self.idle_threshold_seconds = value;
     }
     /// Replaces the durable idle-policy selection in this local draft.
-    pub fn set_idle_policy_code(&mut self, value: u16) { self.idle_policy_code = value; }
+    pub fn set_idle_policy_code(&mut self, value: u16) {
+        self.idle_policy_code = value;
+    }
     /// Replaces the durable time-zone mode in this local draft.
-    pub fn set_time_zone_mode(&mut self, value: u8) { self.time_zone_mode = value; }
+    pub fn set_time_zone_mode(&mut self, value: u8) {
+        self.time_zone_mode = value;
+    }
     /// Replaces the optional manual IANA time-zone selection in this local draft.
     pub fn set_manual_time_zone_id(&mut self, value: Option<String>) {
         self.manual_time_zone_id = value;
     }
     /// Replaces the durable density selection in this local draft.
-    pub fn set_density_code(&mut self, value: u16) { self.density_code = value; }
+    pub fn set_density_code(&mut self, value: u16) {
+        self.density_code = value;
+    }
     /// Replaces the tray-explanation acknowledgement in this local draft.
     pub fn set_tray_explanation_acknowledged(&mut self, value: bool) {
         self.tray_explanation_acknowledged = value;
     }
     /// Returns the accepted consent-document revision; zero means not accepted.
     #[must_use]
-    pub const fn consent_revision(&self) -> u32 { self.consent_revision }
+    pub const fn consent_revision(&self) -> u32 {
+        self.consent_revision
+    }
     /// Returns the inactivity threshold in seconds.
     #[must_use]
-    pub const fn idle_threshold_seconds(&self) -> u32 { self.idle_threshold_seconds }
+    pub const fn idle_threshold_seconds(&self) -> u32 {
+        self.idle_threshold_seconds
+    }
     /// Returns the durable idle-policy selection.
     #[must_use]
-    pub const fn idle_policy_code(&self) -> u16 { self.idle_policy_code }
+    pub const fn idle_policy_code(&self) -> u16 {
+        self.idle_policy_code
+    }
     /// Returns the durable time-zone mode.
     #[must_use]
-    pub const fn time_zone_mode(&self) -> u8 { self.time_zone_mode }
+    pub const fn time_zone_mode(&self) -> u8 {
+        self.time_zone_mode
+    }
     /// Returns the optional manual IANA time-zone selection.
     #[must_use]
-    pub fn manual_time_zone_id(&self) -> Option<&str> { self.manual_time_zone_id.as_deref() }
+    pub fn manual_time_zone_id(&self) -> Option<&str> {
+        self.manual_time_zone_id.as_deref()
+    }
     /// Returns the durable density selection.
     #[must_use]
-    pub const fn density_code(&self) -> u16 { self.density_code }
+    pub const fn density_code(&self) -> u16 {
+        self.density_code
+    }
     /// Returns whether the tray explanation was acknowledged.
     #[must_use]
-    pub const fn tray_explanation_acknowledged(&self) -> bool { self.tray_explanation_acknowledged }
+    pub const fn tray_explanation_acknowledged(&self) -> bool {
+        self.tray_explanation_acknowledged
+    }
 }
 
 /// Typed local changes accepted by the settings controller.
@@ -160,27 +209,35 @@ impl SettingsController {
     /// Creates an editable presentation projection of the authoritative snapshot.
     #[must_use]
     pub fn new(settings: SettingsSnapshot) -> Self {
-        let mut controller = Self {
-            authoritative: settings.clone(),
-            basic: basic_from(&settings),
-            advanced: advanced_from(&settings),
-        };
-        controller.reset_draft();
-        controller
+        let basic = basic_from(&settings);
+        let advanced = advanced_from(&settings);
+        Self {
+            authoritative: settings,
+            basic,
+            advanced,
+        }
     }
 
     /// Returns the last authoritative complete snapshot.
     #[must_use]
-    pub const fn authoritative(&self) -> &SettingsSnapshot { &self.authoritative }
+    pub const fn authoritative(&self) -> &SettingsSnapshot {
+        &self.authoritative
+    }
     /// Returns the current basic section draft.
     #[must_use]
-    pub const fn basic(&self) -> &SettingsBasicDraft { &self.basic }
+    pub const fn basic(&self) -> &SettingsBasicDraft {
+        &self.basic
+    }
     /// Returns the current advanced section draft.
     #[must_use]
-    pub const fn advanced(&self) -> &SettingsAdvancedDraft { &self.advanced }
+    pub const fn advanced(&self) -> &SettingsAdvancedDraft {
+        &self.advanced
+    }
     /// Returns the exact title-collection privacy disclosure.
     #[must_use]
-    pub const fn title_collection_disclosure(&self) -> &'static str { TITLE_COLLECTION_DISCLOSURE }
+    pub const fn title_collection_disclosure(&self) -> &'static str {
+        TITLE_COLLECTION_DISCLOSURE
+    }
 
     /// Applies a local edit and emits persistence only for an explicit save action.
     #[must_use]
@@ -298,9 +355,15 @@ mod tests {
         basic.set_collect_window_titles(false);
         let _ = controller.apply(SettingsAction::SetBasic(basic));
 
-        let Some(SettingsEffect::Save { settings, expected_revision }) =
-            controller.apply(SettingsAction::Save)
-        else { panic!("save should produce a typed persistence intent"); };
+        let effect = controller.apply(SettingsAction::Save);
+        assert!(matches!(effect, Some(SettingsEffect::Save { .. })));
+        let Some(SettingsEffect::Save {
+            settings,
+            expected_revision,
+        }) = effect
+        else {
+            return;
+        };
         assert_eq!(expected_revision, EntityRevision::new(9));
         assert!(!settings.collect_window_titles());
         assert_eq!(settings.manual_time_zone_id(), Some("Asia/Karachi"));
@@ -316,7 +379,10 @@ mod tests {
         let _ = controller.apply(SettingsAction::SetAdvanced(advanced));
         assert_eq!(controller.advanced().idle_threshold_seconds(), 42);
 
-        assert_eq!(controller.apply(SettingsAction::Cancel), Some(SettingsEffect::Cancelled));
+        assert_eq!(
+            controller.apply(SettingsAction::Cancel),
+            Some(SettingsEffect::Cancelled)
+        );
         assert_eq!(controller.advanced().idle_threshold_seconds(), 120);
         assert!(controller.basic().collect_window_titles());
     }
@@ -324,7 +390,10 @@ mod tests {
     #[test]
     fn title_collection_is_explicitly_described_as_sensitive() {
         let controller = SettingsController::new(SettingsSnapshot::safe_default());
-        assert_eq!(controller.title_collection_disclosure(), TITLE_COLLECTION_DISCLOSURE);
+        assert_eq!(
+            controller.title_collection_disclosure(),
+            TITLE_COLLECTION_DISCLOSURE
+        );
         assert!(TITLE_COLLECTION_DISCLOSURE.contains("sensitive"));
     }
 }

@@ -8,8 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, REG_SZ, RegCloseKey, RegCreateKeyW,
-    RegDeleteValueW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, REG_SZ, RegCloseKey, RegCreateKeyW, RegDeleteValueW, RegSetValueExW,
 };
 use windows::core::PCWSTR;
 
@@ -83,13 +82,7 @@ impl WindowsAutostart {
             let value_name = wide_null(VALUE_NAME);
             // SAFETY: The key and NUL-terminated UTF-16 strings remain valid for this call.
             let status = unsafe {
-                RegSetValueExW(
-                    key,
-                    PCWSTR(value_name.as_ptr()),
-                    None,
-                    REG_SZ,
-                    Some(bytes),
-                )
+                RegSetValueExW(key, PCWSTR(value_name.as_ptr()), None, REG_SZ, Some(bytes))
             };
             if status.is_ok() {
                 Ok(WindowsAutostartStatus::Enabled)
@@ -107,7 +100,9 @@ impl WindowsAutostart {
             }
         };
         // SAFETY: `key` was returned by `RegCreateKeyW` and is closed exactly once here.
-        unsafe { let _ = RegCloseKey(key); };
+        unsafe {
+            let _ = RegCloseKey(key);
+        };
         result
     }
 }
@@ -116,7 +111,7 @@ fn open_run_key() -> Result<HKEY, WindowsAutostartError> {
     let subkey = wide_null(RUN_SUBKEY);
     let mut key = HKEY::default();
     // SAFETY: The subkey is NUL-terminated and `key` points to writable storage.
-    let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), &mut key) };
+    let status = unsafe { RegCreateKeyW(HKEY_CURRENT_USER, PCWSTR(subkey.as_ptr()), &raw mut key) };
     if status.is_ok() {
         Ok(key)
     } else {
@@ -146,9 +141,15 @@ mod tests {
     #[test]
     fn sign_in_command_quotes_the_current_executable_and_uses_background_mode() {
         let command = command_line_for(Path::new("C:/Program Files/OpenManic/OpenManic.exe"));
-        assert_eq!(command, "\"C:/Program Files/OpenManic/OpenManic.exe\" --background");
+        assert_eq!(
+            command,
+            "\"C:/Program Files/OpenManic/OpenManic.exe\" --background"
+        );
 
         let autostart = WindowsAutostart::new("C:/OpenManic/OpenManic.exe".into());
-        assert_eq!(autostart.command_line(), "\"C:/OpenManic/OpenManic.exe\" --background");
+        assert_eq!(
+            autostart.command_line(),
+            "\"C:/OpenManic/OpenManic.exe\" --background"
+        );
     }
 }

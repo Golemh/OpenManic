@@ -411,16 +411,39 @@ pub enum DataRootLockError {
 pub trait DataRootMoveSession {
     /// Stops capture, checkpoints the store, releases its writer lock, and closes all database
     /// handles associated with the source root.
-    fn quiesce_and_close(&mut self) -> Result<(), ()>;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataRootMoveSessionError`] when the source cannot be safely quiesced and closed.
+    fn quiesce_and_close(&mut self) -> Result<(), DataRootMoveSessionError>;
 
     /// Verifies the copied store at `destination` without trusting the filesystem copy alone.
-    fn verify_destination(&mut self, destination: &Path) -> Result<(), ()>;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataRootMoveSessionError`] when storage verification rejects the copied store.
+    fn verify_destination(&mut self, destination: &Path) -> Result<(), DataRootMoveSessionError>;
 
     /// Reopens the accepted store at the verified destination.
-    fn reopen_destination(&mut self, destination: &Path) -> Result<(), ()>;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataRootMoveSessionError`] when the verified destination cannot be reopened.
+    fn reopen_destination(&mut self, destination: &Path) -> Result<(), DataRootMoveSessionError>;
 
     /// Reopens the retained source after a failed move before locator switch.
-    fn reopen_source(&mut self, source: &Path) -> Result<(), ()>;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DataRootMoveSessionError`] when recovery cannot reopen the retained source.
+    fn reopen_source(&mut self, source: &Path) -> Result<(), DataRootMoveSessionError>;
+}
+
+/// An opaque storage-session failure during a coordinated data-root move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataRootMoveSessionError {
+    /// The session could not complete its requested lifecycle operation.
+    Failed,
 }
 
 /// Failure category for a coordinated data-directory move.
@@ -512,7 +535,7 @@ where
 
     session
         .quiesce_and_close()
-        .map_err(|()| DataRootMoveError::QuiesceFailed)?;
+        .map_err(|_| DataRootMoveError::QuiesceFailed)?;
     copy_data_root_contents(source, destination)?;
     if session.verify_destination(destination).is_err() {
         return recover_source(session, source, DataRootMoveError::VerificationFailed);
@@ -523,7 +546,11 @@ where
 
     let locator = BootstrapLocator::new(destination.to_path_buf(), store_id);
     if let Err(error) = persist_locator(locator_path, &locator) {
-        return recover_source(session, source, DataRootMoveError::LocatorSwitchFailed(error));
+        return recover_source(
+            session,
+            source,
+            DataRootMoveError::LocatorSwitchFailed(error),
+        );
     }
     Ok(locator)
 }
@@ -536,15 +563,22 @@ fn recover_source<S>(
 where
     S: DataRootMoveSession,
 {
-    session.reopen_source(source).map_err(|()| DataRootMoveError::SourceRecoveryFailed)?;
+    session
+        .reopen_source(source)
+        .map_err(|_| DataRootMoveError::SourceRecoveryFailed)?;
     Err(original_error)
 }
 
 fn copy_data_root_contents(source: &Path, destination: &Path) -> Result<(), DataRootMoveError> {
-    for entry in fs::read_dir(source).map_err(|error| DataRootMoveError::CopyFailed((&error).into()))? {
+    for entry in
+        fs::read_dir(source).map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?
+    {
         let entry = entry.map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?;
         let source_path = entry.path();
-        if source_path.file_name().is_some_and(|name| name == LOCK_FILE_NAME) {
+        if source_path
+            .file_name()
+            .is_some_and(|name| name == LOCK_FILE_NAME)
+        {
             continue;
         }
         let destination_path = destination.join(entry.file_name());
@@ -809,8 +843,8 @@ impl std::error::Error for DataRootResolutionError {}
 #[cfg(test)]
 mod tests {
     use super::{
-        ARTIFACT_DATA_DIRECTORY, BootstrapLocator, DataRootInputs, DataRootLock,
-        DataRootMoveError, DataRootMoveSession, DataRootResolution, DataRootResolutionError,
+        ARTIFACT_DATA_DIRECTORY, BootstrapLocator, DataRootInputs, DataRootLock, DataRootMoveError,
+        DataRootMoveSession, DataRootMoveSessionError, DataRootResolution, DataRootResolutionError,
         DataRootSource, DataRootValidationError, DataRootValidator, DirectoryChoiceReason,
         FileSystemFailure, LocalDataRootValidator, LocatorError, NetworkShareValidator,
         RejectKnownNetworkShares, StoreId, load_locator, move_data_root, persist_locator,
@@ -870,22 +904,26 @@ mod tests {
     }
 
     impl DataRootMoveSession for MoveSession {
-        fn quiesce_and_close(&mut self) -> Result<(), ()> {
+        fn quiesce_and_close(&mut self) -> Result<(), DataRootMoveSessionError> {
             self.calls.push("quiesce");
             Ok(())
         }
 
-        fn verify_destination(&mut self, _: &Path) -> Result<(), ()> {
+        fn verify_destination(&mut self, _: &Path) -> Result<(), DataRootMoveSessionError> {
             self.calls.push("verify");
-            if self.fail_verification { Err(()) } else { Ok(()) }
+            if self.fail_verification {
+                Err(DataRootMoveSessionError::Failed)
+            } else {
+                Ok(())
+            }
         }
 
-        fn reopen_destination(&mut self, _: &Path) -> Result<(), ()> {
+        fn reopen_destination(&mut self, _: &Path) -> Result<(), DataRootMoveSessionError> {
             self.calls.push("reopen-destination");
             Ok(())
         }
 
-        fn reopen_source(&mut self, _: &Path) -> Result<(), ()> {
+        fn reopen_source(&mut self, _: &Path) -> Result<(), DataRootMoveSessionError> {
             self.calls.push("reopen-source");
             Ok(())
         }

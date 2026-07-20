@@ -7,8 +7,8 @@ use std::{
 };
 
 use openmanic_application::{
-    CsvExportRequest, DataOperationOutcome, DataRevision, EntityRevision, FocusKind,
-    FocusSnapshot, SavedViewId, SavedViewLoad, SavedViewSnapshot, ScheduleId, ScheduleSnapshot,
+    CsvExportRequest, DataOperationOutcome, DataRevision, EntityRevision, FocusKind, FocusSnapshot,
+    SavedViewId, SavedViewLoad, SavedViewSnapshot, ScheduleId, ScheduleSnapshot,
 };
 use openmanic_domain::{
     ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
@@ -273,9 +273,11 @@ impl SqliteReadSession {
         count = count.saturating_add(export_categories(&transaction, &mut output)?);
         count = count.saturating_add(export_applications(&transaction, &mut output)?);
         count = count.saturating_add(export_activities(&transaction, request, &mut output)?);
-        output.flush().map_err(|_| StorageError::DataOperationFailed {
-            operation: "flush CSV export",
-        })?;
+        output
+            .flush()
+            .map_err(|_| StorageError::DataOperationFailed {
+                operation: "flush CSV export",
+            })?;
         transaction
             .commit()
             .map_err(|error| database_error(&error, "commit CSV export read"))?;
@@ -308,7 +310,20 @@ fn export_categories(
             .map_err(|error| database_error(&error, "read CSV category name"))?;
         write_csv_record(
             output,
-            &["category", "1", &hex_id(id), "", "", "", "", "", "", "", "", &name],
+            &[
+                "category",
+                "1",
+                &hex_id(id),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                &name,
+            ],
         )?;
         count = count.saturating_add(1);
     }
@@ -387,7 +402,10 @@ fn export_activities(
         )
         .map_err(|error| database_error(&error, "prepare CSV activities"))?;
     let mut rows = statement
-        .query(rusqlite::params![request.range().start().get(), request.range().end().get()])
+        .query(rusqlite::params![
+            request.range().start().get(),
+            request.range().end().get()
+        ])
         .map_err(|error| database_error(&error, "query CSV activities"))?;
     let mut count = 0_u64;
     while let Some(row) = rows
@@ -462,21 +480,27 @@ fn hex_id(id: [u8; 16]) -> String {
 fn write_csv_record(output: &mut impl Write, fields: &[&str]) -> Result<(), StorageError> {
     for (index, field) in fields.iter().enumerate() {
         if index > 0 {
-            output.write_all(b",").map_err(|_| StorageError::DataOperationFailed {
-                operation: "write CSV export",
-            })?;
+            output
+                .write_all(b",")
+                .map_err(|_| StorageError::DataOperationFailed {
+                    operation: "write CSV export",
+                })?;
         }
         let needs_quotes = field.contains([',', '"', '\n', '\r']);
         if needs_quotes {
-            output.write_all(b"\"").map_err(|_| StorageError::DataOperationFailed {
-                operation: "write CSV export",
-            })?;
+            output
+                .write_all(b"\"")
+                .map_err(|_| StorageError::DataOperationFailed {
+                    operation: "write CSV export",
+                })?;
         }
         for character in field.chars() {
             if character == '"' {
-                output.write_all(b"\"\"").map_err(|_| StorageError::DataOperationFailed {
-                    operation: "write CSV export",
-                })?;
+                output
+                    .write_all(b"\"\"")
+                    .map_err(|_| StorageError::DataOperationFailed {
+                        operation: "write CSV export",
+                    })?;
             } else {
                 let mut encoded = [0_u8; 4];
                 output
@@ -487,14 +511,18 @@ fn write_csv_record(output: &mut impl Write, fields: &[&str]) -> Result<(), Stor
             }
         }
         if needs_quotes {
-            output.write_all(b"\"").map_err(|_| StorageError::DataOperationFailed {
-                operation: "write CSV export",
-            })?;
+            output
+                .write_all(b"\"")
+                .map_err(|_| StorageError::DataOperationFailed {
+                    operation: "write CSV export",
+                })?;
         }
     }
-    output.write_all(b"\n").map_err(|_| StorageError::DataOperationFailed {
-        operation: "write CSV export",
-    })
+    output
+        .write_all(b"\n")
+        .map_err(|_| StorageError::DataOperationFailed {
+            operation: "write CSV export",
+        })
 }
 
 pub(crate) struct ActivityRepository;
@@ -1595,11 +1623,11 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use openmanic_domain::{
-        Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName, UtcMicros,
-    };
     use openmanic_application::{
         CsvExportRequest, DataOperationDestination, JobId, TitleDisclosure,
+    };
+    use openmanic_domain::{
+        Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName, UtcMicros,
     };
 
     use super::{read_snapshot, write_csv_record};
@@ -1610,8 +1638,11 @@ mod tests {
     #[test]
     fn csv_writer_quotes_delimiters_newlines_and_quotes_deterministically() {
         let mut output = Vec::new();
-        write_csv_record(&mut output, &["plain", "comma,value", "quote\"value", "line\nbreak"])
-            .expect("in-memory CSV output must be writable");
+        write_csv_record(
+            &mut output,
+            &["plain", "comma,value", "quote\"value", "line\nbreak"],
+        )
+        .expect("in-memory CSV output must be writable");
         assert_eq!(
             String::from_utf8(output).expect("CSV fixture is UTF-8"),
             "plain,\"comma,value\",\"quote\"\"value\",\"line\nbreak\"\n"
@@ -1692,7 +1723,10 @@ mod tests {
             .snapshot()
             .expect("the restored store should read");
         assert_eq!(snapshot.categories().len(), 1);
-        assert_eq!(snapshot.categories()[0].category().name().as_str(), "Before backup");
+        assert_eq!(
+            snapshot.categories()[0].category().name().as_str(),
+            "Before backup"
+        );
         let _ = fs::remove_file(backup);
     }
 

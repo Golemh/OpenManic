@@ -41,6 +41,10 @@ impl SettingsThemeMode {
 
 /// Immutable complete persisted settings snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the persisted singleton deliberately mirrors independent user preferences"
+)]
 pub struct SettingsSnapshot {
     consent_revision: u32,
     start_tracking_automatically: bool,
@@ -84,6 +88,11 @@ impl SettingsSnapshot {
 
     /// Creates a complete valid replacement snapshot.
     #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::fn_params_excessive_bools,
+        reason = "the atomic replacement contract deliberately names every persisted preference"
+    )]
     pub const fn new(
         consent_revision: u32,
         start_tracking_automatically: bool,
@@ -122,49 +131,79 @@ impl SettingsSnapshot {
 
     /// Returns the persisted local tracking consent revision; zero means not accepted.
     #[must_use]
-    pub const fn consent_revision(&self) -> u32 { self.consent_revision }
+    pub const fn consent_revision(&self) -> u32 {
+        self.consent_revision
+    }
     /// Returns whether tracking starts automatically after consent.
     #[must_use]
-    pub const fn start_tracking_automatically(&self) -> bool { self.start_tracking_automatically }
+    pub const fn start_tracking_automatically(&self) -> bool {
+        self.start_tracking_automatically
+    }
     /// Returns whether Windows login start is requested.
     #[must_use]
-    pub const fn start_at_login(&self) -> bool { self.start_at_login }
+    pub const fn start_at_login(&self) -> bool {
+        self.start_at_login
+    }
     /// Returns the persisted close-to-tray preference.
     #[must_use]
-    pub const fn close_to_tray(&self) -> bool { self.close_to_tray }
+    pub const fn close_to_tray(&self) -> bool {
+        self.close_to_tray
+    }
     /// Returns the persisted idle threshold in seconds.
     #[must_use]
-    pub const fn idle_threshold_seconds(&self) -> u32 { self.idle_threshold_seconds }
+    pub const fn idle_threshold_seconds(&self) -> u32 {
+        self.idle_threshold_seconds
+    }
     /// Returns the durable idle-policy code.
     #[must_use]
-    pub const fn idle_policy_code(&self) -> u16 { self.idle_policy_code }
+    pub const fn idle_policy_code(&self) -> u16 {
+        self.idle_policy_code
+    }
     /// Returns whether title collection has explicit consent.
     #[must_use]
-    pub const fn collect_window_titles(&self) -> bool { self.collect_window_titles }
+    pub const fn collect_window_titles(&self) -> bool {
+        self.collect_window_titles
+    }
     /// Returns the durable time-zone mode.
     #[must_use]
-    pub const fn time_zone_mode(&self) -> u8 { self.time_zone_mode }
+    pub const fn time_zone_mode(&self) -> u8 {
+        self.time_zone_mode
+    }
     /// Returns the manual IANA time-zone selection when manual mode is active.
     #[must_use]
-    pub fn manual_time_zone_id(&self) -> Option<&str> { self.manual_time_zone_id.as_deref() }
+    pub fn manual_time_zone_id(&self) -> Option<&str> {
+        self.manual_time_zone_id.as_deref()
+    }
     /// Returns the selected theme mode.
     #[must_use]
-    pub const fn theme_mode(&self) -> SettingsThemeMode { self.theme_mode }
+    pub const fn theme_mode(&self) -> SettingsThemeMode {
+        self.theme_mode
+    }
     /// Returns the durable density selection code.
     #[must_use]
-    pub const fn density_code(&self) -> u16 { self.density_code }
+    pub const fn density_code(&self) -> u16 {
+        self.density_code
+    }
     /// Returns whether notifications are enabled.
     #[must_use]
-    pub const fn notifications_enabled(&self) -> bool { self.notifications_enabled }
+    pub const fn notifications_enabled(&self) -> bool {
+        self.notifications_enabled
+    }
     /// Returns whether focus sounds are enabled.
     #[must_use]
-    pub const fn focus_sounds_enabled(&self) -> bool { self.focus_sounds_enabled }
+    pub const fn focus_sounds_enabled(&self) -> bool {
+        self.focus_sounds_enabled
+    }
     /// Returns whether the first close-to-tray explanation has been acknowledged.
     #[must_use]
-    pub const fn tray_explanation_acknowledged(&self) -> bool { self.tray_explanation_acknowledged }
+    pub const fn tray_explanation_acknowledged(&self) -> bool {
+        self.tray_explanation_acknowledged
+    }
     /// Returns the optimistic settings revision.
     #[must_use]
-    pub const fn revision(&self) -> EntityRevision { self.revision }
+    pub const fn revision(&self) -> EntityRevision {
+        self.revision
+    }
 }
 
 /// Typed persistence boundary for atomic complete settings replacement.
@@ -217,6 +256,9 @@ mod tests {
         assert!(!settings.collect_window_titles());
         assert!(settings.close_to_tray());
         assert_eq!(settings.revision(), EntityRevision::new(0));
-        assert_eq!(SettingsThemeMode::try_from_code(2), Ok(SettingsThemeMode::FollowSystem));
+        assert_eq!(
+            SettingsThemeMode::try_from_code(2),
+            Ok(SettingsThemeMode::FollowSystem)
+        );
     }
 }

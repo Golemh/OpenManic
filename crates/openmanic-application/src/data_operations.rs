@@ -408,7 +408,10 @@ mod tests {
     #[test]
     fn progress_rejects_a_total_below_completed_work() {
         assert!(DataOperationProgress::try_new(10, Some(9)).is_err());
-        assert_eq!(DataOperationProgress::try_new(10, Some(10)).map(DataOperationProgress::completed), Ok(10));
+        assert_eq!(
+            DataOperationProgress::try_new(10, Some(10)).map(DataOperationProgress::completed),
+            Ok(10)
+        );
     }
 
     #[test]

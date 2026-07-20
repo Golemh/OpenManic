@@ -67,7 +67,10 @@ pub struct ShutdownController;
 impl ShutdownController {
     /// Builds a dialog model only while an authoritative critical flush failure is pending.
     #[must_use]
-    pub const fn failure_view_model(self, phase: ShutdownPhase) -> Option<ShutdownFailureViewModel> {
+    pub const fn failure_view_model(
+        self,
+        phase: ShutdownPhase,
+    ) -> Option<ShutdownFailureViewModel> {
         let ShutdownPhase::FlushFailed { step } = phase else {
             return None;
         };
@@ -80,7 +83,11 @@ impl ShutdownController {
     /// then provide its new phase on the next frame. Stale clicks are ignored rather than being
     /// interpreted as a successful shutdown transition.
     #[must_use]
-    pub const fn apply(self, phase: ShutdownPhase, action: ShutdownAction) -> Option<ShutdownEffect> {
+    pub const fn apply(
+        self,
+        phase: ShutdownPhase,
+        action: ShutdownAction,
+    ) -> Option<ShutdownEffect> {
         if !matches!(phase, ShutdownPhase::FlushFailed { .. }) {
             return None;
         }
@@ -96,6 +103,7 @@ impl ShutdownController {
 /// The composition host owns visibility and lifecycle mutation: obtain the view model from
 /// [`ShutdownController::failure_view_model`], render it while present, and pass the resulting
 /// action through [`ShutdownController::apply`] before calling the application coordinator.
+#[must_use]
 pub fn render_shutdown_failure(
     context: &egui::Context,
     view_model: ShutdownFailureViewModel,
@@ -192,12 +200,12 @@ mod tests {
             Some(ShutdownEffect::QuitAnyway)
         );
         assert_eq!(
-            controller.apply(ShutdownPhase::Executing(ShutdownStep::CloseWriter), ShutdownAction::Retry),
+            controller.apply(
+                ShutdownPhase::Executing(ShutdownStep::CloseWriter),
+                ShutdownAction::Retry
+            ),
             None
         );
-        assert_eq!(
-            controller.failure_view_model(ShutdownPhase::Complete),
-            None
-        );
+        assert_eq!(controller.failure_view_model(ShutdownPhase::Complete), None);
     }
 }

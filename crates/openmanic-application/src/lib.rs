@@ -22,9 +22,9 @@ mod projection;
 mod runtime;
 mod saved_view;
 mod schedule;
-mod settings;
 mod schedule_projection;
 mod schedule_time;
+mod settings;
 mod timeline_projection;
 mod title_stabilizer;
 mod tracking;
@@ -49,10 +49,10 @@ pub use catalog::{
 };
 pub use commands::{CommandEnvelope, CommandReceipt, TrackingCommand, TrackingEvidence};
 pub use data_operations::{
-    CSV_INTERCHANGE_VERSION, CsvExportRequest, DataOperationDestination, DataOperationOutcome,
-    DataOperationProgress, DataOperationProgressError, CsvImportRequest, ImportDestinationScope,
-    ImportBatchId, ImportFailure, ImportFailureError, ImportScopeError, ImportScopeOutcome,
-    TitleDisclosure,
+    CSV_INTERCHANGE_VERSION, CsvExportRequest, CsvImportRequest, DataOperationDestination,
+    DataOperationOutcome, DataOperationProgress, DataOperationProgressError, ImportBatchId,
+    ImportDestinationScope, ImportFailure, ImportFailureError, ImportScopeError,
+    ImportScopeOutcome, TitleDisclosure,
 };
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
 pub use events::{
@@ -96,10 +96,6 @@ pub use saved_view::{
     SavedViewPersistenceError, SavedViewRejection, SavedViewService, SavedViewSnapshot,
     SavedViewSnapshotError,
 };
-pub use settings::{
-    SettingsError, SettingsPersistence, SettingsPersistenceError, SettingsSnapshot,
-    SettingsThemeMode,
-};
 pub use schedule::{
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
@@ -113,6 +109,10 @@ pub use schedule_time::{
     ScheduleBoundaryResolution, ScheduleTimeError, expand_repeating_schedule,
     expand_repeating_schedule_in_interval, repeating_schedule_rules_conflict,
     resolve_schedule_boundary, schedule_rule_conflicts_with_intervals,
+};
+pub use settings::{
+    SettingsError, SettingsPersistence, SettingsPersistenceError, SettingsSnapshot,
+    SettingsThemeMode,
 };
 pub use timeline_projection::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,

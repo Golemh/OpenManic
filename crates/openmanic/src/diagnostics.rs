@@ -135,7 +135,8 @@ pub fn export_diagnostics_bundle(
         "format_version={BUNDLE_FORMAT_VERSION}\nprivacy=validated-fixed-diagnostics-only\nfiles={}\n",
         included_files.join(",")
     );
-    fs::write(destination.join(BUNDLE_MANIFEST_FILE), manifest).map_err(map_bundle_file_system_error)?;
+    fs::write(destination.join(BUNDLE_MANIFEST_FILE), manifest)
+        .map_err(map_bundle_file_system_error)?;
 
     Ok(DiagnosticsBundle {
         bundle_directory: destination.to_owned(),
@@ -256,7 +257,7 @@ fn read_safe_bootstrap_events(path: &Path) -> Vec<&'static str> {
             ]
             .into_iter()
             .find(|event| line == event.code())
-            .map(|event| event.code())
+            .map(DiagnosticEvent::code)
         })
         .collect()
 }
@@ -288,8 +289,8 @@ fn map_bundle_file_system_error(_: io::Error) -> DiagnosticsBundleError {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticEvent, MinimalDiagnostics, export_diagnostics_bundle, redact_path_for_diagnostics,
-        redact_title_for_diagnostics, write_panic_marker,
+        DiagnosticEvent, MinimalDiagnostics, export_diagnostics_bundle,
+        redact_path_for_diagnostics, redact_title_for_diagnostics, write_panic_marker,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -377,8 +378,8 @@ mod tests {
             "bootstrap.data-root.resolved\n"
         );
         assert!(!destination.join("panic.marker").exists());
-        let bundle_text = fs::read_to_string(destination.join("bootstrap.log"))
-            .expect("bundle log reads");
+        let bundle_text =
+            fs::read_to_string(destination.join("bootstrap.log")).expect("bundle log reads");
         assert!(!bundle_text.contains("Private window title"));
         assert!(!bundle_text.contains("C:/private/data"));
         fs::remove_dir_all(data_root).expect("test source is removed");

@@ -31,12 +31,12 @@ use openmanic_application::{
     RecurringScheduleEdit, RecurringScheduleRuleChange, RuntimeLaneReceiver, RuntimeLanes,
     RuntimeSupervisor, RuntimeWorker, ScheduleCommand, ScheduleId, ScheduleOccurrenceId,
     SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
-    SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep, SnapshotEnvelope, ThreadRoot,
-    SettingsPersistence, SettingsSnapshot,
-    TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
-    TimelineSnapshot, TimelineSourceActivity, TitleObservationResult, TitleStabilizer,
-    TrackingCommand, TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
-    TrackingPersistenceSubmit, TrackingService, WorkLane, bounded_runtime_lanes, latest_mailbox,
+    SchemaRevision, SettingsPersistence, SettingsSnapshot, ShutdownCoordinator, ShutdownPhase,
+    ShutdownStep, SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext,
+    TimelineProjector, TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity,
+    TitleObservationResult, TitleStabilizer, TrackingCommand, TrackingEvidence,
+    TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
+    WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
@@ -60,11 +60,10 @@ use openmanic_ui_egui::{
     ApplicationUsage, ApplicationUsageSnapshot, CalendarAction, CalendarBlockKind,
     CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
     LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp,
-    PresentableData, TodayController, TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution,
-    SettingsAction, SettingsController, SettingsEffect, ShutdownController, ShutdownEffect,
-    TrackingControlAction, UiAction, UiController, UiModel,
-    reflow_dashboard, render_shutdown_failure,
-    render_distribution_snapshot, render_usage_snapshot,
+    PresentableData, SettingsAction, SettingsController, SettingsEffect, ShutdownController,
+    ShutdownEffect, TodayController, TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution,
+    TrackingControlAction, UiAction, UiController, UiModel, reflow_dashboard,
+    render_distribution_snapshot, render_shutdown_failure, render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
@@ -1085,11 +1084,9 @@ impl RuntimeResources {
         let initial_theme_mode = initial_settings.theme_mode().code();
         let theme_mode = Arc::new(Mutex::new(initial_theme_mode));
         let settings_snapshot = Arc::new(Mutex::new(initial_settings));
-        let tracking_permitted = Arc::new(AtomicBool::new(
-            settings_snapshot.lock().is_ok_and(|settings| {
-                settings.consent_revision() > 0 && settings.start_tracking_automatically()
-            }),
-        ));
+        let tracking_permitted = Arc::new(AtomicBool::new(settings_snapshot.lock().is_ok_and(
+            |settings| settings.consent_revision() > 0 && settings.start_tracking_automatically(),
+        )));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
         let worker_focus_completion_pending = Arc::clone(&focus_completion_pending);
@@ -3399,7 +3396,10 @@ impl VerticalSliceApp {
         let mut sounds = basic.focus_sounds_enabled();
         ui.checkbox(&mut automatic, "Start tracking after consent");
         ui.checkbox(&mut login, "Start OpenManic when I sign in");
-        ui.checkbox(&mut close_to_tray, "Keep tracking in the tray when I close the window");
+        ui.checkbox(
+            &mut close_to_tray,
+            "Keep tracking in the tray when I close the window",
+        );
         ui.checkbox(&mut titles, "Collect window titles");
         ui.small(self.settings_controller.title_collection_disclosure());
         ui.checkbox(&mut notifications, "Show notifications");
@@ -3414,17 +3414,26 @@ impl VerticalSliceApp {
             ui.label("Appearance:");
             for (mode, label) in [(0_u8, "Dark"), (1, "Light"), (2, "Follow system")] {
                 if ui.button(label).clicked() {
-                    let _ = self.runtime.try_submit_theme(mode, UtcMicros::new(utc_now_micros()));
+                    let _ = self
+                        .runtime
+                        .try_submit_theme(mode, UtcMicros::new(utc_now_micros()));
                 }
             }
         });
         if basic != *self.settings_controller.basic() {
-            let _ = self.settings_controller.apply(SettingsAction::SetBasic(basic));
+            let _ = self
+                .settings_controller
+                .apply(SettingsAction::SetBasic(basic));
         }
         ui.horizontal(|ui| {
             if ui.button("Save settings").clicked()
-                && let Some(SettingsEffect::Save { settings, expected_revision }) = self.settings_controller.apply(SettingsAction::Save)
-                && self.runtime.try_submit_settings(settings, Some(expected_revision))
+                && let Some(SettingsEffect::Save {
+                    settings,
+                    expected_revision,
+                }) = self.settings_controller.apply(SettingsAction::Save)
+                && self
+                    .runtime
+                    .try_submit_settings(settings, Some(expected_revision))
             {
                 ui.label("Saving settings...");
             }
@@ -3440,16 +3449,19 @@ impl VerticalSliceApp {
             .settings_snapshot
             .lock()
             .ok()
-            .map(|settings| settings.clone())
-            .unwrap_or_else(SettingsSnapshot::safe_default);
+            .map_or_else(SettingsSnapshot::safe_default, |settings| settings.clone());
         if settings.consent_revision() > 0 {
             return;
         }
         ui.add_space(16.0);
         ui.heading("Welcome to OpenManic");
-        ui.label("Your activity data stays on this device. No account or network setup is required.");
+        ui.label(
+            "Your activity data stays on this device. No account or network setup is required.",
+        );
         ui.label("OpenManic records the foreground application after you continue. Window titles remain off by default.");
-        ui.label("You can pause tracking or change privacy, startup, and data settings at any time.");
+        ui.label(
+            "You can pause tracking or change privacy, startup, and data settings at any time.",
+        );
         if self.onboarding_submission_pending {
             ui.label("Saving your local tracking choice...");
             return;
@@ -4364,13 +4376,9 @@ impl VerticalSliceApp {
         if !context.input(|input| input.viewport().close_requested()) {
             return;
         }
-        let tracking_enabled = self
-            .runtime
-            .settings_snapshot
-            .lock()
-            .map_or(false, |settings| {
-                settings.consent_revision() > 0 && settings.start_tracking_automatically()
-            });
+        let tracking_enabled = self.runtime.settings_snapshot.lock().is_ok_and(|settings| {
+            settings.consent_revision() > 0 && settings.start_tracking_automatically()
+        });
         match self.close_to_tray.on_main_window_close(tracking_enabled) {
             openmanic_platform::CloseToTrayDisposition::HideToTray { .. } => {
                 context.send_viewport_cmd(eframe::egui::ViewportCommand::CancelClose);
