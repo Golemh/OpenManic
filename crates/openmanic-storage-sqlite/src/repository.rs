@@ -3,15 +3,15 @@
 use std::path::Path;
 
 use openmanic_application::{
-    DataRevision, EntityRevision, SavedViewId, SavedViewLoad, SavedViewSnapshot, ScheduleId,
-    ScheduleSnapshot,
+    DataRevision, EntityRevision, FocusKind, FocusSnapshot, SavedViewId, SavedViewLoad,
+    SavedViewSnapshot, ScheduleId, ScheduleSnapshot,
 };
 use openmanic_domain::{
     ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
-    ApplicationName, Category, CategoryId, CategoryName, HalfOpenInterval, OneTimeScheduleId,
-    PowerTransitionEvidence, SavedViewDefinition, SavedViewField, SavedViewFields, SavedViewRange,
-    SavedViewRelativeRange, SavedViewScalar, SavedViewTimeZoneBehavior, ScheduleRule,
-    ScheduleSeriesId, TrackerRunId, UtcMicros,
+    ApplicationName, Category, CategoryId, CategoryName, FocusSessionId, FocusSessionState,
+    HalfOpenInterval, OneTimeScheduleId, PowerTransitionEvidence, SavedViewDefinition,
+    SavedViewField, SavedViewFields, SavedViewRange, SavedViewRelativeRange, SavedViewScalar,
+    SavedViewTimeZoneBehavior, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 use rusqlite::Transaction;
 
@@ -93,6 +93,30 @@ pub struct ScheduleRecord {
     snapshot: ScheduleSnapshot,
 }
 
+/// One durable focus-session fact returned by a correlated storage snapshot.
+///
+/// `interval` is present only when persisted lifecycle columns establish both canonical bounds.
+/// In particular, a paused session has no fabricated end based on its remaining duration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FocusRecord {
+    snapshot: FocusSnapshot,
+    interval: Option<HalfOpenInterval>,
+}
+
+impl FocusRecord {
+    /// Returns the complete restored focus-session state.
+    #[must_use]
+    pub const fn snapshot(&self) -> &FocusSnapshot {
+        &self.snapshot
+    }
+
+    /// Returns the authoritative interval when durable state supplies both endpoints.
+    #[must_use]
+    pub const fn interval(&self) -> Option<HalfOpenInterval> {
+        self.interval
+    }
+}
+
 impl ScheduleRecord {
     /// Returns the immutable schedule, including its stable ID and optimistic revision.
     #[must_use]
@@ -117,6 +141,7 @@ pub struct ReadSnapshot {
     applications: Vec<ApplicationRecord>,
     categories: Vec<CategoryRecord>,
     schedules: Vec<ScheduleRecord>,
+    focus_sessions: Vec<FocusRecord>,
 }
 
 impl ReadSnapshot {
@@ -148,6 +173,12 @@ impl ReadSnapshot {
     #[must_use]
     pub fn schedules(&self) -> &[ScheduleRecord] {
         &self.schedules
+    }
+
+    /// Returns durable focus sessions in stable row order from the same read transaction.
+    #[must_use]
+    pub fn focus_sessions(&self) -> &[FocusRecord] {
+        &self.focus_sessions
     }
 }
 
@@ -355,6 +386,184 @@ impl CategoryRepository {
 }
 
 pub(crate) struct ScheduleRepository;
+
+pub(crate) struct FocusRepository;
+
+impl FocusRepository {
+    fn read(transaction: &Transaction<'_>) -> Result<Vec<FocusRecord>, StorageError> {
+        let mut statement = transaction
+            .prepare(
+                "SELECT focus_session.public_id, focus_session.kind, focus_session.label,
+                        category.public_id, focus_session.intended_duration_us, focus_session.state,
+                        focus_session.planned_start_utc_us, focus_session.planned_end_utc_us,
+                        focus_session.actual_start_utc_us, focus_session.deadline_utc_us,
+                        focus_session.paused_remaining_us, focus_session.completed_utc_us,
+                        focus_session.cancelled_utc_us, focus_session.revision
+                   FROM focus_session LEFT JOIN category ON category.id = focus_session.category_id
+               ORDER BY focus_session.id",
+            )
+            .map_err(|error| database_error(&error, "prepare focus snapshot"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<i64>>(11)?,
+                    row.get::<_, Option<i64>>(12)?,
+                    row.get::<_, i64>(13)?,
+                ))
+            })
+            .map_err(|error| database_error(&error, "read focus snapshot"))?;
+        rows.map(|row| {
+            let (
+                id,
+                kind,
+                label,
+                category_id,
+                duration,
+                state,
+                planned_start,
+                planned_end,
+                actual_start,
+                deadline,
+                paused_remaining,
+                completed,
+                cancelled,
+                revision,
+            ) = row.map_err(|error| database_error(&error, "read focus snapshot"))?;
+            let state = focus_state_from_columns((
+                state,
+                planned_start,
+                planned_end,
+                actual_start,
+                deadline,
+                paused_remaining,
+                completed,
+                cancelled,
+            ))?;
+            let snapshot = FocusSnapshot::try_restore(
+                FocusSessionId::from_bytes(fixed_id(id, "focus stable ID")?),
+                match kind {
+                    0 => FocusKind::Focus,
+                    1 => FocusKind::ShortBreak,
+                    _ => {
+                        return Err(StorageError::InvalidStoredValue {
+                            field: "focus kind",
+                        });
+                    }
+                },
+                label,
+                duration,
+                category_id
+                    .map(|id| fixed_id(id, "focus category ID"))
+                    .transpose()?
+                    .map(CategoryId::from_bytes),
+                state,
+                EntityRevision::new(u64::try_from(revision).map_err(|_| {
+                    StorageError::InvalidStoredValue {
+                        field: "focus revision",
+                    }
+                })?),
+            )
+            .map_err(|_| StorageError::InvalidStoredValue {
+                field: "focus session",
+            })?;
+            Ok(FocusRecord {
+                interval: focus_interval(snapshot.session().state())?,
+                snapshot,
+            })
+        })
+        .collect()
+    }
+}
+
+fn focus_interval(state: FocusSessionState) -> Result<Option<HalfOpenInterval>, StorageError> {
+    let bounds = match state {
+        FocusSessionState::Planned {
+            planned_start,
+            planned_end,
+        } => Some((planned_start, planned_end)),
+        FocusSessionState::Running {
+            started_at,
+            deadline,
+        } => Some((started_at, deadline)),
+        FocusSessionState::Completed {
+            started_at,
+            completed_at,
+        } => Some((started_at, completed_at)),
+        FocusSessionState::Cancelled {
+            started_at,
+            cancelled_at,
+        } => Some((started_at, cancelled_at)),
+        FocusSessionState::Ready | FocusSessionState::Paused { .. } => None,
+    };
+    bounds
+        .map(|(start, end)| {
+            HalfOpenInterval::try_new(start, end).map_err(|_| StorageError::InvalidStoredValue {
+                field: "focus interval",
+            })
+        })
+        .transpose()
+}
+
+fn focus_state_from_columns(
+    columns: (
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+    ),
+) -> Result<FocusSessionState, StorageError> {
+    match columns {
+        (0, None, None, None, None, None, None, None) => Ok(FocusSessionState::Ready),
+        (1, Some(start), Some(end), None, None, None, None, None) => {
+            Ok(FocusSessionState::Planned {
+                planned_start: UtcMicros::new(start),
+                planned_end: UtcMicros::new(end),
+            })
+        }
+        (2, None, None, Some(start), Some(deadline), None, None, None) => {
+            Ok(FocusSessionState::Running {
+                started_at: UtcMicros::new(start),
+                deadline: UtcMicros::new(deadline),
+            })
+        }
+        (3, None, None, Some(start), None, Some(remaining), None, None) => {
+            Ok(FocusSessionState::Paused {
+                started_at: UtcMicros::new(start),
+                remaining_us: remaining,
+            })
+        }
+        (4, None, None, Some(start), None, None, Some(completed), None) => {
+            Ok(FocusSessionState::Completed {
+                started_at: UtcMicros::new(start),
+                completed_at: UtcMicros::new(completed),
+            })
+        }
+        (5, None, None, Some(start), None, None, None, Some(cancelled)) => {
+            Ok(FocusSessionState::Cancelled {
+                started_at: UtcMicros::new(start),
+                cancelled_at: UtcMicros::new(cancelled),
+            })
+        }
+        _ => Err(StorageError::InvalidStoredValue {
+            field: "focus session state",
+        }),
+    }
+}
 
 impl ScheduleRepository {
     fn read(transaction: &Transaction<'_>) -> Result<Vec<ScheduleRecord>, StorageError> {
@@ -786,6 +995,7 @@ pub(crate) fn read_snapshot(transaction: &Transaction<'_>) -> Result<ReadSnapsho
         applications: ApplicationRepository::read(transaction)?,
         categories: CategoryRepository::read(transaction)?,
         schedules: ScheduleRepository::read(transaction)?,
+        focus_sessions: FocusRepository::read(transaction)?,
     })
 }
 

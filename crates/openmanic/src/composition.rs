@@ -18,30 +18,29 @@ use std::{
 };
 
 use openmanic_application::{
-    AppEvent, ApplicationError, ApplicationPort, CommandEnvelope, CommandId, CommandReceipt,
-    CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService,
-    DataRevision, EventEnvelope, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
-    LatestMailboxReceiver, MailboxReceive, OrderingKey, PortFailureReason, ProjectionContextKey,
-    ProjectionRequest, ProjectionSlot, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
-    RuntimeWorker, SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
-    EntityRevision, FocusCommand, FocusNotificationError, FocusNotificationPort, FocusPersistence,
-    FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome,
-    ApplicationIconCache, ApplicationIconCacheLimits, ApplicationIconLookup, ApplicationIconResult,
+    AppEvent, ApplicationError, ApplicationIconCache, ApplicationIconCacheLimits,
+    ApplicationIconLookup, ApplicationIconResult, ApplicationPort, CalendarDayContext,
+    CalendarDayProjector, CalendarDaySnapshot, CalendarProjectionSource, CalendarSourceFocus,
+    CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService, CommandEnvelope,
+    CommandId, CommandReceipt, DataRevision, EntityRevision, EventEnvelope, FocusCommand,
+    FocusKind, FocusNotificationError, FocusNotificationPort, FocusPersistence,
+    FocusPersistenceError, FocusService, FocusSnapshot, LaneCapacities, LaneReceive, LaneSubmit,
+    LatestMailbox, LatestMailboxReceiver, MailboxReceive, MutationOutcome, OrderingKey,
+    PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
-    ScheduleCommand, ScheduleId,
-    ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
-    ScheduleService, ScheduleSnapshot,
-    SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
-    TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
-    TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
-    TitleObservationResult, TitleStabilizer, TrackingPersistenceSubmit, TrackingService,
+    RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
+    ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
+    ScheduleService, ScheduleSnapshot, SchemaRevision, ShutdownCoordinator, ShutdownPhase,
+    ShutdownStep, SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext,
+    TimelineProjector, TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity,
+    TitleObservationResult, TitleStabilizer, TrackingCommand, TrackingEvidence,
+    TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
     WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
-    ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId,
-    CategoryName, HalfOpenInterval,
-    FocusSessionId, FocusSessionState, OneTimeScheduleId, ScheduleEditScope, ScheduleRule,
-    ScheduleSeriesId, TrackerRunId, UtcMicros,
+    ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
+    FocusSessionId, FocusSessionState, HalfOpenInterval, OneTimeScheduleId, ScheduleEditScope,
+    ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -461,13 +460,9 @@ impl CommandIdentifiers {
                     .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?,
             )
         };
-        let snapshot = ScheduleSnapshot::try_new(
-            id,
-            rule,
-            EntityRevision::new(0),
-            submitted_at_utc,
-        )
-        .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+        let snapshot =
+            ScheduleSnapshot::try_new(id, rule, EntityRevision::new(0), submitted_at_utc)
+                .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
         Ok(CommandEnvelope::new(
             SchemaRevision::new(1),
             command_id,
@@ -478,10 +473,7 @@ impl CommandIdentifiers {
         ))
     }
 
-    fn schedule_delete(
-        &self,
-        snapshot: &ScheduleSnapshot,
-    ) -> CommandEnvelope<ScheduleCommand> {
+    fn schedule_delete(&self, snapshot: &ScheduleSnapshot) -> CommandEnvelope<ScheduleCommand> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         CommandEnvelope::new(
             SchemaRevision::new(1),
@@ -493,10 +485,7 @@ impl CommandIdentifiers {
         )
     }
 
-    fn schedule_replace(
-        &self,
-        snapshot: ScheduleSnapshot,
-    ) -> CommandEnvelope<ScheduleCommand> {
+    fn schedule_replace(&self, snapshot: ScheduleSnapshot) -> CommandEnvelope<ScheduleCommand> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         CommandEnvelope::new(
             SchemaRevision::new(1),
@@ -540,8 +529,17 @@ impl CommandIdentifiers {
     ) -> CommandEnvelope<ScheduleCommand> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         CommandEnvelope::new(
-            SchemaRevision::new(1), command_id, ordering_key, Some(expected_revision),
-            submitted_at_utc, ScheduleCommand::EditOccurrence { series_id, anchor_date, scope, edit },
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            Some(expected_revision),
+            submitted_at_utc,
+            ScheduleCommand::EditOccurrence {
+                series_id,
+                anchor_date,
+                scope,
+                edit,
+            },
         )
     }
 
@@ -900,7 +898,9 @@ impl SchedulePersistence for WriterPersistence {
         let Ok(mut store) = self.store.lock() else {
             return Err(SchedulePersistenceError::Failed);
         };
-        store.writer().delete_schedule(schedule_id, expected_revision)
+        store
+            .writer()
+            .delete_schedule(schedule_id, expected_revision)
     }
 }
 
@@ -1119,7 +1119,10 @@ impl RuntimeResources {
     }
 
     #[cfg(windows)]
-    fn application_icon(&self, application_id: ApplicationId) -> Option<openmanic_application::ApplicationIcon> {
+    fn application_icon(
+        &self,
+        application_id: ApplicationId,
+    ) -> Option<openmanic_application::ApplicationIcon> {
         let Ok(mut cache) = self.application_icons.lock() else {
             return None;
         };
@@ -1230,10 +1233,10 @@ impl RuntimeResources {
             self.action_router(),
             Arc::clone(&self.activation_stop),
         )?;
-        let (metadata_requests, metadata_stop, metadata_handle) = spawn_metadata_worker(
-            Arc::clone(&self.application_icons),
-        )?;
-        let (title_requests, title_stop, title_handle) = spawn_title_worker(Arc::clone(&self.lanes))?;
+        let (metadata_requests, metadata_stop, metadata_handle) =
+            spawn_metadata_worker(Arc::clone(&self.application_icons))?;
+        let (title_requests, title_stop, title_handle) =
+            spawn_title_worker(Arc::clone(&self.lanes))?;
         let Some(focus_notice_receiver) = self.focus_notice_receiver.take() else {
             return Err(CompositionError::Runtime);
         };
@@ -1380,7 +1383,7 @@ fn spawn_platform_worker(
                 stop_receiver,
                 &ready_sender,
             )
-                .is_err()
+            .is_err()
             {
                 let _ = ready_sender.send(Err(()));
             }
@@ -1444,7 +1447,8 @@ type TitleWorkerStart = (
 fn spawn_metadata_worker(
     application_icons: Arc<Mutex<ApplicationIconCache>>,
 ) -> Result<MetadataWorkerStart, CompositionError> {
-    let (request_sender, request_receiver) = mpsc::sync_channel(APPLICATION_METADATA_REQUEST_CAPACITY);
+    let (request_sender, request_receiver) =
+        mpsc::sync_channel(APPLICATION_METADATA_REQUEST_CAPACITY);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
         .name(ThreadRoot::new(RuntimeWorker::BulkWorker).name().to_owned())
@@ -1541,7 +1545,12 @@ fn run_writer_worker(
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     let store = Arc::new(Mutex::new(store));
-    let mut services = writer_services(&store, focus_notification_error, focus_completion_pending, focus_notice_sender);
+    let mut services = writer_services(
+        &store,
+        focus_notification_error,
+        focus_completion_pending,
+        focus_notice_sender,
+    );
     reconcile_focus_snapshot(&mut services, &focus_snapshot);
     let mut current_projection = None;
     let mut last_focus_reconciliation = Instant::now();
@@ -1802,7 +1811,9 @@ fn process_window_title_observation(
     else {
         return;
     };
-    let _ = writer_store.writer().persist_window_title(tracker_run_id, &title);
+    let _ = writer_store
+        .writer()
+        .persist_window_title(tracker_run_id, &title);
 }
 
 fn foreground_command_with_exclusion(
@@ -1905,7 +1916,9 @@ fn process_catalog_command(
         MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
         MutationOutcome::Rejected(_) => None,
     };
-    if committed_revision.is_some() && let Some(application_ids) = newly_excluded {
+    if committed_revision.is_some()
+        && let Some(application_ids) = newly_excluded
+    {
         for application_id in application_ids {
             let _ = services.tracking.reconcile_active_application_excluded(
                 command.schema_revision(),
@@ -2032,6 +2045,31 @@ fn publish_today_snapshot(
     let _ = snapshots.publish(snapshot);
 }
 
+/// Publishes only to Calendar's dedicated immutable mailbox.
+///
+/// This deliberately takes a Calendar-typed mailbox rather than the Today mailbox so the route
+/// cannot accidentally receive a correlated-but-wrong Today response.
+fn publish_calendar_snapshot(
+    store: &Arc<Mutex<SqliteStore>>,
+    request: &ProjectionRequest<CalendarDayContext>,
+    snapshots: &LatestMailbox<SnapshotEnvelope<CalendarDaySnapshot>>,
+) {
+    let Ok(store) = store.lock() else {
+        return;
+    };
+    let Ok(mut reader) = store.open_read_session() else {
+        return;
+    };
+    drop(store);
+    let Ok(read) = reader.snapshot() else {
+        return;
+    };
+    let Ok(snapshot) = build_calendar_snapshot(request, &read) else {
+        return;
+    };
+    let _ = snapshots.publish(snapshot);
+}
+
 fn build_today_snapshot(
     request: &ProjectionRequest<TimelineContext>,
     read: &openmanic_storage_sqlite::ReadSnapshot,
@@ -2093,6 +2131,54 @@ fn build_today_snapshot(
             applications: catalog_applications,
             categories,
         },
+    ))
+}
+
+/// Builds Calendar data from one correlated read snapshot without coupling it to Today data.
+///
+/// The caller owns a separate Calendar mailbox, so a Calendar request can never overwrite a
+/// Timeline/Today response. Focus records contribute only when their persisted lifecycle state
+/// supplies both canonical endpoints; paused sessions deliberately remain absent.
+fn build_calendar_snapshot(
+    request: &ProjectionRequest<CalendarDayContext>,
+    read: &openmanic_storage_sqlite::ReadSnapshot,
+) -> Result<SnapshotEnvelope<CalendarDaySnapshot>, ()> {
+    let activities = read
+        .activities()
+        .iter()
+        .map(|record| {
+            TimelineSourceActivity::new(
+                TimelineRawIntervalId::new(record.raw_id()),
+                record.interval(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let focus = read
+        .focus_sessions()
+        .iter()
+        .filter_map(|record| {
+            record
+                .interval()
+                .map(|interval| CalendarSourceFocus::new(record.snapshot().clone(), interval))
+        })
+        .collect::<Vec<_>>();
+    let schedules = read
+        .schedules()
+        .iter()
+        .map(|record| record.snapshot().clone())
+        .collect::<Vec<_>>();
+    let calendar = CalendarDayProjector::build(
+        *request.payload(),
+        CalendarProjectionSource::new(read.revision(), &activities, &focus, &schedules),
+    )
+    .map_err(|_| ())?;
+    Ok(SnapshotEnvelope::new(
+        request.request_id(),
+        request.slot(),
+        request.context_key(),
+        read.revision(),
+        openmanic_application::TIMELINE_SNAPSHOT_SCHEMA_REVISION,
+        calendar,
     ))
 }
 
@@ -2257,7 +2343,9 @@ impl ScheduleDraftValidationError {
                 "A repeating schedule cannot currently run for exactly 24 hours."
             }
             Self::QueueUnavailable => "The schedule could not be queued. Try saving it again.",
-            Self::CannotRepresent => "This schedule cannot be saved with the current time settings.",
+            Self::CannotRepresent => {
+                "This schedule cannot be saved with the current time settings."
+            }
         }
     }
 }
@@ -2280,7 +2368,9 @@ const fn schedule_status_label(status: &MutationStatus) -> &'static str {
         MutationStatus::Rejected {
             reason: openmanic_application::MutationRejectionReason::RevisionConflict,
         } => "Schedule changed elsewhere. Review it and try again.",
-        MutationStatus::Rejected { .. } => "Schedule was not saved. Review the schedule details and try again.",
+        MutationStatus::Rejected { .. } => {
+            "Schedule was not saved. Review the schedule details and try again."
+        }
     }
 }
 
@@ -2493,23 +2583,30 @@ impl VerticalSlice {
 
 impl VerticalSliceApp {
     #[cfg(windows)]
-    fn render_application_icon(&mut self, ui: &mut eframe::egui::Ui, application_id: ApplicationId) {
+    fn render_application_icon(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        application_id: ApplicationId,
+    ) {
         let Some(icon) = self.runtime.application_icon(application_id) else {
             self.application_icon_textures.remove(&application_id);
             ui.label("□");
             return;
         };
-        let texture = self.application_icon_textures.entry(application_id).or_insert_with(|| {
-            let image = eframe::egui::ColorImage::from_rgba_unmultiplied(
-                [icon.width() as usize, icon.height() as usize],
-                icon.rgba(),
-            );
-            ui.ctx().load_texture(
-                format!("application-icon-{}", id_label(&application_id.as_bytes())),
-                image,
-                eframe::egui::TextureOptions::LINEAR,
-            )
-        });
+        let texture = self
+            .application_icon_textures
+            .entry(application_id)
+            .or_insert_with(|| {
+                let image = eframe::egui::ColorImage::from_rgba_unmultiplied(
+                    [icon.width() as usize, icon.height() as usize],
+                    icon.rgba(),
+                );
+                ui.ctx().load_texture(
+                    format!("application-icon-{}", id_label(&application_id.as_bytes())),
+                    image,
+                    eframe::egui::TextureOptions::LINEAR,
+                )
+            });
         ui.image((texture.id(), eframe::egui::vec2(20.0, 20.0)));
     }
 
@@ -2589,9 +2686,12 @@ impl VerticalSliceApp {
                 ui.label("Drag on the timeline to choose exact start and end times.");
             }
         });
-        let output = self
-            .timeline
-            .show_snapshot(ui, snapshot.timeline(), &context, self.create_schedule_mode);
+        let output = self.timeline.show_snapshot(
+            ui,
+            snapshot.timeline(),
+            &context,
+            self.create_schedule_mode,
+        );
         for action in output.actions().iter().copied() {
             match action {
                 TimelineRenderAction::Today(action) => {
@@ -2695,15 +2795,20 @@ impl VerticalSliceApp {
                     ui.label(format!("Rename {}", category.name().as_str()));
                     ui.text_edit_singleline(&mut self.category_rename_name);
                     if ui
-                        .add_enabled(replacement.is_some(), eframe::egui::Button::new("Save name"))
+                        .add_enabled(
+                            replacement.is_some(),
+                            eframe::egui::Button::new("Save name"),
+                        )
                         .clicked()
                         && let Some(name) = replacement
                         && let Some(command_id) = self.runtime.try_submit_catalog(
-                            self.runtime.identifiers.catalog_command(CatalogCommand::RenameCategory {
-                                category_id,
-                                name,
-                                observed_at_utc: UtcMicros::new(utc_now_micros()),
-                            }),
+                            self.runtime.identifiers.catalog_command(
+                                CatalogCommand::RenameCategory {
+                                    category_id,
+                                    name,
+                                    observed_at_utc: UtcMicros::new(utc_now_micros()),
+                                },
+                            ),
                         )
                     {
                         self.latest_catalog_command = Some(command_id);
@@ -2764,10 +2869,7 @@ impl VerticalSliceApp {
         ui.horizontal(|ui| {
             ui.label("Search");
             ui.text_edit_singleline(&mut self.application_search);
-            ui.checkbox(
-                &mut self.show_excluded_applications_only,
-                "Excluded only",
-            );
+            ui.checkbox(&mut self.show_excluded_applications_only, "Excluded only");
         });
         ui.horizontal_wrapped(|ui| {
             ui.label("Show");
@@ -2855,10 +2957,7 @@ impl VerticalSliceApp {
             );
         ui.horizontal_wrapped(|ui| {
             if ui
-                .add_enabled(
-                    has_selection,
-                    eframe::egui::Button::new(assignment_label),
-                )
+                .add_enabled(has_selection, eframe::egui::Button::new(assignment_label))
                 .clicked()
                 && let Ok(payload) = CatalogCommand::try_assign_applications(
                     selected_application_ids.iter().copied(),
@@ -2913,7 +3012,9 @@ impl VerticalSliceApp {
             let category_matches = self
                 .application_filter_category
                 .is_none_or(|category_id| application.category_id() == category_id);
-            if !search_matches || !category_matches || (self.show_excluded_applications_only && !excluded)
+            if !search_matches
+                || !category_matches
+                || (self.show_excluded_applications_only && !excluded)
             {
                 continue;
             }
@@ -2935,7 +3036,10 @@ impl VerticalSliceApp {
                 let mut selected = self
                     .selected_category_applications
                     .contains(&application_id);
-                if ui.checkbox(&mut selected, application.name().as_str()).changed() {
+                if ui
+                    .checkbox(&mut selected, application.name().as_str())
+                    .changed()
+                {
                     if selected {
                         self.selected_category_applications.insert(application_id);
                     } else {
@@ -3140,18 +3244,25 @@ impl VerticalSliceApp {
                 draft.existing.clone(),
             )
         });
-        let Some((action, range, label, repeats, weekday_mask, existing)) = schedule_draft_action else {
+        let Some((action, range, label, repeats, weekday_mask, existing)) = schedule_draft_action
+        else {
             self.render_schedule_status(ui);
             return;
         };
         let submission = match action {
-            ScheduleDraftAction::Save => Some(if let Some(recurring) = self.schedule_draft.as_ref().and_then(|draft| draft.recurring.clone()) {
-                self.queue_recurring_schedule_edit(recurring, range, &label, weekday_mask)
-            } else if let Some(existing) = existing {
-                self.queue_schedule_replacement(existing, range, &label, repeats, weekday_mask)
-            } else {
-                self.queue_schedule_draft(range, &label, repeats, weekday_mask)
-            }),
+            ScheduleDraftAction::Save => Some(
+                if let Some(recurring) = self
+                    .schedule_draft
+                    .as_ref()
+                    .and_then(|draft| draft.recurring.clone())
+                {
+                    self.queue_recurring_schedule_edit(recurring, range, &label, weekday_mask)
+                } else if let Some(existing) = existing {
+                    self.queue_schedule_replacement(existing, range, &label, repeats, weekday_mask)
+                } else {
+                    self.queue_schedule_draft(range, &label, repeats, weekday_mask)
+                },
+            ),
             ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
         };
         if let Some(Ok(command_id)) = submission {
@@ -3174,7 +3285,11 @@ impl VerticalSliceApp {
         clippy::excessive_nesting,
         reason = "each occurrence retains its own edit and delete controls with the immutable occurrence identity."
     )]
-    fn render_existing_schedule_controls(&mut self, ui: &mut eframe::egui::Ui, today: &TodaySnapshot) {
+    fn render_existing_schedule_controls(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        today: &TodaySnapshot,
+    ) {
         let entries = today
             .timeline()
             .schedule_occurrences()
@@ -3213,16 +3328,18 @@ impl VerticalSliceApp {
                             scope: ScheduleEditScope::OnlyThisDate,
                         });
                     }
-                    if !schedule.rule().is_repeating()
-                        && ui.button("Edit…").clicked()
-                    {
+                    if !schedule.rule().is_repeating() && ui.button("Edit…").clicked() {
                         self.schedule_draft = ScheduleDraft::from_existing(schedule.clone());
                     }
                     if schedule.rule().is_repeating()
-                        && let (ScheduleId::Series(series_id), Some(anchor_date)) = (schedule.id(), anchor_date)
+                        && let (ScheduleId::Series(series_id), Some(anchor_date)) =
+                            (schedule.id(), anchor_date)
                         && ui.button("Edit…").clicked()
                         && let Some(draft) = ScheduleDraft::from_recurring(
-                            schedule, series_id, anchor_date, interval,
+                            schedule,
+                            series_id,
+                            anchor_date,
+                            interval,
                         )
                     {
                         self.schedule_draft = Some(draft);
@@ -3271,15 +3388,14 @@ impl VerticalSliceApp {
             return;
         }
         let command = match (request.snapshot.id(), request.anchor_date) {
-            (ScheduleId::Series(series_id), Some(anchor_date)) => self
-                .runtime
-                .identifiers
-                .schedule_delete_occurrence(
+            (ScheduleId::Series(series_id), Some(anchor_date)) => {
+                self.runtime.identifiers.schedule_delete_occurrence(
                     series_id,
                     anchor_date,
                     request.scope,
                     request.snapshot.entity_revision(),
-                ),
+                )
+            }
             _ => self.runtime.identifiers.schedule_delete(&request.snapshot),
         };
         if let Some(command_id) = self.runtime.try_submit_schedule(command) {
@@ -3305,10 +3421,10 @@ impl VerticalSliceApp {
         repeats: bool,
         weekday_mask: u8,
     ) -> Result<CommandId, ScheduleDraftValidationError> {
-        let command = self
-            .runtime
-            .identifiers
-            .schedule_create(range, label, repeats, weekday_mask)?;
+        let command =
+            self.runtime
+                .identifiers
+                .schedule_create(range, label, repeats, weekday_mask)?;
         self.runtime
             .try_submit_schedule(command)
             .ok_or(ScheduleDraftValidationError::QueueUnavailable)
@@ -3351,21 +3467,35 @@ impl VerticalSliceApp {
         weekday_mask: u8,
     ) -> Result<CommandId, ScheduleDraftValidationError> {
         let edit = match recurring.scope {
-            ScheduleEditScope::OnlyThisDate => RecurringScheduleEdit::OnlyThisDate(
-                RecurringOccurrenceOverride { interval: range, start_after_gap: false, start_earlier_fold: false, end_after_gap: false, end_earlier_fold: false },
-            ),
+            ScheduleEditScope::OnlyThisDate => {
+                RecurringScheduleEdit::OnlyThisDate(RecurringOccurrenceOverride {
+                    interval: range,
+                    start_after_gap: false,
+                    start_earlier_fold: false,
+                    end_after_gap: false,
+                    end_earlier_fold: false,
+                })
+            }
             ScheduleEditScope::ThisAndFuture | ScheduleEditScope::EveryOccurrence => {
                 RecurringScheduleEdit::Rule(RecurringScheduleRuleChange {
-                    label: label.to_owned(), category_id: recurring.category_id, weekday_mask,
+                    label: label.to_owned(),
+                    category_id: recurring.category_id,
+                    weekday_mask,
                     start_second_of_day: recurring.start_second_of_day,
                     end_second_of_day: recurring.end_second_of_day,
                     time_zone_id: recurring.time_zone_id,
                 })
             }
         };
-        self.runtime.try_submit_schedule(self.runtime.identifiers.schedule_edit_occurrence(
-            recurring.series_id, recurring.anchor_date, recurring.scope, recurring.expected_revision, edit,
-        )).ok_or(ScheduleDraftValidationError::QueueUnavailable)
+        self.runtime
+            .try_submit_schedule(self.runtime.identifiers.schedule_edit_occurrence(
+                recurring.series_id,
+                recurring.anchor_date,
+                recurring.scope,
+                recurring.expected_revision,
+                edit,
+            ))
+            .ok_or(ScheduleDraftValidationError::QueueUnavailable)
     }
 
     fn dispatch_ui_commands(&mut self) {
@@ -3496,7 +3626,9 @@ impl ScheduleDraft {
     ) -> Option<Self> {
         let segment = snapshot.rule().segments().into_iter().find(|segment| {
             segment.effective_start_date() <= anchor_date
-                && segment.effective_end_date().is_none_or(|end| anchor_date <= end)
+                && segment
+                    .effective_end_date()
+                    .is_none_or(|end| anchor_date <= end)
         })?;
         Some(Self {
             range,
@@ -3580,7 +3712,10 @@ fn render_weekday_selector(ui: &mut eframe::egui::Ui, weekday_mask: &mut u8) {
             .enumerate()
         {
             let bit = 1_u8 << index;
-            if ui.selectable_label(*weekday_mask & bit != 0, *label).clicked() {
+            if ui
+                .selectable_label(*weekday_mask & bit != 0, *label)
+                .clicked()
+            {
                 *weekday_mask ^= bit;
             }
         }
@@ -3723,9 +3858,8 @@ mod tests {
     use std::sync::Arc;
 
     use openmanic_application::{
-        CatalogCommand, EntityRevision, LaneCapacities, LaneReceive, ScheduleCommand,
-        ScheduleId, ScheduleSnapshot, TrackingCommand, TrackingEvidence, WorkLane,
-        bounded_runtime_lanes,
+        CatalogCommand, EntityRevision, LaneCapacities, LaneReceive, ScheduleCommand, ScheduleId,
+        ScheduleSnapshot, TrackingCommand, TrackingEvidence, WorkLane, bounded_runtime_lanes,
     };
     use openmanic_domain::{
         ApplicationId, FocusSessionState, HalfOpenInterval, ScheduleEditScope, ScheduleRule,
@@ -3734,9 +3868,9 @@ mod tests {
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
-        CommandIdentifiers, PlatformActionRouter, UiInbox, UiIngress, day_range,
-        focus_remaining_label, focus_remaining_us, recurring_schedule_rule, store_identity,
-        ScheduleDraft, ScheduleDraftValidationError,
+        CommandIdentifiers, PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError,
+        UiInbox, UiIngress, day_range, focus_remaining_label, focus_remaining_us,
+        recurring_schedule_rule, store_identity,
     };
 
     #[test]
@@ -3904,17 +4038,8 @@ mod tests {
         let series_id = ScheduleSeriesId::from_bytes([7; 16]);
         let snapshot = ScheduleSnapshot::try_new(
             ScheduleId::Series(series_id),
-            ScheduleRule::repeating(
-                "Review",
-                None,
-                1,
-                9 * 3_600,
-                10 * 3_600,
-                0,
-                None,
-                "Etc/UTC",
-            )
-            .expect("valid recurring fixture"),
+            ScheduleRule::repeating("Review", None, 1, 9 * 3_600, 10 * 3_600, 0, None, "Etc/UTC")
+                .expect("valid recurring fixture"),
             EntityRevision::new(4),
             UtcMicros::new(10),
         )
@@ -3926,7 +4051,10 @@ mod tests {
             snapshot.entity_revision(),
         );
 
-        assert_eq!(command.expected_entity_revision(), Some(EntityRevision::new(4)));
+        assert_eq!(
+            command.expected_entity_revision(),
+            Some(EntityRevision::new(4))
+        );
         assert!(matches!(
             command.payload(),
             ScheduleCommand::DeleteOccurrence {
@@ -4017,11 +4145,9 @@ mod tests {
             recurring_schedule_rule("No days", range, 0),
             Err(ScheduleDraftValidationError::NoWeekdays)
         );
-        let fractional_range = HalfOpenInterval::try_new(
-            UtcMicros::new(1),
-            UtcMicros::new(3_600_000_001),
-        )
-        .expect("positive fractional fixture");
+        let fractional_range =
+            HalfOpenInterval::try_new(UtcMicros::new(1), UtcMicros::new(3_600_000_001))
+                .expect("positive fractional fixture");
         assert_eq!(
             recurring_schedule_rule("Fractional", fractional_range, 0b0000_0001),
             Err(ScheduleDraftValidationError::WholeSecondTimes)
