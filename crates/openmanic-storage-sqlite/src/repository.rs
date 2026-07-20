@@ -2,16 +2,21 @@
 
 use std::path::Path;
 
-use openmanic_application::{DataRevision, EntityRevision, ScheduleId, ScheduleSnapshot};
+use openmanic_application::{
+    DataRevision, EntityRevision, SavedViewId, SavedViewLoad, SavedViewSnapshot, ScheduleId,
+    ScheduleSnapshot,
+};
 use openmanic_domain::{
     ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
-    ApplicationName, Category, CategoryId, CategoryName, HalfOpenInterval, PowerTransitionEvidence,
-    OneTimeScheduleId, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+    ApplicationName, Category, CategoryId, CategoryName, HalfOpenInterval, OneTimeScheduleId,
+    PowerTransitionEvidence, SavedViewDefinition, SavedViewField, SavedViewFields, SavedViewRange,
+    SavedViewRelativeRange, SavedViewScalar, SavedViewTimeZoneBehavior, ScheduleRule,
+    ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 use rusqlite::Transaction;
 
-use crate::{SqliteReader, StorageError};
 use crate::writer::load_schedule_series_rule;
+use crate::{SqliteReader, StorageError};
 
 /// One immutable activity interval returned by a storage snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -373,10 +378,14 @@ impl ScheduleRepository {
         let rows = statement
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?,
-                    row.get::<_, Option<Vec<u8>>>(2)?, row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(4)?, row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?, row.get::<_, i64>(7)?,
+                    row.get::<_, Vec<u8>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
                 ))
             })
             .map_err(|error| database_error(&error, "read one-time schedule snapshot"))?;
@@ -384,37 +393,80 @@ impl ScheduleRepository {
             let (id, label, category_id, start, end, zone, created, revision) =
                 row.map_err(|error| database_error(&error, "read one-time schedule snapshot"))?;
             let interval = HalfOpenInterval::try_new(UtcMicros::new(start), UtcMicros::new(end))
-                .map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule interval" })?;
+                .map_err(|_| StorageError::InvalidStoredValue {
+                    field: "one-time schedule interval",
+                })?;
             let rule = ScheduleRule::one_time(
                 label,
-                category_id.map(|value| fixed_id(value, "schedule category ID")).transpose()?.map(CategoryId::from_bytes),
+                category_id
+                    .map(|value| fixed_id(value, "schedule category ID"))
+                    .transpose()?
+                    .map(CategoryId::from_bytes),
                 interval,
                 zone,
-            ).map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule rule" })?;
-            Ok(ScheduleRecord { snapshot: ScheduleSnapshot::try_new(
-                ScheduleId::OneTime(OneTimeScheduleId::from_bytes(fixed_id(id, "one-time schedule ID")?)),
-                rule,
-                EntityRevision::new(u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule revision" })?),
-                UtcMicros::new(created),
-            ).map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule snapshot" })? })
-        }).collect()
+            )
+            .map_err(|_| StorageError::InvalidStoredValue {
+                field: "one-time schedule rule",
+            })?;
+            Ok(ScheduleRecord {
+                snapshot: ScheduleSnapshot::try_new(
+                    ScheduleId::OneTime(OneTimeScheduleId::from_bytes(fixed_id(
+                        id,
+                        "one-time schedule ID",
+                    )?)),
+                    rule,
+                    EntityRevision::new(u64::try_from(revision).map_err(|_| {
+                        StorageError::InvalidStoredValue {
+                            field: "one-time schedule revision",
+                        }
+                    })?),
+                    UtcMicros::new(created),
+                )
+                .map_err(|_| StorageError::InvalidStoredValue {
+                    field: "one-time schedule snapshot",
+                })?,
+            })
+        })
+        .collect()
     }
 
     fn read_series(transaction: &Transaction<'_>) -> Result<Vec<ScheduleRecord>, StorageError> {
         let mut statement = transaction
             .prepare("SELECT id, public_id, created_utc_us, revision FROM schedule_series ORDER BY public_id")
             .map_err(|error| database_error(&error, "prepare schedule-series snapshot"))?;
-        let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
             .map_err(|error| database_error(&error, "read schedule-series snapshot"))?;
         rows.map(|row| {
-            let (row_id, id, created, revision) = row.map_err(|error| database_error(&error, "read schedule-series snapshot"))?;
-            Ok(ScheduleRecord { snapshot: ScheduleSnapshot::try_new(
-                ScheduleId::Series(ScheduleSeriesId::from_bytes(fixed_id(id, "schedule series ID")?)),
-                load_schedule_series_rule(transaction, row_id)?,
-                EntityRevision::new(u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue { field: "schedule series revision" })?),
-                UtcMicros::new(created),
-            ).map_err(|_| StorageError::InvalidStoredValue { field: "schedule series snapshot" })? })
-        }).collect()
+            let (row_id, id, created, revision) =
+                row.map_err(|error| database_error(&error, "read schedule-series snapshot"))?;
+            Ok(ScheduleRecord {
+                snapshot: ScheduleSnapshot::try_new(
+                    ScheduleId::Series(ScheduleSeriesId::from_bytes(fixed_id(
+                        id,
+                        "schedule series ID",
+                    )?)),
+                    load_schedule_series_rule(transaction, row_id)?,
+                    EntityRevision::new(u64::try_from(revision).map_err(|_| {
+                        StorageError::InvalidStoredValue {
+                            field: "schedule series revision",
+                        }
+                    })?),
+                    UtcMicros::new(created),
+                )
+                .map_err(|_| StorageError::InvalidStoredValue {
+                    field: "schedule series snapshot",
+                })?,
+            })
+        })
+        .collect()
     }
 }
 
@@ -427,6 +479,297 @@ pub(crate) fn read_schedule_snapshot(
         .into_iter()
         .map(|record| record.snapshot)
         .find(|snapshot| snapshot.id() == schedule_id))
+}
+
+/// Restores every valid saved view while retaining a count of corrupt rows for diagnostics.
+pub(crate) fn load_saved_views(
+    connection: &mut rusqlite::Connection,
+) -> Result<SavedViewLoad, StorageError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT public_id, name, display_order, schema_version, revision, definition_json, created_utc_us
+               FROM saved_overview_view
+              ORDER BY display_order, public_id",
+        )
+        .map_err(|error| database_error(&error, "prepare saved-view load"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Vec<u8>>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+            ))
+        })
+        .map_err(|error| database_error(&error, "read saved views"))?;
+    let mut snapshots = Vec::new();
+    let mut invalid_count = 0;
+    for row in rows {
+        let Ok((id, name, display_order, schema_version, revision, definition, created)) = row
+        else {
+            invalid_count += 1;
+            continue;
+        };
+        let snapshot = (|| {
+            let id = SavedViewId::from_bytes(fixed_id(id, "saved-view stable ID")?);
+            let display_order =
+                u32::try_from(display_order).map_err(|_| StorageError::InvalidStoredValue {
+                    field: "saved-view display order",
+                })?;
+            let schema_version =
+                u16::try_from(schema_version).map_err(|_| StorageError::InvalidStoredValue {
+                    field: "saved-view schema version",
+                })?;
+            let revision =
+                u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue {
+                    field: "saved-view revision",
+                })?;
+            let document = decode_saved_view_definition(&definition, revision)?;
+            if document.schema_version() != schema_version
+                || document.name() != name
+                || document.display_order() != display_order
+            {
+                return Err(StorageError::InvalidStoredValue {
+                    field: "saved-view normalized columns",
+                });
+            }
+            SavedViewSnapshot::try_new(
+                id,
+                document,
+                EntityRevision::new(revision),
+                UtcMicros::new(created),
+            )
+            .map_err(|_| StorageError::InvalidStoredValue {
+                field: "saved-view identity",
+            })
+        })();
+        match snapshot {
+            Ok(snapshot) => snapshots.push(snapshot),
+            Err(_) => invalid_count += 1,
+        }
+    }
+    Ok(SavedViewLoad::new(snapshots, invalid_count))
+}
+
+pub(crate) fn encode_saved_view_definition(definition: &SavedViewDefinition) -> String {
+    let mut output = String::from("OMSV1");
+    push_saved_view_part(&mut output, &definition.public_id);
+    push_saved_view_part(&mut output, &definition.name);
+    push_saved_view_part(&mut output, &definition.display_order.to_string());
+    match &definition.range {
+        SavedViewRange::Relative(range) => {
+            push_saved_view_part(&mut output, "relative");
+            push_saved_view_part(
+                &mut output,
+                match range {
+                    SavedViewRelativeRange::Day => "day",
+                    SavedViewRelativeRange::Week => "week",
+                    SavedViewRelativeRange::Month => "month",
+                    SavedViewRelativeRange::Year => "year",
+                    SavedViewRelativeRange::Custom => "custom",
+                },
+            );
+        }
+        SavedViewRange::Fixed {
+            start_local_date,
+            end_local_date,
+            time_zone_behavior,
+        } => {
+            push_saved_view_part(&mut output, "fixed");
+            push_saved_view_part(&mut output, start_local_date);
+            push_saved_view_part(&mut output, end_local_date);
+            match time_zone_behavior {
+                SavedViewTimeZoneBehavior::Automatic => {
+                    push_saved_view_part(&mut output, "automatic")
+                }
+                SavedViewTimeZoneBehavior::Manual(zone) => {
+                    push_saved_view_part(&mut output, "manual");
+                    push_saved_view_part(&mut output, zone);
+                }
+            }
+        }
+    }
+    push_saved_view_part(&mut output, &definition.grouping);
+    encode_saved_view_fields(&mut output, &definition.filters);
+    push_saved_view_part(&mut output, &definition.sort);
+    encode_saved_view_fields(&mut output, &definition.widget_configuration);
+    output
+}
+
+fn push_saved_view_part(output: &mut String, part: &str) {
+    output.push('|');
+    output.push_str(&part.len().to_string());
+    output.push(':');
+    output.push_str(part);
+}
+
+fn encode_saved_view_fields(output: &mut String, fields: &SavedViewFields) {
+    push_saved_view_part(output, &fields.schema_version.to_string());
+    push_saved_view_part(output, &fields.fields.len().to_string());
+    for field in &fields.fields {
+        push_saved_view_part(output, &field.name);
+        match &field.value {
+            SavedViewScalar::Boolean(value) => {
+                push_saved_view_part(output, "boolean");
+                push_saved_view_part(output, if *value { "true" } else { "false" });
+            }
+            SavedViewScalar::Integer(value) => {
+                push_saved_view_part(output, "integer");
+                push_saved_view_part(output, &value.to_string());
+            }
+            SavedViewScalar::Text(value) => {
+                push_saved_view_part(output, "text");
+                push_saved_view_part(output, value);
+            }
+        }
+    }
+}
+
+fn decode_saved_view_definition(
+    source: &str,
+    revision: u64,
+) -> Result<openmanic_domain::SavedViewDocument, StorageError> {
+    let mut parts = SavedViewParts::new(source)?;
+    let public_id = parts.next()?;
+    let name = parts.next()?;
+    let display_order = parse_saved_view_number(&parts.next()?, "saved-view display order")?;
+    let range = match parts.next()?.as_str() {
+        "relative" => SavedViewRange::Relative(match parts.next()?.as_str() {
+            "day" => SavedViewRelativeRange::Day,
+            "week" => SavedViewRelativeRange::Week,
+            "month" => SavedViewRelativeRange::Month,
+            "year" => SavedViewRelativeRange::Year,
+            "custom" => SavedViewRelativeRange::Custom,
+            _ => return invalid_saved_view(),
+        }),
+        "fixed" => {
+            let start_local_date = parts.next()?;
+            let end_local_date = parts.next()?;
+            let time_zone_behavior = match parts.next()?.as_str() {
+                "automatic" => SavedViewTimeZoneBehavior::Automatic,
+                "manual" => SavedViewTimeZoneBehavior::Manual(parts.next()?),
+                _ => return invalid_saved_view(),
+            };
+            SavedViewRange::Fixed {
+                start_local_date,
+                end_local_date,
+                time_zone_behavior,
+            }
+        }
+        _ => return invalid_saved_view(),
+    };
+    let grouping = parts.next()?;
+    let filters = decode_saved_view_fields(&mut parts)?;
+    let sort = parts.next()?;
+    let widget_configuration = decode_saved_view_fields(&mut parts)?;
+    if !parts.finished() {
+        return invalid_saved_view();
+    }
+    openmanic_domain::SavedViewDocument::try_new(
+        SavedViewDefinition {
+            public_id,
+            name,
+            display_order,
+            range,
+            grouping,
+            filters,
+            sort,
+            widget_configuration,
+        },
+        revision,
+    )
+    .map_err(|_| StorageError::InvalidStoredValue {
+        field: "saved-view document",
+    })
+}
+
+fn decode_saved_view_fields(
+    parts: &mut SavedViewParts<'_>,
+) -> Result<SavedViewFields, StorageError> {
+    let schema_version = parse_saved_view_number(&parts.next()?, "saved-view field schema")?;
+    let count: usize = parse_saved_view_number(&parts.next()?, "saved-view field count")?;
+    let mut fields = Vec::with_capacity(count);
+    for _ in 0..count {
+        let name = parts.next()?;
+        let value = match parts.next()?.as_str() {
+            "boolean" => match parts.next()?.as_str() {
+                "true" => SavedViewScalar::Boolean(true),
+                "false" => SavedViewScalar::Boolean(false),
+                _ => return invalid_saved_view(),
+            },
+            "integer" => SavedViewScalar::Integer(parse_saved_view_number(
+                &parts.next()?,
+                "saved-view integer",
+            )?),
+            "text" => SavedViewScalar::Text(parts.next()?),
+            _ => return invalid_saved_view(),
+        };
+        fields.push(SavedViewField { name, value });
+    }
+    Ok(SavedViewFields {
+        schema_version,
+        fields,
+    })
+}
+
+fn parse_saved_view_number<T: std::str::FromStr>(
+    value: &str,
+    field: &'static str,
+) -> Result<T, StorageError> {
+    value
+        .parse()
+        .map_err(|_| StorageError::InvalidStoredValue { field })
+}
+
+fn invalid_saved_view<T>() -> Result<T, StorageError> {
+    Err(StorageError::InvalidStoredValue {
+        field: "saved-view document",
+    })
+}
+
+struct SavedViewParts<'a> {
+    source: &'a str,
+    offset: usize,
+}
+
+impl<'a> SavedViewParts<'a> {
+    fn new(source: &'a str) -> Result<Self, StorageError> {
+        if !source.starts_with("OMSV1") {
+            return invalid_saved_view();
+        }
+        Ok(Self { source, offset: 5 })
+    }
+    fn next(&mut self) -> Result<String, StorageError> {
+        let remainder = self
+            .source
+            .get(self.offset..)
+            .ok_or(StorageError::InvalidStoredValue {
+                field: "saved-view document",
+            })?;
+        let remainder = remainder
+            .strip_prefix('|')
+            .ok_or(StorageError::InvalidStoredValue {
+                field: "saved-view document",
+            })?;
+        let (length, value) =
+            remainder
+                .split_once(':')
+                .ok_or(StorageError::InvalidStoredValue {
+                    field: "saved-view document",
+                })?;
+        let length: usize = parse_saved_view_number(length, "saved-view part length")?;
+        if value.len() < length || !value.is_char_boundary(length) {
+            return invalid_saved_view();
+        }
+        self.offset = self.source.len() - value.len() + length;
+        Ok(value[..length].to_owned())
+    }
+    fn finished(&self) -> bool {
+        self.offset == self.source.len()
+    }
 }
 
 pub(crate) fn read_snapshot(transaction: &Transaction<'_>) -> Result<ReadSnapshot, StorageError> {

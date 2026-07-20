@@ -3,13 +3,13 @@
 use std::path::{Path, PathBuf};
 
 use openmanic_application::{
-    AcceptedWindowTitle, ApplicationError, ApplicationPort, CatalogPersistence, CatalogPersistenceError, DataRevision,
-    EntityRevision, FocusKind, FocusPersistence, FocusPersistenceError, FocusSnapshot,
-    PortFailureReason, ScheduleId, SchedulePersistence, SchedulePersistenceError,
-    ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
-    repeating_schedule_rules_conflict,
+    AcceptedWindowTitle, ApplicationError, ApplicationPort, CatalogPersistence,
+    CatalogPersistenceError, DataRevision, EntityRevision, FocusKind, FocusPersistence,
+    FocusPersistenceError, FocusSnapshot, PortFailureReason, SavedViewId, SavedViewPersistence,
+    SavedViewPersistenceError, SavedViewSnapshot, ScheduleId, SchedulePersistence,
+    SchedulePersistenceError, ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
+    TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
     schedule_rule_conflicts_with_intervals,
-    TrackingPersistenceSubmit,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
@@ -18,7 +18,9 @@ use openmanic_domain::{
 };
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 
-use crate::repository::{database_error, read_schedule_snapshot};
+use crate::repository::{
+    database_error, encode_saved_view_definition, load_saved_views, read_schedule_snapshot,
+};
 use crate::{
     ConnectionConfiguration, SqliteReadSession, SqliteWriter, StorageError, StoreOpenOptions,
 };
@@ -138,20 +140,26 @@ impl StorageWriter {
     ) -> Result<DataRevision, StorageError> {
         let transaction = self.begin_writer_transaction("begin window title persistence")?;
         let revision = next_revision(&transaction)?;
-        let application_row_id = application_row_id(&transaction, title.application_id().as_bytes())?;
+        let application_row_id =
+            application_row_id(&transaction, title.application_id().as_bytes())?;
         let tracker_run_row_id = tracker_run_row_id(&transaction, tracker_run_id)?;
         transaction.execute(
             "INSERT INTO window_title_text(text_hash, title) VALUES (?1, ?2) ON CONFLICT(text_hash, title) DO NOTHING",
             params![title.text_hash().to_be_bytes().as_slice(), title.text()],
         ).map_err(|error| database_error(&error, "insert window title text"))?;
-        let title_text_id: i64 = transaction.query_row(
-            "SELECT id FROM window_title_text WHERE text_hash = ?1 AND title = ?2",
-            params![title.text_hash().to_be_bytes().as_slice(), title.text()],
-            |row| row.get(0),
-        ).map_err(|error| database_error(&error, "find window title text"))?;
+        let title_text_id: i64 = transaction
+            .query_row(
+                "SELECT id FROM window_title_text WHERE text_hash = ?1 AND title = ?2",
+                params![title.text_hash().to_be_bytes().as_slice(), title.text()],
+                |row| row.get(0),
+            )
+            .map_err(|error| database_error(&error, "find window title text"))?;
         let start = title.stable_since_utc().get();
         let end = title.accepted_at_utc().get();
-        let revision_value = i64::try_from(revision.get()).map_err(|_| StorageError::InvalidStoredValue { field: "data revision" })?;
+        let revision_value =
+            i64::try_from(revision.get()).map_err(|_| StorageError::InvalidStoredValue {
+                field: "data revision",
+            })?;
         let updated = transaction.execute(
             "UPDATE window_title_span SET end_utc_us = ?1, source_revision = ?2
               WHERE id = (SELECT id FROM window_title_span
@@ -167,7 +175,9 @@ impl StorageWriter {
             ).map_err(|error| database_error(&error, "insert window title span"))?;
         }
         update_revision(&transaction, revision)?;
-        transaction.commit().map_err(|error| database_error(&error, "commit window title persistence"))?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit window title persistence"))?;
         Ok(revision)
     }
 
@@ -748,6 +758,217 @@ impl FocusPersistence for &mut StorageWriter {
     }
 }
 
+impl SavedViewPersistence for StorageWriter {
+    fn load_saved_views(
+        &mut self,
+    ) -> Result<openmanic_application::SavedViewLoad, SavedViewPersistenceError> {
+        load_saved_views(self.writer.connection_mut())
+            .map_err(|_| SavedViewPersistenceError::Failed)
+    }
+
+    fn create_saved_view(
+        &mut self,
+        snapshot: &SavedViewSnapshot,
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin saved-view creation")
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        let revision =
+            next_revision(&transaction).map_err(|_| SavedViewPersistenceError::Failed)?;
+        insert_saved_view(&transaction, snapshot)
+            .map_err(|_| SavedViewPersistenceError::InvalidDocument)?;
+        update_revision(&transaction, revision).map_err(|_| SavedViewPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        Ok(revision)
+    }
+
+    fn replace_saved_view(
+        &mut self,
+        snapshot: &SavedViewSnapshot,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin saved-view replacement")
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        let revision =
+            next_revision(&transaction).map_err(|_| SavedViewPersistenceError::Failed)?;
+        let next_entity_revision = expected_revision
+            .get()
+            .checked_add(1)
+            .ok_or(SavedViewPersistenceError::Failed)?;
+        let changed = replace_saved_view(
+            &transaction,
+            snapshot,
+            expected_revision,
+            next_entity_revision,
+        )
+        .map_err(|_| SavedViewPersistenceError::InvalidDocument)?;
+        if changed != 1 {
+            return Err(SavedViewPersistenceError::RevisionConflict);
+        }
+        update_revision(&transaction, revision).map_err(|_| SavedViewPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        Ok(revision)
+    }
+
+    fn reorder_saved_views(
+        &mut self,
+        ordered: &[(SavedViewId, EntityRevision)],
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin saved-view reorder")
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        let total: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM saved_overview_view", [], |row| {
+                row.get(0)
+            })
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        if usize::try_from(total).ok() != Some(ordered.len()) {
+            return Err(SavedViewPersistenceError::RevisionConflict);
+        }
+        for (id, expected_revision) in ordered {
+            let current: Option<i64> = transaction
+                .query_row(
+                    "SELECT revision FROM saved_overview_view WHERE public_id = ?1",
+                    [id.as_bytes().as_slice()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|_| SavedViewPersistenceError::Failed)?;
+            if current
+                .and_then(|value| u64::try_from(value).ok())
+                .map(EntityRevision::new)
+                != Some(*expected_revision)
+            {
+                return Err(SavedViewPersistenceError::RevisionConflict);
+            }
+        }
+        let revision =
+            next_revision(&transaction).map_err(|_| SavedViewPersistenceError::Failed)?;
+        for (display_order, (id, expected_revision)) in ordered.iter().enumerate() {
+            let display_order =
+                i64::try_from(display_order).map_err(|_| SavedViewPersistenceError::Failed)?;
+            let next_entity_revision = expected_revision
+                .get()
+                .checked_add(1)
+                .ok_or(SavedViewPersistenceError::Failed)?;
+            let changed = transaction.execute(
+                "UPDATE saved_overview_view SET display_order = ?1, revision = ?2 WHERE public_id = ?3 AND revision = ?4",
+                params![display_order, i64::try_from(next_entity_revision).map_err(|_| SavedViewPersistenceError::Failed)?, id.as_bytes().as_slice(), i64::try_from(expected_revision.get()).map_err(|_| SavedViewPersistenceError::Failed)?],
+            ).map_err(|_| SavedViewPersistenceError::Failed)?;
+            if changed != 1 {
+                return Err(SavedViewPersistenceError::RevisionConflict);
+            }
+        }
+        update_revision(&transaction, revision).map_err(|_| SavedViewPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        Ok(revision)
+    }
+
+    fn delete_saved_view(
+        &mut self,
+        id: SavedViewId,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin saved-view deletion")
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        let revision =
+            next_revision(&transaction).map_err(|_| SavedViewPersistenceError::Failed)?;
+        let changed = transaction
+            .execute(
+                "DELETE FROM saved_overview_view WHERE public_id = ?1 AND revision = ?2",
+                params![
+                    id.as_bytes().as_slice(),
+                    i64::try_from(expected_revision.get())
+                        .map_err(|_| SavedViewPersistenceError::Failed)?
+                ],
+            )
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        if changed != 1 {
+            return Err(SavedViewPersistenceError::RevisionConflict);
+        }
+        update_revision(&transaction, revision).map_err(|_| SavedViewPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SavedViewPersistenceError::Failed)?;
+        Ok(revision)
+    }
+}
+
+impl SavedViewPersistence for &mut StorageWriter {
+    fn load_saved_views(
+        &mut self,
+    ) -> Result<openmanic_application::SavedViewLoad, SavedViewPersistenceError> {
+        <StorageWriter as SavedViewPersistence>::load_saved_views(*self)
+    }
+    fn create_saved_view(
+        &mut self,
+        snapshot: &SavedViewSnapshot,
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        <StorageWriter as SavedViewPersistence>::create_saved_view(*self, snapshot)
+    }
+    fn replace_saved_view(
+        &mut self,
+        snapshot: &SavedViewSnapshot,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        <StorageWriter as SavedViewPersistence>::replace_saved_view(
+            *self,
+            snapshot,
+            expected_revision,
+        )
+    }
+    fn reorder_saved_views(
+        &mut self,
+        ordered: &[(SavedViewId, EntityRevision)],
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        <StorageWriter as SavedViewPersistence>::reorder_saved_views(*self, ordered)
+    }
+    fn delete_saved_view(
+        &mut self,
+        id: SavedViewId,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SavedViewPersistenceError> {
+        <StorageWriter as SavedViewPersistence>::delete_saved_view(*self, id, expected_revision)
+    }
+}
+
+fn insert_saved_view(
+    transaction: &Transaction<'_>,
+    snapshot: &SavedViewSnapshot,
+) -> Result<(), StorageError> {
+    let document = snapshot.document();
+    transaction.execute(
+        "INSERT INTO saved_overview_view(public_id, name, display_order, schema_version, revision, definition_json, created_utc_us, updated_utc_us) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+        params![snapshot.id().as_bytes().as_slice(), document.name(), i64::from(document.display_order()), i64::from(document.schema_version()), i64::try_from(snapshot.entity_revision().get()).map_err(|_| StorageError::InvalidStoredValue { field: "saved-view revision" })?, encode_saved_view_definition(&document.definition()), snapshot.created_at_utc().get()],
+    ).map_err(|error| database_error(&error, "create saved view"))?;
+    Ok(())
+}
+
+fn replace_saved_view(
+    transaction: &Transaction<'_>,
+    snapshot: &SavedViewSnapshot,
+    expected_revision: EntityRevision,
+    next_entity_revision: u64,
+) -> Result<usize, StorageError> {
+    let definition = snapshot.document().definition();
+    let document = openmanic_domain::SavedViewDocument::try_new(definition, next_entity_revision)
+        .map_err(|_| StorageError::InvalidStoredValue {
+        field: "saved-view document",
+    })?;
+    transaction.execute(
+        "UPDATE saved_overview_view SET name = ?1, display_order = ?2, schema_version = ?3, revision = ?4, definition_json = ?5, updated_utc_us = ?6 WHERE public_id = ?7 AND revision = ?8",
+        params![document.name(), i64::from(document.display_order()), i64::from(document.schema_version()), i64::try_from(next_entity_revision).map_err(|_| StorageError::InvalidStoredValue { field: "saved-view revision" })?, encode_saved_view_definition(&document.definition()), snapshot.created_at_utc().get(), snapshot.id().as_bytes().as_slice(), i64::try_from(expected_revision.get()).map_err(|_| StorageError::InvalidStoredValue { field: "saved-view revision" })?],
+    ).map_err(|error| database_error(&error, "replace saved view"))
+}
+
 impl SchedulePersistence for StorageWriter {
     fn load_schedule(
         &mut self,
@@ -875,7 +1096,11 @@ impl SchedulePersistence for &mut StorageWriter {
         schedule_id: ScheduleId,
         expected_revision: EntityRevision,
     ) -> Result<DataRevision, SchedulePersistenceError> {
-        <StorageWriter as SchedulePersistence>::delete_schedule(*self, schedule_id, expected_revision)
+        <StorageWriter as SchedulePersistence>::delete_schedule(
+            *self,
+            schedule_id,
+            expected_revision,
+        )
     }
 }
 
@@ -912,7 +1137,10 @@ fn delete_schedule_snapshot(
     match schedule_id {
         ScheduleId::OneTime(id) => {
             transaction
-                .execute("DELETE FROM one_time_schedule WHERE public_id = ?1", [id.as_bytes().as_slice()])
+                .execute(
+                    "DELETE FROM one_time_schedule WHERE public_id = ?1",
+                    [id.as_bytes().as_slice()],
+                )
                 .map_err(|error| database_error(&error, "delete one-time schedule"))?;
         }
         ScheduleId::Series(id) => {
@@ -924,10 +1152,16 @@ fn delete_schedule_snapshot(
                 )
                 .map_err(|error| database_error(&error, "find schedule series for replacement"))?;
             transaction
-                .execute("DELETE FROM schedule_exception WHERE series_id = ?1", [series_row_id])
+                .execute(
+                    "DELETE FROM schedule_exception WHERE series_id = ?1",
+                    [series_row_id],
+                )
                 .map_err(|error| database_error(&error, "delete schedule exceptions"))?;
             transaction
-                .execute("DELETE FROM schedule_rule_segment WHERE series_id = ?1", [series_row_id])
+                .execute(
+                    "DELETE FROM schedule_rule_segment WHERE series_id = ?1",
+                    [series_row_id],
+                )
                 .map_err(|error| database_error(&error, "delete schedule rule segments"))?;
             transaction
                 .execute("DELETE FROM schedule_series WHERE id = ?1", [series_row_id])
@@ -942,9 +1176,7 @@ fn insert_schedule_snapshot(
     snapshot: &ScheduleSnapshot,
 ) -> Result<(), StorageError> {
     match snapshot.id() {
-        ScheduleId::OneTime(id) => {
-            insert_one_time_schedule(transaction, snapshot, &id.as_bytes())
-        }
+        ScheduleId::OneTime(id) => insert_one_time_schedule(transaction, snapshot, &id.as_bytes()),
         ScheduleId::Series(id) => insert_schedule_series(transaction, snapshot, &id.as_bytes()),
     }
 }
@@ -977,8 +1209,9 @@ fn schedule_conflicts_with_existing_schedules(
         .map_err(|error| database_error(&error, "prepare one-time schedule overlap check"))?;
     let rows = statement
         .query_map([], |row| {
-            let interval = HalfOpenInterval::try_new(UtcMicros::new(row.get(0)?), UtcMicros::new(row.get(1)?))
-                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?;
+            let interval =
+                HalfOpenInterval::try_new(UtcMicros::new(row.get(0)?), UtcMicros::new(row.get(1)?))
+                    .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, 0))?;
             Ok(interval)
         })
         .map_err(|error| database_error(&error, "read one-time schedule overlap check"))?;
@@ -996,11 +1229,11 @@ fn schedule_conflicts_with_existing_schedules(
     let series_rules = load_schedule_series_rules(transaction)?;
     if let Some(candidate_interval) = snapshot.rule().one_time_interval() {
         for rule in &series_rules {
-            if schedule_rule_conflicts_with_intervals(rule, &[candidate_interval]).map_err(|_| {
-                StorageError::InvalidStoredValue {
+            if schedule_rule_conflicts_with_intervals(rule, &[candidate_interval]).map_err(
+                |_| StorageError::InvalidStoredValue {
                     field: "schedule time-zone overlap validation",
-                }
-            })? {
+                },
+            )? {
                 return Ok(true);
             }
         }
@@ -1098,9 +1331,11 @@ fn load_schedule_segments(
                     label,
                     category_id
                         .map(|value| {
-                            value.try_into().map_err(|_| StorageError::InvalidStoredValue {
-                                field: "schedule segment category ID",
-                            })
+                            value
+                                .try_into()
+                                .map_err(|_| StorageError::InvalidStoredValue {
+                                    field: "schedule segment category ID",
+                                })
                         })
                         .transpose()?
                         .map(CategoryId::from_bytes),
@@ -1201,12 +1436,16 @@ fn insert_one_time_schedule(
     public_id: &[u8; 16],
 ) -> Result<(), StorageError> {
     let rule = snapshot.rule();
-    let interval = rule.one_time_interval().ok_or(StorageError::InvalidStoredValue {
-        field: "one-time schedule rule",
-    })?;
-    let created_zone_id = rule.created_zone_id().ok_or(StorageError::InvalidStoredValue {
-        field: "one-time schedule creation zone",
-    })?;
+    let interval = rule
+        .one_time_interval()
+        .ok_or(StorageError::InvalidStoredValue {
+            field: "one-time schedule rule",
+        })?;
+    let created_zone_id = rule
+        .created_zone_id()
+        .ok_or(StorageError::InvalidStoredValue {
+            field: "one-time schedule creation zone",
+        })?;
     let category_row_id = rule
         .category_id()
         .map(|category_id| category_row_id(transaction, category_id.as_bytes()))
@@ -1331,11 +1570,11 @@ fn insert_schedule_exception(
             boundary_resolution_code(end_after_gap, end_earlier_fold)?,
         ),
     };
-    let resolved_zone_id = rule.time_zone_for_anchor_date(anchor_date).ok_or(
-        StorageError::InvalidStoredValue {
-            field: "schedule exception rule segment",
-        },
-    )?;
+    let resolved_zone_id =
+        rule.time_zone_for_anchor_date(anchor_date)
+            .ok_or(StorageError::InvalidStoredValue {
+                field: "schedule exception rule segment",
+            })?;
     transaction
         .execute(
             "INSERT INTO schedule_exception(
@@ -2132,15 +2371,16 @@ mod tests {
     use openmanic_application::{
         CommandEnvelope, CommandId, EntityRevision, FocusCommand, FocusKind,
         FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
-        FocusSnapshot, OrderingKey, ScheduleId, SchedulePersistence, SchedulePersistenceError,
-        ScheduleSnapshot, SchemaRevision, TrackingCheckpoint, TrackingPersistenceIntent,
-        TitleObservationResult, TitleStabilizer, TrackingPersistencePort,
-        TrackingPersistenceSubmit,
+        FocusSnapshot, OrderingKey, SavedViewId, SavedViewPersistence, SavedViewSnapshot,
+        ScheduleId, SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot,
+        SchemaRevision, TitleObservationResult, TitleStabilizer, TrackingCheckpoint,
+        TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit,
     };
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application,
         ApplicationId, ApplicationName, Category, CategoryId, CategoryName, FocusSessionId,
-        FocusSessionState, HalfOpenInterval, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId,
+        FocusSessionState, HalfOpenInterval, OneTimeScheduleId, SavedViewDefinition,
+        SavedViewFields, SavedViewRange, SavedViewRelativeRange, ScheduleRule, ScheduleSeriesId,
         TrackerRunId, UtcMicros,
     };
     use rusqlite::Connection;
@@ -2228,7 +2468,9 @@ mod tests {
             CategoryName::try_new("Planning").expect("valid category name"),
         );
         assert_eq!(
-            store.writer().create_category(&category, UtcMicros::new(10)),
+            store
+                .writer()
+                .create_category(&category, UtcMicros::new(10)),
             Ok(revision(1))
         );
         let rule = ScheduleRule::one_time(
@@ -2582,7 +2824,9 @@ mod tests {
         let excluded: i64 = writer
             .writer
             .connection_mut()
-            .query_row("SELECT exclusion_policy FROM application", [], |row| row.get(0))
+            .query_row("SELECT exclusion_policy FROM application", [], |row| {
+                row.get(0)
+            })
             .expect("stored exclusion policy");
         assert_eq!(excluded, 1);
         assert_eq!(
@@ -2592,7 +2836,9 @@ mod tests {
         let excluded: i64 = writer
             .writer
             .connection_mut()
-            .query_row("SELECT exclusion_policy FROM application", [], |row| row.get(0))
+            .query_row("SELECT exclusion_policy FROM application", [], |row| {
+                row.get(0)
+            })
             .expect("stored exclusion policy");
         assert_eq!(excluded, 0);
     }
@@ -2610,9 +2856,18 @@ mod tests {
         let second = accepted_title(application_id(34), 2_000_000, 4_000_000, "Plan");
         let different = accepted_title(application_id(34), 4_000_000, 6_000_000, "Review");
 
-        assert_eq!(writer.persist_window_title(run_id(33), &first), Ok(revision(4)));
-        assert_eq!(writer.persist_window_title(run_id(33), &second), Ok(revision(5)));
-        assert_eq!(writer.persist_window_title(run_id(33), &different), Ok(revision(6)));
+        assert_eq!(
+            writer.persist_window_title(run_id(33), &first),
+            Ok(revision(4))
+        );
+        assert_eq!(
+            writer.persist_window_title(run_id(33), &second),
+            Ok(revision(5))
+        );
+        assert_eq!(
+            writer.persist_window_title(run_id(33), &different),
+            Ok(revision(6))
+        );
 
         let spans: Vec<(String, i64, i64)> = writer
             .writer
@@ -2628,11 +2883,19 @@ mod tests {
             .expect("title span query should execute")
             .collect::<Result<_, _>>()
             .expect("title span rows should decode");
-        assert_eq!(spans, vec![("Plan".to_owned(), 0, 4_000_000), ("Review".to_owned(), 4_000_000, 6_000_000)]);
+        assert_eq!(
+            spans,
+            vec![
+                ("Plan".to_owned(), 0, 4_000_000),
+                ("Review".to_owned(), 4_000_000, 6_000_000)
+            ]
+        );
         let distinct_title_texts: i64 = writer
             .writer
             .connection_mut()
-            .query_row("SELECT COUNT(*) FROM window_title_text", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM window_title_text", [], |row| {
+                row.get(0)
+            })
             .expect("title text count should read");
         assert_eq!(distinct_title_texts, 2);
     }
@@ -2996,6 +3259,51 @@ mod tests {
         assert!(!configuration.trusted_schema());
         assert!(!configuration.query_only());
         assert_eq!(configuration.busy_timeout(), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn saved_views_round_trip_full_definition_and_enforce_revisions() {
+        let database = TemporaryDatabase::new("saved-views");
+        let mut store = open_store(database.path(), 17);
+        let id = SavedViewId::from_bytes([17; 16]);
+        let document = openmanic_domain::SavedViewDocument::try_new(
+            SavedViewDefinition {
+                public_id: id.encoded(),
+                name: "Weekly review".to_owned(),
+                display_order: 0,
+                range: SavedViewRange::Relative(SavedViewRelativeRange::Week),
+                grouping: "category".to_owned(),
+                filters: SavedViewFields {
+                    schema_version: 1,
+                    fields: Vec::new(),
+                },
+                sort: "duration-descending".to_owned(),
+                widget_configuration: SavedViewFields {
+                    schema_version: 1,
+                    fields: Vec::new(),
+                },
+            },
+            0,
+        )
+        .expect("fixture view should be valid");
+        let snapshot = SavedViewSnapshot::try_new(id, document, EntityRevision::new(0), time(10))
+            .expect("fixture identity should agree");
+        assert_eq!(
+            SavedViewPersistence::create_saved_view(store.writer(), &snapshot),
+            Ok(revision(1))
+        );
+        let loaded =
+            SavedViewPersistence::load_saved_views(store.writer()).expect("saved view should load");
+        assert_eq!(loaded.invalid_count(), 0);
+        assert_eq!(loaded.snapshots(), &[snapshot]);
+        assert_eq!(
+            SavedViewPersistence::delete_saved_view(store.writer(), id, EntityRevision::new(1)),
+            Err(openmanic_application::SavedViewPersistenceError::RevisionConflict)
+        );
+        assert_eq!(
+            SavedViewPersistence::delete_saved_view(store.writer(), id, EntityRevision::new(0)),
+            Ok(revision(2))
+        );
     }
 
     #[test]
