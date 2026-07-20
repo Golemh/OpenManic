@@ -4,7 +4,7 @@
 //! tracking reduction, projection work, and Windows callbacks never execute in an egui frame.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
     path::{Path, PathBuf},
@@ -2035,6 +2035,14 @@ struct VerticalSliceApp {
     latest_schedule_command: Option<CommandId>,
     latest_catalog_command: Option<CommandId>,
     new_category_name: String,
+    selected_category_id: Option<CategoryId>,
+    selected_category_applications: BTreeSet<ApplicationId>,
+    application_search: String,
+    application_filter_category: Option<Option<CategoryId>>,
+    show_excluded_applications_only: bool,
+    editing_category_id: Option<CategoryId>,
+    category_rename_name: String,
+    category_delete_confirmation: Option<CategoryId>,
     latest_focus_command: Option<CommandId>,
     latest_focus_session: Option<FocusSessionId>,
     #[cfg(windows)]
@@ -2121,6 +2129,14 @@ impl VerticalSlice {
             latest_schedule_command: None,
             latest_catalog_command: None,
             new_category_name: String::new(),
+            selected_category_id: None,
+            selected_category_applications: BTreeSet::new(),
+            application_search: String::new(),
+            application_filter_category: None,
+            show_excluded_applications_only: false,
+            editing_category_id: None,
+            category_rename_name: String::new(),
+            category_delete_confirmation: None,
             latest_focus_command: None,
             latest_focus_session: None,
             #[cfg(windows)]
@@ -2271,15 +2287,254 @@ impl VerticalSliceApp {
             ui.label("No categories yet. Applications are currently Uncategorized.");
         } else {
             ui.label("Your categories");
-            ui.horizontal_wrapped(|ui| {
-                for category in snapshot.categories() {
+            for category in snapshot.categories() {
+                ui.horizontal(|ui| {
                     ui.label(category.name().as_str());
-                }
-            });
+                    if ui.button("Rename").clicked() {
+                        self.editing_category_id = Some(category.id());
+                        self.category_rename_name = category.name().as_str().to_owned();
+                        self.category_delete_confirmation = None;
+                    }
+                    if ui.button("Delete category").clicked() {
+                        self.category_delete_confirmation = Some(category.id());
+                        self.editing_category_id = None;
+                    }
+                });
+            }
+        }
+        if let Some(category_id) = self.editing_category_id {
+            if let Some(category) = snapshot
+                .categories()
+                .iter()
+                .find(|category| category.id() == category_id)
+            {
+                let replacement = CategoryName::try_new(self.category_rename_name.trim()).ok();
+                ui.horizontal(|ui| {
+                    ui.label(format!("Rename {}", category.name().as_str()));
+                    ui.text_edit_singleline(&mut self.category_rename_name);
+                    if ui
+                        .add_enabled(replacement.is_some(), eframe::egui::Button::new("Save name"))
+                        .clicked()
+                        && let Some(name) = replacement
+                        && let Some(command_id) = self.runtime.try_submit_catalog(
+                            self.runtime.identifiers.catalog_command(CatalogCommand::RenameCategory {
+                                category_id,
+                                name,
+                                observed_at_utc: UtcMicros::new(utc_now_micros()),
+                            }),
+                        )
+                    {
+                        self.latest_catalog_command = Some(command_id);
+                        self.editing_category_id = None;
+                        self.category_rename_name.clear();
+                    }
+                    if ui.button("Cancel rename").clicked() {
+                        self.editing_category_id = None;
+                        self.category_rename_name.clear();
+                    }
+                });
+            } else {
+                self.editing_category_id = None;
+                self.category_rename_name.clear();
+            }
+        }
+        if let Some(category_id) = self.category_delete_confirmation {
+            if let Some(category) = snapshot
+                .categories()
+                .iter()
+                .find(|category| category.id() == category_id)
+            {
+                let assigned_count = snapshot
+                    .applications()
+                    .iter()
+                    .filter(|(application, _)| application.category_id() == Some(category_id))
+                    .count();
+                ui.group(|ui| {
+                    ui.label(format!(
+                        "Delete {}? {assigned_count} assigned application(s) will become Uncategorized.",
+                        category.name().as_str()
+                    ));
+                    ui.horizontal(|ui| {
+                        if ui.button("Confirm category deletion").clicked()
+                            && let Some(command_id) = self.runtime.try_submit_catalog(
+                                self.runtime.identifiers.catalog_command(
+                                    CatalogCommand::DeleteCategory { category_id },
+                                ),
+                            )
+                        {
+                            self.latest_catalog_command = Some(command_id);
+                            if self.selected_category_id == Some(category_id) {
+                                self.selected_category_id = None;
+                            }
+                            self.category_delete_confirmation = None;
+                        }
+                        if ui.button("Keep category").clicked() {
+                            self.category_delete_confirmation = None;
+                        }
+                    });
+                });
+            } else {
+                self.category_delete_confirmation = None;
+            }
         }
         ui.add_space(8.0);
         ui.heading("Applications");
+        ui.horizontal(|ui| {
+            ui.label("Search");
+            ui.text_edit_singleline(&mut self.application_search);
+            ui.checkbox(
+                &mut self.show_excluded_applications_only,
+                "Excluded only",
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Show");
+            if ui
+                .selectable_label(self.application_filter_category.is_none(), "All")
+                .clicked()
+            {
+                self.application_filter_category = None;
+            }
+            if ui
+                .selectable_label(
+                    self.application_filter_category == Some(None),
+                    "Uncategorized",
+                )
+                .clicked()
+            {
+                self.application_filter_category = Some(None);
+            }
+            for category in snapshot.categories() {
+                let filter = Some(Some(category.id()));
+                if ui
+                    .selectable_label(
+                        self.application_filter_category == filter,
+                        category.name().as_str(),
+                    )
+                    .clicked()
+                {
+                    self.application_filter_category = filter;
+                }
+            }
+        });
+        let selected_application_ids = self
+            .selected_category_applications
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let has_selection = !selected_application_ids.is_empty();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("{} selected", selected_application_ids.len()));
+            if ui.button("Select all").clicked() {
+                self.selected_category_applications = snapshot
+                    .applications()
+                    .iter()
+                    .map(|(application, _)| application.id())
+                    .collect();
+            }
+            if ui
+                .add_enabled(has_selection, eframe::egui::Button::new("Clear selection"))
+                .clicked()
+            {
+                self.selected_category_applications.clear();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Assign selected to");
+            if ui
+                .selectable_label(self.selected_category_id.is_none(), "Uncategorized")
+                .clicked()
+            {
+                self.selected_category_id = None;
+            }
+            for category in snapshot.categories() {
+                if ui
+                    .selectable_label(
+                        self.selected_category_id == Some(category.id()),
+                        category.name().as_str(),
+                    )
+                    .clicked()
+                {
+                    self.selected_category_id = Some(category.id());
+                }
+            }
+        });
+        let assignment_label = self
+            .selected_category_id
+            .and_then(|category_id| {
+                snapshot
+                    .categories()
+                    .iter()
+                    .find(|category| category.id() == category_id)
+            })
+            .map_or_else(
+                || "Remove selected from category".to_owned(),
+                |category| format!("Assign selected to {}", category.name().as_str()),
+            );
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    has_selection,
+                    eframe::egui::Button::new(assignment_label),
+                )
+                .clicked()
+                && let Ok(payload) = CatalogCommand::try_assign_applications(
+                    selected_application_ids.iter().copied(),
+                    self.selected_category_id,
+                )
+                && let Some(command_id) = self
+                    .runtime
+                    .try_submit_catalog(self.runtime.identifiers.catalog_command(payload))
+            {
+                self.latest_catalog_command = Some(command_id);
+            }
+            if ui
+                .add_enabled(
+                    has_selection,
+                    eframe::egui::Button::new("Exclude selected from future tracking"),
+                )
+                .clicked()
+                && let Ok(payload) = CatalogCommand::try_set_applications_excluded(
+                    selected_application_ids.iter().copied(),
+                    true,
+                )
+                && let Some(command_id) = self
+                    .runtime
+                    .try_submit_catalog(self.runtime.identifiers.catalog_command(payload))
+            {
+                self.latest_catalog_command = Some(command_id);
+            }
+            if ui
+                .add_enabled(
+                    has_selection,
+                    eframe::egui::Button::new("Include selected in future tracking"),
+                )
+                .clicked()
+                && let Ok(payload) = CatalogCommand::try_set_applications_excluded(
+                    selected_application_ids.iter().copied(),
+                    false,
+                )
+                && let Some(command_id) = self
+                    .runtime
+                    .try_submit_catalog(self.runtime.identifiers.catalog_command(payload))
+            {
+                self.latest_catalog_command = Some(command_id);
+            }
+        });
         for (application, excluded) in snapshot.applications() {
+            let search_matches = self.application_search.trim().is_empty()
+                || application
+                    .name()
+                    .as_str()
+                    .to_lowercase()
+                    .contains(&self.application_search.trim().to_lowercase());
+            let category_matches = self
+                .application_filter_category
+                .is_none_or(|category_id| application.category_id() == category_id);
+            if !search_matches || !category_matches || (self.show_excluded_applications_only && !excluded)
+            {
+                continue;
+            }
             let category_name = application
                 .category_id()
                 .and_then(|category_id| {
@@ -2290,7 +2545,17 @@ impl VerticalSliceApp {
                 })
                 .map_or("Uncategorized", |category| category.name().as_str());
             ui.horizontal(|ui| {
-                ui.label(application.name().as_str());
+                let application_id = application.id();
+                let mut selected = self
+                    .selected_category_applications
+                    .contains(&application_id);
+                if ui.checkbox(&mut selected, application.name().as_str()).changed() {
+                    if selected {
+                        self.selected_category_applications.insert(application_id);
+                    } else {
+                        self.selected_category_applications.remove(&application_id);
+                    }
+                }
                 ui.label(format!("Category: {category_name}"));
                 if *excluded {
                     ui.label("Excluded from future tracking");
@@ -2318,8 +2583,6 @@ impl VerticalSliceApp {
         {
             ui.label(catalog_status_label(status));
         }
-        ui.add_space(8.0);
-        ui.label("Category creation and assignment controls are being connected next.");
     }
 
     fn queue_tracking_control(&mut self, action: TrackingControlAction) {
