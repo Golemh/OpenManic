@@ -25,6 +25,10 @@ mod today;
 mod usage;
 
 pub use app::OpenManicApp;
+pub use calendar::{
+    CalendarAction, CalendarBlockDetails, CalendarBlockKind, CalendarController, CalendarDataState,
+    CalendarDensePeriod, CalendarEffect, CalendarPresentedBlock, CalendarViewModel,
+};
 pub use controller::{
     CommandDispatcher, DispatchDrain, InboundMessage, QueueCapacityError, QueueOverflow,
     UiController,
