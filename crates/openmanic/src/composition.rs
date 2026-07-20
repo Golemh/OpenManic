@@ -26,8 +26,9 @@ use openmanic_application::{
     RuntimeWorker, SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
     EntityRevision, FocusCommand, FocusNotificationError, FocusNotificationPort, FocusPersistence,
     FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome,
-    ScheduleCommand,
-    ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
+    ApplicationIconCache, ApplicationIconCacheLimits, ApplicationIconLookup, ApplicationIconResult,
+    ScheduleCommand, ScheduleId,
+    ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
     ScheduleService, ScheduleSnapshot,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
@@ -43,7 +44,7 @@ use openmanic_domain::{
 #[cfg(windows)]
 use openmanic_platform::{
     ActivationCommandDecode, InstanceAcquisition, LocalActivationCommand, WindowsActivationServer,
-    WindowsControlAdapter, WindowsInstanceOwner,
+    WindowsApplicationMetadataRequest, WindowsControlAdapter, WindowsInstanceOwner,
 };
 use openmanic_platform::{
     EvidencePublishResult, TrackingEvidenceSink, WindowsPlatformAction, WindowsTrayController,
@@ -71,6 +72,12 @@ const WRITER_OPTIONAL_CAPACITY: usize = 16;
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const WORKER_IDLE_INTERVAL: Duration = Duration::from_millis(10);
 const PLATFORM_PUMP_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(windows)]
+const APPLICATION_METADATA_REQUEST_CAPACITY: usize = 32;
+#[cfg(windows)]
+const APPLICATION_ICON_CACHE_ENTRIES: usize = 128;
+#[cfg(windows)]
+const APPLICATION_ICON_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Startup failures reported without exposing paths, titles, or raw platform errors.
 #[derive(Debug)]
@@ -918,6 +925,12 @@ struct RuntimeResources {
     #[cfg(windows)]
     platform_handle: Option<JoinHandle<()>>,
     #[cfg(windows)]
+    metadata_stop: Option<mpsc::Sender<()>>,
+    #[cfg(windows)]
+    metadata_handle: Option<JoinHandle<()>>,
+    #[cfg(windows)]
+    application_icons: Arc<Mutex<ApplicationIconCache>>,
+    #[cfg(windows)]
     activation_stop: Arc<AtomicBool>,
     #[cfg(windows)]
     activation_handle: Option<JoinHandle<()>>,
@@ -988,6 +1001,18 @@ impl RuntimeResources {
                 #[cfg(windows)]
                 platform_handle: None,
                 #[cfg(windows)]
+                metadata_stop: None,
+                #[cfg(windows)]
+                metadata_handle: None,
+                #[cfg(windows)]
+                application_icons: Arc::new(Mutex::new(ApplicationIconCache::new(
+                    ApplicationIconCacheLimits::try_new(
+                        APPLICATION_ICON_CACHE_ENTRIES,
+                        APPLICATION_ICON_CACHE_BYTES,
+                    )
+                    .map_err(|_| CompositionError::Runtime)?,
+                ))),
+                #[cfg(windows)]
                 activation_stop: Arc::new(AtomicBool::new(false)),
                 #[cfg(windows)]
                 activation_handle: None,
@@ -1012,6 +1037,17 @@ impl RuntimeResources {
             accepting: Arc::clone(&self.accepting),
             restore_requested: Arc::clone(&self.restore_requested),
             quit_requested: Arc::clone(&self.quit_requested),
+        }
+    }
+
+    #[cfg(windows)]
+    fn application_icon(&self, application_id: ApplicationId) -> Option<openmanic_application::ApplicationIcon> {
+        let Ok(mut cache) = self.application_icons.lock() else {
+            return None;
+        };
+        match cache.lookup_application(application_id) {
+            ApplicationIconLookup::Ready(icon) => Some(icon.clone()),
+            ApplicationIconLookup::Fallback => None,
         }
     }
 
@@ -1116,19 +1152,29 @@ impl RuntimeResources {
             self.action_router(),
             Arc::clone(&self.activation_stop),
         )?;
-        let (stop_sender, platform_handle, ready_receiver) =
-            spawn_platform_worker(self.action_router(), self.evidence_sink())?;
+        let (metadata_requests, metadata_stop, metadata_handle) = spawn_metadata_worker(
+            Arc::clone(&self.application_icons),
+        )?;
+        let (stop_sender, platform_handle, ready_receiver) = spawn_platform_worker(
+            self.action_router(),
+            self.evidence_sink(),
+            metadata_requests,
+        )?;
         if let Ok(Ok(())) = ready_receiver.recv_timeout(Duration::from_secs(5)) {
             self.activation_handle = Some(activation_handle);
             self.platform_stop = Some(stop_sender);
             self.platform_handle = Some(platform_handle);
+            self.metadata_stop = Some(metadata_stop);
+            self.metadata_handle = Some(metadata_handle);
             return Ok(());
         }
 
         self.activation_stop.store(true, Ordering::Release);
         let _ = stop_sender.send(());
+        let _ = metadata_stop.send(());
         let _ = activation_handle.join();
         let _ = platform_handle.join();
+        let _ = metadata_handle.join();
         Err(CompositionError::Platform)
     }
 
@@ -1143,11 +1189,18 @@ impl RuntimeResources {
             .platform_handle
             .take()
             .is_none_or(|handle| handle.join().is_ok());
+        if let Some(stop) = self.metadata_stop.take() {
+            let _ = stop.send(());
+        }
+        let metadata_joined = self
+            .metadata_handle
+            .take()
+            .is_none_or(|handle| handle.join().is_ok());
         let activation_joined = self
             .activation_handle
             .take()
             .is_none_or(|handle| handle.join().is_ok());
-        platform_joined && activation_joined
+        platform_joined && metadata_joined && activation_joined
     }
 }
 
@@ -1210,6 +1263,7 @@ type PlatformWorkerStart = (mpsc::Sender<()>, JoinHandle<()>, Receiver<Result<()
 fn spawn_platform_worker(
     action_router: PlatformActionRouter,
     evidence_sink: RuntimeEvidenceSink,
+    metadata_requests: SyncSender<WindowsApplicationMetadataRequest>,
 ) -> Result<PlatformWorkerStart, CompositionError> {
     let (stop_sender, stop_receiver) = mpsc::channel();
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -1220,7 +1274,13 @@ fn spawn_platform_worker(
                 .to_owned(),
         )
         .spawn(move || {
-            if run_platform_worker(action_router, evidence_sink, stop_receiver, &ready_sender)
+            if run_platform_worker(
+                action_router,
+                evidence_sink,
+                metadata_requests,
+                stop_receiver,
+                &ready_sender,
+            )
                 .is_err()
             {
                 let _ = ready_sender.send(Err(()));
@@ -1238,10 +1298,11 @@ fn spawn_platform_worker(
 fn run_platform_worker(
     action_router: PlatformActionRouter,
     evidence_sink: RuntimeEvidenceSink,
+    metadata_requests: SyncSender<WindowsApplicationMetadataRequest>,
     stop_receiver: Receiver<()>,
     ready_sender: &SyncSender<Result<(), ()>>,
 ) -> Result<(), openmanic_platform::WindowsControlError> {
-    let mut adapter = WindowsControlAdapter::new();
+    let mut adapter = WindowsControlAdapter::new().with_metadata_requests(metadata_requests);
     let mut control = adapter.install_control_window()?;
     let mut tray = control.install_tray()?;
     let _ = ready_sender.send(Ok(()));
@@ -1255,6 +1316,41 @@ fn run_platform_worker(
             Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected)
         ) {
             return Ok(());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_metadata_worker(
+    application_icons: Arc<Mutex<ApplicationIconCache>>,
+) -> Result<(SyncSender<WindowsApplicationMetadataRequest>, mpsc::Sender<()>, JoinHandle<()>), CompositionError> {
+    let (request_sender, request_receiver) = mpsc::sync_channel(APPLICATION_METADATA_REQUEST_CAPACITY);
+    let (stop_sender, stop_receiver) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name(ThreadRoot::new(RuntimeWorker::BulkWorker).name().to_owned())
+        .spawn(move || run_metadata_worker(request_receiver, stop_receiver, application_icons))
+        .map_err(|_| CompositionError::Runtime)?;
+    Ok((request_sender, stop_sender, handle))
+}
+
+#[cfg(windows)]
+fn run_metadata_worker(
+    requests: Receiver<WindowsApplicationMetadataRequest>,
+    stop: Receiver<()>,
+    application_icons: Arc<Mutex<ApplicationIconCache>>,
+) {
+    loop {
+        if matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected)) {
+            return;
+        }
+        let request = match requests.recv_timeout(PLATFORM_PUMP_INTERVAL) {
+            Ok(request) => request,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        let result: ApplicationIconResult = openmanic_platform::extract_application_icon(request);
+        if let Ok(mut cache) = application_icons.lock() {
+            let _ = result.apply_to(&mut cache);
         }
     }
 }
@@ -2046,6 +2142,8 @@ struct VerticalSliceApp {
     latest_focus_command: Option<CommandId>,
     latest_focus_session: Option<FocusSessionId>,
     #[cfg(windows)]
+    application_icon_textures: BTreeMap<ApplicationId, eframe::egui::TextureHandle>,
+    #[cfg(windows)]
     instance_owner: WindowsInstanceOwner,
 }
 
@@ -2140,12 +2238,35 @@ impl VerticalSlice {
             latest_focus_command: None,
             latest_focus_session: None,
             #[cfg(windows)]
+            application_icon_textures: BTreeMap::new(),
+            #[cfg(windows)]
             instance_owner: self.instance_owner,
         }
     }
 }
 
 impl VerticalSliceApp {
+    #[cfg(windows)]
+    fn render_application_icon(&mut self, ui: &mut eframe::egui::Ui, application_id: ApplicationId) {
+        let Some(icon) = self.runtime.application_icon(application_id) else {
+            self.application_icon_textures.remove(&application_id);
+            ui.label("□");
+            return;
+        };
+        let texture = self.application_icon_textures.entry(application_id).or_insert_with(|| {
+            let image = eframe::egui::ColorImage::from_rgba_unmultiplied(
+                [icon.width() as usize, icon.height() as usize],
+                icon.rgba(),
+            );
+            ui.ctx().load_texture(
+                format!("application-icon-{}", id_label(&application_id.as_bytes())),
+                image,
+                eframe::egui::TextureOptions::LINEAR,
+            )
+        });
+        ui.image((texture.id(), eframe::egui::vec2(20.0, 20.0)));
+    }
+
     fn drain_worker_ingress(&mut self) {
         self.runtime
             .ui_inbox
@@ -2546,6 +2667,10 @@ impl VerticalSliceApp {
                 .map_or("Uncategorized", |category| category.name().as_str());
             ui.horizontal(|ui| {
                 let application_id = application.id();
+                #[cfg(windows)]
+                self.render_application_icon(ui, application_id);
+                #[cfg(not(windows))]
+                ui.label("□");
                 let mut selected = self
                     .selected_category_applications
                     .contains(&application_id);

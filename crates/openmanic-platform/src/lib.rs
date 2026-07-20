@@ -13,6 +13,8 @@ mod adapter;
 mod capabilities;
 mod fake;
 mod windows_control;
+#[cfg(windows)]
+mod windows_metadata;
 mod windows_identity;
 mod windows_lifecycle;
 mod windows_raw;
@@ -36,6 +38,8 @@ pub use windows_control::{
 pub use windows_control::{
     WindowsApplicationMetadataRequest, WindowsControlError, WindowsControlWindow,
 };
+#[cfg(windows)]
+pub use windows_metadata::extract_application_icon;
 pub use windows_single_instance::{
     ActivationCommandDecode, LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT,
 };

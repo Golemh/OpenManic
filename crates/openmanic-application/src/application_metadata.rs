@@ -258,6 +258,7 @@ impl ApplicationIconResult {
 pub struct ApplicationIconCache {
     limits: ApplicationIconCacheLimits,
     entries: HashMap<ApplicationIconKey, CachedIcon>,
+    keys_by_application: HashMap<ApplicationId, ApplicationIconKey>,
     bytes: usize,
     next_access: u64,
     evictions: u64,
@@ -277,6 +278,7 @@ impl ApplicationIconCache {
         Self {
             limits,
             entries: HashMap::new(),
+            keys_by_application: HashMap::new(),
             bytes: 0,
             next_access: 0,
             evictions: 0,
@@ -298,6 +300,7 @@ impl ApplicationIconCache {
         if let Some(previous) = self.entries.remove(&key) {
             self.bytes = self.bytes.saturating_sub(previous.icon.byte_len());
         }
+        self.keys_by_application.insert(key.application_id(), key);
         let mut evicted_entries = 0;
         while self.entries.len() >= self.limits.max_entries
             || self.bytes.saturating_add(byte_len) > self.limits.max_bytes
@@ -312,6 +315,7 @@ impl ApplicationIconCache {
             };
             if let Some(evicted) = self.entries.remove(&lru_key) {
                 self.bytes = self.bytes.saturating_sub(evicted.icon.byte_len());
+                self.keys_by_application.remove(&lru_key.application_id());
                 self.evictions = self.evictions.saturating_add(1);
                 evicted_entries += 1;
             }
@@ -337,6 +341,18 @@ impl ApplicationIconCache {
         };
         entry.last_access = self.next_access;
         ApplicationIconLookup::Ready(&entry.icon)
+    }
+
+    /// Returns a ready decoded icon for one application without filesystem or OS work.
+    ///
+    /// The application-to-key association is rebuilt only as background results arrive. A cache
+    /// miss deliberately returns the same deterministic fallback marker as an absent decode.
+    #[must_use]
+    pub fn lookup_application(&mut self, application_id: ApplicationId) -> ApplicationIconLookup<'_> {
+        let Some(key) = self.keys_by_application.get(&application_id).copied() else {
+            return ApplicationIconLookup::Fallback;
+        };
+        self.lookup(key)
     }
 
     /// Returns privacy-safe cache counters without paths, application names, or icon payloads.
@@ -439,5 +455,28 @@ mod tests {
         };
         assert_eq!(fallback.application_id(), key.application_id());
         assert_eq!(fallback.apply_to(&mut cache), None);
+    }
+
+    #[test]
+    fn application_lookup_follows_decoded_result_and_eviction() {
+        let mut cache = ApplicationIconCache::new(
+            ApplicationIconCacheLimits::try_new(1, 4).expect("fixture limits are valid"),
+        );
+        let first = key(1, 1);
+        let second = key(2, 2);
+        let _ = cache.insert(first, icon(1));
+        assert!(matches!(
+            cache.lookup_application(first.application_id()),
+            ApplicationIconLookup::Ready(_)
+        ));
+        let _ = cache.insert(second, icon(2));
+        assert!(matches!(
+            cache.lookup_application(first.application_id()),
+            ApplicationIconLookup::Fallback
+        ));
+        assert!(matches!(
+            cache.lookup_application(second.application_id()),
+            ApplicationIconLookup::Ready(_)
+        ));
     }
 }
