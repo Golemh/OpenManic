@@ -87,6 +87,8 @@ pub enum ScheduleCommand {
     Create(ScheduleSnapshot),
     /// Replaces one schedule after the caller applies its explicit edit scope to the rule.
     Replace(ScheduleSnapshot),
+    /// Deletes one schedule after the caller confirms the explicit deletion scope.
+    Delete(ScheduleId),
 }
 
 /// Durable schedule operations required by the application service.
@@ -110,6 +112,18 @@ pub trait SchedulePersistence {
     fn replace_schedule(
         &mut self,
         snapshot: &ScheduleSnapshot,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError>;
+
+    /// Atomically deletes an existing schedule after checking its optimistic entity revision.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedulePersistenceError`] when the schedule changed or the transaction cannot
+    /// commit.
+    fn delete_schedule(
+        &mut self,
+        schedule_id: ScheduleId,
         expected_revision: EntityRevision,
     ) -> Result<DataRevision, SchedulePersistenceError>;
 }
@@ -154,6 +168,18 @@ impl ScheduleMutation {
             outcome: MutationOutcome::Rejected(MutationRejection::new(
                 command.command_id(),
                 reason,
+            )),
+            snapshot: None,
+        }
+    }
+    fn confirmed_without_snapshot(
+        command: &CommandEnvelope<ScheduleCommand>,
+        revision: DataRevision,
+    ) -> Self {
+        Self {
+            outcome: MutationOutcome::Confirmed(MutationConfirmation::new(
+                command.command_id(),
+                revision,
             )),
             snapshot: None,
         }
@@ -215,6 +241,27 @@ where
                     }
                     Err(SchedulePersistenceError::RevisionConflict) => {
                         ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
+                    }
+                    Err(SchedulePersistenceError::Failed) => ScheduleMutation::rejected(
+                        command,
+                        MutationRejectionReason::PersistenceFailure,
+                    ),
+                }
+            }
+            ScheduleCommand::Delete(schedule_id) => {
+                let Some(expected_revision) = command.expected_entity_revision() else {
+                    return ScheduleMutation::rejected(
+                        command,
+                        MutationRejectionReason::RevisionConflict,
+                    );
+                };
+                match self.persistence.delete_schedule(*schedule_id, expected_revision) {
+                    Ok(revision) => ScheduleMutation::confirmed_without_snapshot(command, revision),
+                    Err(SchedulePersistenceError::RevisionConflict) => {
+                        ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
+                    }
+                    Err(SchedulePersistenceError::Conflict) => {
+                        ScheduleMutation::rejected(command, MutationRejectionReason::Validation)
                     }
                     Err(SchedulePersistenceError::Failed) => ScheduleMutation::rejected(
                         command,

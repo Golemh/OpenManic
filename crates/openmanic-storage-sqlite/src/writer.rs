@@ -729,6 +729,30 @@ impl SchedulePersistence for StorageWriter {
             .map_err(|_| SchedulePersistenceError::Failed)?;
         Ok(revision)
     }
+
+    fn delete_schedule(
+        &mut self,
+        schedule_id: ScheduleId,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin schedule deletion")
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        if schedule_revision(&transaction, schedule_id)
+            .map_err(|_| SchedulePersistenceError::Failed)?
+            != Some(expected_revision)
+        {
+            return Err(SchedulePersistenceError::RevisionConflict);
+        }
+        let revision = next_revision(&transaction).map_err(|_| SchedulePersistenceError::Failed)?;
+        delete_schedule_snapshot(&transaction, schedule_id)
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        update_revision(&transaction, revision).map_err(|_| SchedulePersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SchedulePersistenceError::Failed)?;
+        Ok(revision)
+    }
 }
 
 impl SchedulePersistence for &mut StorageWriter {
@@ -745,6 +769,14 @@ impl SchedulePersistence for &mut StorageWriter {
         expected_revision: EntityRevision,
     ) -> Result<DataRevision, SchedulePersistenceError> {
         <StorageWriter as SchedulePersistence>::replace_schedule(*self, snapshot, expected_revision)
+    }
+
+    fn delete_schedule(
+        &mut self,
+        schedule_id: ScheduleId,
+        expected_revision: EntityRevision,
+    ) -> Result<DataRevision, SchedulePersistenceError> {
+        <StorageWriter as SchedulePersistence>::delete_schedule(*self, schedule_id, expected_revision)
     }
 }
 
@@ -2031,6 +2063,33 @@ mod tests {
                 EntityRevision::new(0),
             ),
             Err(SchedulePersistenceError::RevisionConflict)
+        );
+    }
+
+    #[test]
+    fn schedule_deletion_requires_the_current_revision() {
+        let database = TemporaryDatabase::new("schedule-deletion");
+        let mut store = open_store(database.path(), 27);
+        let schedule = one_time_schedule_snapshot(29, 100, 200);
+        assert_eq!(
+            SchedulePersistence::create_schedule(store.writer(), &schedule),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SchedulePersistence::delete_schedule(
+                store.writer(),
+                schedule.id(),
+                EntityRevision::new(1),
+            ),
+            Err(SchedulePersistenceError::RevisionConflict)
+        );
+        assert_eq!(
+            SchedulePersistence::delete_schedule(
+                store.writer(),
+                schedule.id(),
+                EntityRevision::new(0),
+            ),
+            Ok(revision(2))
         );
     }
 
