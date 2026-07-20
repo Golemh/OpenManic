@@ -22,6 +22,7 @@ mod projection;
 mod runtime;
 mod saved_view;
 mod schedule;
+mod settings;
 mod schedule_projection;
 mod schedule_time;
 mod timeline_projection;
@@ -94,6 +95,10 @@ pub use saved_view::{
     SavedViewCommand, SavedViewId, SavedViewLoad, SavedViewMutation, SavedViewPersistence,
     SavedViewPersistenceError, SavedViewRejection, SavedViewService, SavedViewSnapshot,
     SavedViewSnapshotError,
+};
+pub use settings::{
+    SettingsError, SettingsPersistence, SettingsPersistenceError, SettingsSnapshot,
+    SettingsThemeMode,
 };
 pub use schedule::{
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
