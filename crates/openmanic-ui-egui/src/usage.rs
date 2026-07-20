@@ -341,18 +341,32 @@ impl UsagePresentation {
 ///
 /// This intentionally does not submit actions or touch any application port.
 pub(crate) fn render_usage(ui: &mut Ui, presentation: &UsagePresentation) {
+    ui.heading("Tracked applications");
     if let Some(range_label) = presentation.range_label() {
-        ui.label(range_label);
-        ui.label(format!("Total: {} us", presentation.total_duration_us()));
-        for row in presentation.rows() {
-            let percentage = row.percentage().hundredths();
-            ui.label(format!(
-                "{}: {} us ({}.{:02}%)",
-                row.label(),
-                row.duration_us(),
-                percentage / 100,
-                percentage % 100
-            ));
+        ui.small(range_label);
+        ui.label(format!(
+            "Total focused time: {}",
+            format_duration(presentation.total_duration_us())
+        ));
+        ui.add_space(4.0);
+        egui::Grid::new("tracked-applications-table")
+            .striped(true)
+            .min_col_width(88.0)
+            .show(ui, |ui| {
+                ui.strong("Application");
+                ui.strong("Focused time");
+                ui.strong("Percentage of total");
+                ui.end_row();
+                for row in presentation.rows() {
+                    let percentage = row.percentage().hundredths();
+                    ui.label(row.label());
+                    ui.label(format_duration(row.duration_us()));
+                    ui.label(format!("{}.{:02}%", percentage / 100, percentage % 100));
+                    ui.end_row();
+                }
+            });
+        if presentation.rows().is_empty() {
+            ui.small("No foreground application activity has been recorded for this day yet.");
         }
     }
     match presentation.state() {
@@ -377,6 +391,20 @@ pub(crate) fn render_usage(ui: &mut Ui, presentation: &UsagePresentation) {
             ui.label(notice);
         }
         UsagePresentationState::Ready => {}
+    }
+}
+
+fn format_duration(duration_us: u64) -> String {
+    let total_seconds = duration_us / 1_000_000;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m {seconds:02}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
     }
 }
 

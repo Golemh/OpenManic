@@ -635,7 +635,9 @@ impl<T> UiModel<T> {
         };
         match target.state.accept_if_current(snapshot) {
             Ok(()) => {
-                target.snapshot = Some(snapshot.shared_value());
+                let value = snapshot.shared_value();
+                target.snapshot = Some(Arc::clone(&value));
+                self.data = PresentableData::Ready(value);
                 SnapshotReception::Accepted
             }
             Err(rejection) => SnapshotReception::Rejected(rejection),
@@ -1011,6 +1013,10 @@ mod tests {
                 .map(|value| value.as_str()),
             Some("new")
         );
+        assert!(matches!(
+            model.data(),
+            PresentableData::Ready(value) if value.as_str() == "new"
+        ));
         assert_eq!(
             model.accept_snapshot(&snapshot(RequestId::new(9), DataRevision::new(6), "stale")),
             SnapshotReception::Rejected(

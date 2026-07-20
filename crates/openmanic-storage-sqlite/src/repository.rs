@@ -109,6 +109,26 @@ pub struct FocusRecord {
     interval: Option<HalfOpenInterval>,
 }
 
+/// One persisted window-title interval returned by a correlated read snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowTitleRecord {
+    title: String,
+    interval: HalfOpenInterval,
+}
+
+impl WindowTitleRecord {
+    /// Returns the locally captured window title.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    /// Returns the exact title interval.
+    #[must_use]
+    pub const fn interval(&self) -> HalfOpenInterval {
+        self.interval
+    }
+}
+
 impl FocusRecord {
     /// Returns the complete restored focus-session state.
     #[must_use]
@@ -148,6 +168,7 @@ pub struct ReadSnapshot {
     categories: Vec<CategoryRecord>,
     schedules: Vec<ScheduleRecord>,
     focus_sessions: Vec<FocusRecord>,
+    window_titles: Vec<WindowTitleRecord>,
 }
 
 impl ReadSnapshot {
@@ -185,6 +206,11 @@ impl ReadSnapshot {
     #[must_use]
     pub fn focus_sessions(&self) -> &[FocusRecord] {
         &self.focus_sessions
+    }
+    /// Returns captured window-title intervals from the same committed snapshot.
+    #[must_use]
+    pub fn window_titles(&self) -> &[WindowTitleRecord] {
+        &self.window_titles
     }
 }
 
@@ -597,6 +623,39 @@ impl ActivityRepository {
 }
 
 pub(crate) struct ApplicationRepository;
+
+struct WindowTitleRepository;
+
+impl WindowTitleRepository {
+    fn read(transaction: &Transaction<'_>) -> Result<Vec<WindowTitleRecord>, StorageError> {
+        let mut statement = transaction.prepare(
+            "SELECT window_title_text.title, window_title_span.start_utc_us, window_title_span.end_utc_us
+             FROM window_title_span JOIN window_title_text ON window_title_text.id = window_title_span.title_text_id
+             ORDER BY window_title_span.start_utc_us, window_title_span.id"
+        ).map_err(|error| database_error(&error, "prepare window-title snapshot"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|error| database_error(&error, "read window-title snapshot"))?;
+        rows.map(|row| {
+            let (title, start, end) =
+                row.map_err(|error| database_error(&error, "map window-title snapshot"))?;
+            Ok(WindowTitleRecord {
+                title,
+                interval: HalfOpenInterval::try_new(UtcMicros::new(start), UtcMicros::new(end))
+                    .map_err(|_| StorageError::InvalidStoredValue {
+                        field: "window title interval",
+                    })?,
+            })
+        })
+        .collect()
+    }
+}
 
 impl ApplicationRepository {
     fn read(transaction: &Transaction<'_>) -> Result<Vec<ApplicationRecord>, StorageError> {
@@ -1500,6 +1559,7 @@ pub(crate) fn read_snapshot(transaction: &Transaction<'_>) -> Result<ReadSnapsho
         categories: CategoryRepository::read(transaction)?,
         schedules: ScheduleRepository::read(transaction)?,
         focus_sessions: FocusRepository::read(transaction)?,
+        window_titles: WindowTitleRepository::read(transaction)?,
     })
 }
 

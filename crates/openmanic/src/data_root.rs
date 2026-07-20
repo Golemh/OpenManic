@@ -11,10 +11,15 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 /// The directory created beside a writable release artifact by default.
 pub const ARTIFACT_DATA_DIRECTORY: &str = "OpenManicData";
 const LOCATOR_SCHEMA_VERSION: u32 = 1;
 const LOCK_FILE_NAME: &str = ".openmanic-data-root.lock";
+#[cfg(windows)]
+const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
 static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Where the selected data root came from.
@@ -381,17 +386,20 @@ impl DataRootLock {
     /// created. The error intentionally omits the root path.
     pub fn acquire(root: &Path) -> Result<Self, DataRootLockError> {
         let path = root.join(LOCK_FILE_NAME);
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(|error| {
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    DataRootLockError::AlreadyLocked
-                } else {
-                    DataRootLockError::FileSystem((&error).into())
-                }
-            })?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        // Windows closes all process handles during normal shutdown and abnormal termination.
+        // Tying removal to that handle lifecycle prevents a dead process from stranding a
+        // marker that would otherwise block the next launch.
+        #[cfg(windows)]
+        options.custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
+        let file = options.open(&path).map_err(|error| {
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                DataRootLockError::AlreadyLocked
+            } else {
+                DataRootLockError::FileSystem((&error).into())
+            }
+        })?;
         Ok(Self { path, _file: file })
     }
 }

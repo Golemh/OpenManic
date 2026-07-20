@@ -7,6 +7,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt, fs,
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -154,6 +155,7 @@ impl Error for CompositionError {}
 struct TodaySnapshot {
     timeline: TimelineSnapshot,
     usage: ApplicationUsageSnapshot,
+    windows: Vec<(String, u64)>,
     distribution: openmanic_ui_egui::DistributionSnapshot,
     schedules: Vec<ScheduleSnapshot>,
     applications: Vec<(Application, bool)>,
@@ -167,6 +169,9 @@ impl TodaySnapshot {
 
     const fn usage(&self) -> &ApplicationUsageSnapshot {
         &self.usage
+    }
+    fn windows(&self) -> &[(String, u64)] {
+        &self.windows
     }
 
     const fn distribution(&self) -> &openmanic_ui_egui::DistributionSnapshot {
@@ -193,6 +198,9 @@ enum WriterWork {
     CatalogForeground {
         application: Application,
         command: CommandEnvelope<TrackingCommand>,
+    },
+    CatalogMetadata {
+        application: Application,
     },
     System(CommandEnvelope<TrackingCommand>),
     Ui(CommandEnvelope<TrackingCommand>),
@@ -221,6 +229,7 @@ impl WriterWork {
             Self::System(command) | Self::CatalogForeground { command, .. } => (command, false),
             Self::Ui(command) => (command, true),
             Self::Catalog(_)
+            | Self::CatalogMetadata { .. }
             | Self::Schedule(_)
             | Self::Focus(_)
             | Self::Layout { .. }
@@ -369,13 +378,21 @@ struct RuntimeEvidenceSink {
     identifiers: Arc<CommandIdentifiers>,
     accepting: Arc<AtomicBool>,
     tracking_permitted: Arc<AtomicBool>,
+    tracking_debug: Arc<Mutex<TrackingDebugState>>,
+    tracking_debug_log: PathBuf,
 }
 
 impl TrackingEvidenceSink for RuntimeEvidenceSink {
     fn try_publish(&self, evidence: TrackingEvidence) -> EvidencePublishResult {
+        record_tracking_observation(&self.tracking_debug, &self.tracking_debug_log, &evidence);
         if !self.accepting.load(Ordering::Acquire)
             || !self.tracking_permitted.load(Ordering::Acquire)
         {
+            set_tracking_delivery(
+                &self.tracking_debug,
+                &self.tracking_debug_log,
+                "Blocked: tracking is not enabled.",
+            );
             return EvidencePublishResult::Closed;
         }
         let command = self
@@ -406,15 +423,120 @@ impl TrackingEvidenceSink for RuntimeEvidenceSink {
             }
             _ => WriterWork::System(command),
         };
-        match self.lanes.try_submit(WorkLane::Critical, work) {
+        let result = match self.lanes.try_submit(WorkLane::Critical, work) {
             LaneSubmit::Enqueued => EvidencePublishResult::Accepted,
             LaneSubmit::Retained { reason, .. } => match reason {
                 openmanic_application::LaneRetentionReason::Full => EvidencePublishResult::Full,
                 openmanic_application::LaneRetentionReason::Closed => EvidencePublishResult::Closed,
             },
             LaneSubmit::Dropped { .. } => EvidencePublishResult::Full,
+        };
+        set_tracking_delivery(
+            &self.tracking_debug,
+            &self.tracking_debug_log,
+            match result {
+                EvidencePublishResult::Accepted => "Accepted by the writer lane.",
+                EvidencePublishResult::Full => "Dropped: the writer lane is full.",
+                EvidencePublishResult::Closed => "Rejected: the writer lane is closed.",
+            },
+        );
+        result
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TrackingDebugState {
+    foreground_events: u64,
+    latest_application_id: Option<ApplicationId>,
+    latest_observed_at: Option<UtcMicros>,
+    last_delivery: &'static str,
+    latest_window_title: Option<String>,
+    latest_executable: Option<String>,
+    latest_product_name: Option<String>,
+}
+
+impl Default for TrackingDebugState {
+    fn default() -> Self {
+        Self {
+            foreground_events: 0,
+            latest_application_id: None,
+            latest_observed_at: None,
+            last_delivery: "Waiting for a Windows foreground event.",
+            latest_window_title: None,
+            latest_executable: None,
+            latest_product_name: None,
         }
     }
+}
+
+fn record_tracking_observation(
+    debug: &Mutex<TrackingDebugState>,
+    log_path: &Path,
+    evidence: &TrackingEvidence,
+) {
+    let TrackingEvidence::Foreground {
+        application_id,
+        observed_at_utc,
+        ..
+    } = *evidence
+    else {
+        return;
+    };
+    if let Ok(mut state) = debug.lock() {
+        state.foreground_events = state.foreground_events.saturating_add(1);
+        state.latest_application_id = Some(application_id);
+        state.latest_observed_at = Some(observed_at_utc);
+    }
+    append_tracking_debug_log(
+        log_path,
+        &format!(
+            "observed_at_utc_us={} event=foreground application_id={}",
+            observed_at_utc.get(),
+            id_label(&application_id.as_bytes())
+        ),
+    );
+}
+
+fn set_tracking_delivery(
+    debug: &Mutex<TrackingDebugState>,
+    log_path: &Path,
+    delivery: &'static str,
+) {
+    if let Ok(mut state) = debug.lock() {
+        state.last_delivery = delivery;
+    }
+    append_tracking_debug_log(log_path, &format!("writer_lane={delivery}"));
+}
+
+fn append_tracking_debug_log(log_path: &Path, line: &str) {
+    let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{line}");
+}
+
+fn settings_with_development_defaults(settings: &SettingsSnapshot) -> SettingsSnapshot {
+    SettingsSnapshot::new(
+        1,
+        settings.start_tracking_automatically(),
+        settings.start_at_login(),
+        settings.close_to_tray(),
+        settings.idle_threshold_seconds(),
+        settings.idle_policy_code(),
+        true,
+        settings.time_zone_mode(),
+        settings.manual_time_zone_id().map(str::to_owned),
+        settings.theme_mode(),
+        settings.density_code(),
+        settings.notifications_enabled(),
+        settings.focus_sounds_enabled(),
+        settings.tray_explanation_acknowledged(),
+        settings.revision(),
+    )
 }
 
 /// Stable identifiers allocated by the process boundary for local commands and evidence.
@@ -1112,6 +1234,8 @@ struct RuntimeResources {
     theme_mode: Arc<Mutex<u8>>,
     settings_snapshot: Arc<Mutex<SettingsSnapshot>>,
     tracking_permitted: Arc<AtomicBool>,
+    tracking_debug: Arc<Mutex<TrackingDebugState>>,
+    tracking_debug_log: PathBuf,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
     supervisor: RuntimeSupervisor,
@@ -1183,19 +1307,38 @@ impl RuntimeResources {
                 )
             });
         let layout_snapshot = Arc::new(Mutex::new(initial_layout));
-        let initial_settings = store
+        let mut initial_settings = store
             .writer()
             .settings_snapshot()
             // A corrupt optional settings document must not prevent recovery to the safe,
             // local-first defaults. Subsequent explicit settings saves replace the singleton.
             .unwrap_or(None)
             .unwrap_or_else(SettingsSnapshot::safe_default);
+        if initial_settings.consent_revision() == 0 || !initial_settings.collect_window_titles() {
+            let accepted = settings_with_development_defaults(&initial_settings);
+            if SettingsPersistence::replace_settings(
+                store.writer(),
+                &accepted,
+                Some(initial_settings.revision()),
+            )
+            .is_ok()
+            {
+                initial_settings = store
+                    .writer()
+                    .settings_snapshot()
+                    .ok()
+                    .flatten()
+                    .unwrap_or(accepted);
+            }
+        }
         let initial_theme_mode = initial_settings.theme_mode().code();
         let theme_mode = Arc::new(Mutex::new(initial_theme_mode));
         let settings_snapshot = Arc::new(Mutex::new(initial_settings));
         let tracking_permitted = Arc::new(AtomicBool::new(settings_snapshot.lock().is_ok_and(
             |settings| settings.consent_revision() > 0 && settings.start_tracking_automatically(),
         )));
+        let tracking_debug = Arc::new(Mutex::new(TrackingDebugState::default()));
+        let tracking_debug_log = data_root.join("tracking-debug.log");
         let store = Arc::new(Mutex::new(store));
         let (data_operation_requests, data_operation_receiver) =
             mpsc::sync_channel(DATA_OPERATION_REQUEST_CAPACITY);
@@ -1270,6 +1413,8 @@ impl RuntimeResources {
                 theme_mode,
                 settings_snapshot,
                 tracking_permitted,
+                tracking_debug,
+                tracking_debug_log,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
                 supervisor: RuntimeSupervisor::new([
@@ -1315,7 +1460,23 @@ impl RuntimeResources {
             identifiers: Arc::clone(&self.identifiers),
             accepting: Arc::clone(&self.accepting),
             tracking_permitted: Arc::clone(&self.tracking_permitted),
+            tracking_debug: Arc::clone(&self.tracking_debug),
+            tracking_debug_log: self.tracking_debug_log.clone(),
         }
+    }
+
+    fn tracking_debug_snapshot(&self) -> TrackingDebugState {
+        self.tracking_debug.lock().map_or_else(
+            |_| TrackingDebugState {
+                last_delivery: "Unavailable: diagnostics state lock is poisoned.",
+                ..TrackingDebugState::default()
+            },
+            |state| state.clone(),
+        )
+    }
+
+    fn tracking_debug_log_path(&self) -> &Path {
+        &self.tracking_debug_log
     }
 
     fn action_router(&self) -> PlatformActionRouter {
@@ -1639,10 +1800,13 @@ impl RuntimeResources {
             self.action_router(),
             Arc::clone(&self.activation_stop),
         )?;
-        let (metadata_requests, metadata_stop, metadata_handle) =
-            spawn_metadata_worker(Arc::clone(&self.application_icons))?;
+        let (metadata_requests, metadata_stop, metadata_handle) = spawn_metadata_worker(
+            Arc::clone(&self.lanes),
+            Arc::clone(&self.application_icons),
+            Arc::clone(&self.tracking_debug),
+        )?;
         let (title_requests, title_stop, title_handle) =
-            spawn_title_worker(Arc::clone(&self.lanes))?;
+            spawn_title_worker(Arc::clone(&self.lanes), Arc::clone(&self.tracking_debug))?;
         let Some(focus_notice_receiver) = self.focus_notice_receiver.take() else {
             return Err(CompositionError::Runtime);
         };
@@ -1851,14 +2015,24 @@ type TitleWorkerStart = (
 
 #[cfg(windows)]
 fn spawn_metadata_worker(
+    lanes: Arc<RuntimeLanes<WriterWork>>,
     application_icons: Arc<Mutex<ApplicationIconCache>>,
+    tracking_debug: Arc<Mutex<TrackingDebugState>>,
 ) -> Result<MetadataWorkerStart, CompositionError> {
     let (request_sender, request_receiver) =
         mpsc::sync_channel(APPLICATION_METADATA_REQUEST_CAPACITY);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
         .name(ThreadRoot::new(RuntimeWorker::BulkWorker).name().to_owned())
-        .spawn(move || run_metadata_worker(request_receiver, stop_receiver, application_icons))
+        .spawn(move || {
+            run_metadata_worker(
+                request_receiver,
+                stop_receiver,
+                lanes,
+                application_icons,
+                tracking_debug,
+            )
+        })
         .map_err(|_| CompositionError::Runtime)?;
     Ok((request_sender, stop_sender, handle))
 }
@@ -1866,12 +2040,13 @@ fn spawn_metadata_worker(
 #[cfg(windows)]
 fn spawn_title_worker(
     lanes: Arc<RuntimeLanes<WriterWork>>,
+    tracking_debug: Arc<Mutex<TrackingDebugState>>,
 ) -> Result<TitleWorkerStart, CompositionError> {
     let (request_sender, request_receiver) = mpsc::sync_channel(WINDOW_TITLE_OBSERVATION_CAPACITY);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
         .name("openmanic-window-titles".to_owned())
-        .spawn(move || run_title_worker(request_receiver, stop_receiver, lanes))
+        .spawn(move || run_title_worker(request_receiver, stop_receiver, lanes, tracking_debug))
         .map_err(|_| CompositionError::Runtime)?;
     Ok((request_sender, stop_sender, handle))
 }
@@ -1885,6 +2060,7 @@ fn run_title_worker(
     requests: Receiver<WindowsWindowTitleObservationRequest>,
     stop: Receiver<()>,
     lanes: Arc<RuntimeLanes<WriterWork>>,
+    tracking_debug: Arc<Mutex<TrackingDebugState>>,
 ) {
     loop {
         if matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected)) {
@@ -1900,6 +2076,9 @@ fn run_title_worker(
             observed_at_utc: UtcMicros::new(request.observed_at_utc_us()),
             title: request.title().to_owned(),
         });
+        if let Ok(mut debug) = tracking_debug.lock() {
+            debug.latest_window_title = Some(request.title().to_owned());
+        }
         let _ = lanes.try_submit(WorkLane::Optional, work);
     }
 }
@@ -1912,7 +2091,9 @@ fn run_title_worker(
 fn run_metadata_worker(
     requests: Receiver<WindowsApplicationMetadataRequest>,
     stop: Receiver<()>,
+    lanes: Arc<RuntimeLanes<WriterWork>>,
     application_icons: Arc<Mutex<ApplicationIconCache>>,
+    tracking_debug: Arc<Mutex<TrackingDebugState>>,
 ) {
     loop {
         if matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected)) {
@@ -1924,6 +2105,26 @@ fn run_metadata_worker(
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
         let result: ApplicationIconResult = openmanic_platform::extract_application_icon(&request);
+        let display_name = openmanic_platform::extract_application_display_name(&request);
+        let observed_at_utc = UtcMicros::new(request.observed_at_utc_us());
+        if let Ok(name) = ApplicationName::try_new(display_name.clone())
+            && let Ok(application) = Application::try_new(
+                request.application_id(),
+                name,
+                None,
+                observed_at_utc,
+                observed_at_utc,
+            )
+        {
+            let _ = lanes.try_submit(
+                WorkLane::Optional,
+                WriterWork::CatalogMetadata { application },
+            );
+        }
+        if let Ok(mut debug) = tracking_debug.lock() {
+            debug.latest_executable = Some(request.executable_path().to_owned());
+            debug.latest_product_name = Some(display_name);
+        }
         if let Ok(mut cache) = application_icons.lock() {
             let _ = result.apply_to(&mut cache);
         }
@@ -2503,6 +2704,20 @@ fn process_writer_work(
         );
         return;
     }
+    if let WriterWork::CatalogMetadata { application } = work {
+        let updated = if let Ok(mut writer_store) = store.lock() {
+            writer_store
+                .writer()
+                .upsert_application(&application)
+                .is_ok()
+        } else {
+            false
+        };
+        if updated && let Some(request) = current_projection.as_ref() {
+            publish_today_snapshot(store, request, snapshots);
+        }
+        return;
+    }
     if let WriterWork::CatalogForeground {
         application,
         command,
@@ -2914,7 +3129,8 @@ fn build_today_snapshot(
     )
     .with_schedules(&schedules);
     let timeline = TimelineProjector::build(*request.payload(), source).map_err(|_| ())?;
-    let (usage, distribution) = build_summaries(read, request.payload().visible_range())?;
+    let range = request.payload().visible_range();
+    let (usage, distribution) = build_summaries(read, range)?;
     Ok(SnapshotEnvelope::new(
         request.request_id(),
         request.slot(),
@@ -2924,12 +3140,40 @@ fn build_today_snapshot(
         TodaySnapshot {
             timeline,
             usage,
+            windows: build_window_summaries(read, range),
             distribution,
             schedules,
             applications: catalog_applications,
             categories,
         },
     ))
+}
+
+fn build_window_summaries(
+    read: &openmanic_storage_sqlite::ReadSnapshot,
+    range: HalfOpenInterval,
+) -> Vec<(String, u64)> {
+    let mut totals = BTreeMap::<String, u64>::new();
+    for record in read.window_titles() {
+        let interval = record.interval();
+        if !interval.overlaps(range) {
+            continue;
+        }
+        let Ok(clipped) = HalfOpenInterval::try_new(
+            interval.start().max(range.start()),
+            interval.end().min(range.end()),
+        ) else {
+            continue;
+        };
+        *totals.entry(record.title().to_owned()).or_default() = totals
+            .get(record.title())
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(clipped.duration_us());
+    }
+    let mut values = totals.into_iter().collect::<Vec<_>>();
+    values.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    values
 }
 
 /// Builds Calendar data from one correlated read snapshot without coupling it to Today data.
@@ -4083,8 +4327,17 @@ impl VerticalSliceApp {
             .cloned();
         let context = self.app.controller().model().today_view_context().clone();
         let Some(snapshot) = data else {
+            ui.group(|ui| {
+                ui.heading("Application usage");
+                render_usage_snapshot(
+                    ui,
+                    &ApplicationUsageSnapshot::new("Today".to_owned(), Vec::new()),
+                );
+                ui.small("Waiting for dashboard data.");
+            });
             return;
         };
+        self.render_windows_widget(ui, snapshot.windows());
 
         let layout = self
             .layout_editor
@@ -4228,6 +4481,109 @@ impl VerticalSliceApp {
                 },
             );
         }
+    }
+
+    fn render_windows_widget(&self, ui: &mut eframe::egui::Ui, windows: &[(String, u64)]) {
+        ui.group(|ui| {
+            ui.heading("Windows");
+            let total = windows
+                .iter()
+                .fold(0_u64, |sum, (_, value)| sum.saturating_add(*value));
+            if windows.is_empty() {
+                ui.label("No window-title intervals have been recorded yet.");
+                return;
+            }
+            eframe::egui::Grid::new("window-duration-widget")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Window");
+                    ui.strong("Focused time");
+                    ui.strong("Share");
+                    ui.end_row();
+                    for (title, duration) in windows.iter().take(12) {
+                        let percent = if total == 0 {
+                            0
+                        } else {
+                            u32::try_from((u128::from(*duration) * 10_000) / u128::from(total))
+                                .unwrap_or(u32::MAX)
+                        };
+                        ui.label(title);
+                        ui.label(format!("{}s", duration / 1_000_000));
+                        ui.label(format!("{}.{:02}%", percent / 100, percent % 100));
+                        ui.end_row();
+                    }
+                });
+        });
+        ui.add_space(8.0);
+    }
+
+    fn render_live_backend_diagnostics(&mut self, ui: &mut eframe::egui::Ui) {
+        if self.app.controller().model().route() != openmanic_ui_egui::Route::Today {
+            return;
+        }
+        let debug = self.runtime.tracking_debug_snapshot();
+        let tracking_enabled = self.runtime.tracking_permitted.load(Ordering::Acquire);
+        eframe::egui::CollapsingHeader::new("Live backend diagnostics")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.strong("Tracking ingress");
+                if ui
+                    .button("Exit OpenManic")
+                    .on_hover_text("Stop tracking, save local data, and completely close OpenManic.")
+                    .clicked()
+                {
+                    self.runtime.quit_requested.store(true, Ordering::Release);
+                }
+            });
+            ui.small("This table is populated directly by the Windows tracking ingress, even when dashboard snapshots are unavailable.");
+            eframe::egui::Grid::new("live-backend-diagnostics")
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.strong("Field");
+                    ui.strong("Observed value");
+                    ui.end_row();
+                    ui.label("Tracking enabled");
+                    ui.label(if tracking_enabled { "Yes" } else { "No" });
+                    ui.end_row();
+                    ui.label("Foreground events received");
+                    ui.label(debug.foreground_events.to_string());
+                    ui.end_row();
+                    ui.label("Latest application identity");
+                    ui.label(debug.latest_application_id.map_or_else(
+                        || "None yet".to_owned(),
+                        |application_id| id_label(&application_id.as_bytes()),
+                    ));
+                    ui.end_row();
+                    ui.label("Latest event timestamp (UTC µs)");
+                    ui.label(debug.latest_observed_at.map_or_else(
+                        || "None yet".to_owned(),
+                        |observed_at| observed_at.get().to_string(),
+                    ));
+                    ui.end_row();
+                    ui.label("Latest actual window title");
+                    ui.label(debug.latest_window_title.as_deref().unwrap_or("None yet"));
+                    ui.end_row();
+                    ui.label("Latest executable");
+                    ui.label(debug.latest_executable.as_deref().unwrap_or("None yet"));
+                    ui.end_row();
+                    ui.label("Latest resolved product name");
+                    ui.label(debug.latest_product_name.as_deref().unwrap_or("None yet"));
+                    ui.end_row();
+                    ui.label("Writer-lane delivery");
+                    ui.label(debug.last_delivery);
+                    ui.end_row();
+                    ui.label("Tracking debug log");
+                    ui.label(
+                        self.runtime
+                            .tracking_debug_log_path()
+                            .to_string_lossy(),
+                    );
+                    ui.end_row();
+                });
+                });
+            });
     }
 
     #[expect(
@@ -5483,6 +5839,12 @@ impl VerticalSliceApp {
         if !context.input(|input| input.viewport().close_requested()) {
             return;
         }
+        // A completed coordinated quit closes the viewport to release the process-owned
+        // BootstrapState. Do not reinterpret that close request as a user preference to hide
+        // the still-running application in the tray, or its data-root lock would remain held.
+        if !matches!(self.shutdown.phase(), ShutdownPhase::Running) {
+            return;
+        }
         let tracking_enabled = self.runtime.settings_snapshot.lock().is_ok_and(|settings| {
             settings.consent_revision() > 0 && settings.start_tracking_automatically()
         });
@@ -5750,7 +6112,18 @@ impl eframe::App for VerticalSliceApp {
                 .controller_mut()
                 .reduce_local(UiAction::Navigate(route_before_shell));
         }
-        self.render_today_dashboard(ui);
+        if route_after_shell == openmanic_ui_egui::Route::Today {
+            eframe::egui::ScrollArea::vertical()
+                .id_salt("today-dashboard-scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    self.render_live_backend_diagnostics(ui);
+                    ui.add_space(8.0);
+                    self.render_today_dashboard(ui);
+                });
+        } else {
+            self.render_today_dashboard(ui);
+        }
         self.render_onboarding(ui);
         self.render_categories_dashboard(ui);
         self.render_calendar_dashboard(ui);
@@ -5915,7 +6288,10 @@ fn store_identity(root: &Path) -> [u8; 16] {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{
+        fs,
+        sync::{Arc, Mutex},
+    };
 
     use openmanic_application::{
         CalendarBlockId, CatalogCommand, EntityRevision, LaneCapacities, LaneReceive,
@@ -5930,8 +6306,9 @@ mod tests {
 
     use super::{
         CommandIdentifiers, PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError,
-        UiInbox, UiIngress, calendar_schedule_target, day_range, focus_remaining_label,
-        focus_remaining_us, recurring_schedule_rule, store_identity,
+        TrackingDebugState, UiInbox, UiIngress, calendar_schedule_target, day_range,
+        focus_remaining_label, focus_remaining_us, record_tracking_observation,
+        recurring_schedule_rule, set_tracking_delivery, store_identity,
     };
 
     #[test]
@@ -5950,6 +6327,38 @@ mod tests {
             openmanic_application::LaneSubmit::Retained { .. }
         ));
         assert!(matches!(receiver.try_receive(), LaneReceive::Work { .. }));
+    }
+
+    #[test]
+    fn tracking_debug_records_foreground_evidence_and_writer_delivery() {
+        let log_path = std::env::temp_dir().join(format!(
+            "openmanic-tracking-debug-{}.log",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&log_path);
+        let debug = Mutex::new(TrackingDebugState::default());
+        let application_id = ApplicationId::from_bytes([7; 16]);
+        record_tracking_observation(
+            &debug,
+            &log_path,
+            &TrackingEvidence::Foreground {
+                sequence: 11,
+                observed_at_utc: UtcMicros::new(123_456),
+                application_id,
+            },
+        );
+        set_tracking_delivery(&debug, &log_path, "Accepted by the writer lane.");
+
+        let state = debug.lock().expect("fixture diagnostics state");
+        assert_eq!(state.foreground_events, 1);
+        assert_eq!(state.latest_application_id, Some(application_id));
+        assert_eq!(state.latest_observed_at, Some(UtcMicros::new(123_456)));
+        assert_eq!(state.last_delivery, "Accepted by the writer lane.");
+        drop(state);
+        let log = fs::read_to_string(&log_path).expect("tracking debug log is written");
+        assert!(log.contains("observed_at_utc_us=123456 event=foreground"));
+        assert!(log.contains("writer_lane=Accepted by the writer lane."));
+        fs::remove_file(log_path).expect("fixture tracking debug log is removed");
     }
 
     #[test]

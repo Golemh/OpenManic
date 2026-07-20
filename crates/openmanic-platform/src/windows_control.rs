@@ -40,6 +40,7 @@ pub const WINDOWS_FOREGROUND_INGRESS_CAPACITY: usize = 128;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WindowsApplicationMetadataRequest {
     application_id: openmanic_application::ApplicationId,
+    observed_at_utc_us: i64,
     executable_path: String,
 }
 
@@ -94,10 +95,12 @@ impl WindowsApplicationMetadataRequest {
     #[must_use]
     pub fn new(
         application_id: openmanic_application::ApplicationId,
+        observed_at_utc_us: i64,
         executable_path: String,
     ) -> Self {
         Self {
             application_id,
+            observed_at_utc_us,
             executable_path,
         }
     }
@@ -106,6 +109,12 @@ impl WindowsApplicationMetadataRequest {
     #[must_use]
     pub const fn application_id(&self) -> openmanic_application::ApplicationId {
         self.application_id
+    }
+
+    /// Returns when Windows observed the application identity.
+    #[must_use]
+    pub const fn observed_at_utc_us(&self) -> i64 {
+        self.observed_at_utc_us
     }
 
     /// Returns the worker-only executable path.
@@ -372,6 +381,7 @@ impl WindowsControlAdapter {
                 {
                     let _ = sender.try_send(WindowsApplicationMetadataRequest::new(
                         application_id,
+                        event.received_at_utc().get(),
                         path.to_owned(),
                     ));
                 }

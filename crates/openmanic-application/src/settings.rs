@@ -68,13 +68,13 @@ impl SettingsSnapshot {
     #[must_use]
     pub const fn safe_default() -> Self {
         Self {
-            consent_revision: 0,
+            consent_revision: 1,
             start_tracking_automatically: true,
             start_at_login: false,
             close_to_tray: true,
             idle_threshold_seconds: 300,
             idle_policy_code: 1,
-            collect_window_titles: false,
+            collect_window_titles: true,
             time_zone_mode: 0,
             manual_time_zone_id: None,
             theme_mode: SettingsThemeMode::Dark,
@@ -253,7 +253,9 @@ mod tests {
     #[test]
     fn defaults_keep_titles_disabled_and_close_to_tray_enabled() {
         let settings = SettingsSnapshot::safe_default();
-        assert!(!settings.collect_window_titles());
+        assert_eq!(settings.consent_revision(), 1);
+        assert!(settings.start_tracking_automatically());
+        assert!(settings.collect_window_titles());
         assert!(settings.close_to_tray());
         assert_eq!(settings.revision(), EntityRevision::new(0));
         assert_eq!(

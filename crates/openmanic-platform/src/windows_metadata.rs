@@ -1,6 +1,6 @@
 //! Worker-only Windows executable icon extraction.
 
-use std::mem::size_of;
+use std::{ffi::c_void, mem::size_of, path::Path};
 
 use openmanic_application::{
     ApplicationIcon, ApplicationIconDigest, ApplicationIconKey, ApplicationIconResult,
@@ -11,7 +11,9 @@ use windows::{
             BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDIBits,
             GetObjectW, HBITMAP, HGDIOBJ,
         },
-        Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
+        Storage::FileSystem::{
+            FILE_ATTRIBUTE_NORMAL, GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+        },
         UI::{
             Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW},
             WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO},
@@ -39,6 +41,79 @@ pub fn extract_application_icon(
             ),
             icon,
         },
+    )
+}
+
+/// Resolves a user-facing product name from the executable's version resource.
+///
+/// Windows applications ordinarily publish this as `ProductName`; the executable filename is a
+/// deterministic fallback when an application has no version resource or it cannot be read.
+#[must_use]
+pub fn extract_application_display_name(request: &WindowsApplicationMetadataRequest) -> String {
+    product_name(request.executable_path())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| executable_file_name(request.executable_path()))
+}
+
+fn executable_file_name(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .map_or_else(|| "Unknown application".to_owned(), ToOwned::to_owned)
+}
+
+fn product_name(path: &str) -> Option<String> {
+    let mut wide_path: Vec<u16> = path.encode_utf16().collect();
+    wide_path.push(0);
+    let mut ignored_handle = 0_u32;
+    // SAFETY: `wide_path` is NUL-terminated and remains alive throughout this call; Windows only
+    // writes the documented handle output.
+    let byte_len = unsafe {
+        GetFileVersionInfoSizeW(PCWSTR(wide_path.as_ptr()), Some(&raw mut ignored_handle))
+    };
+    if byte_len == 0 {
+        return None;
+    }
+    let mut data = vec![0_u8; usize::try_from(byte_len).ok()?];
+    // SAFETY: `wide_path` remains NUL-terminated and `data` has exactly the size reported by
+    // Windows for this file's version resource.
+    unsafe {
+        GetFileVersionInfoW(
+            PCWSTR(wide_path.as_ptr()),
+            Some(0),
+            byte_len,
+            data.as_mut_ptr().cast::<c_void>(),
+        )
+        .ok()?;
+    }
+    let query: Vec<u16> = "\\StringFileInfo\\040904b0\\ProductName\0"
+        .encode_utf16()
+        .collect();
+    let mut value = std::ptr::null_mut::<c_void>();
+    let mut value_len = 0_u32;
+    // SAFETY: `data` owns the complete version block while the returned pointer is read below;
+    // `query` is NUL-terminated and the two output locations are valid writable storage.
+    let found = unsafe {
+        VerQueryValueW(
+            data.as_ptr().cast::<c_void>(),
+            PCWSTR(query.as_ptr()),
+            &raw mut value,
+            &raw mut value_len,
+        )
+    };
+    if !found.as_bool() || value.is_null() || value_len == 0 {
+        return None;
+    }
+    // SAFETY: `VerQueryValueW` returned `value_len` UTF-16 units backed by `data`; the value is
+    // copied immediately before `data` is dropped.
+    let value = unsafe {
+        std::slice::from_raw_parts(value.cast::<u16>(), usize::try_from(value_len).ok()?)
+    };
+    Some(
+        String::from_utf16_lossy(value)
+            .trim_end_matches('\0')
+            .to_owned(),
     )
 }
 
@@ -184,7 +259,7 @@ impl Drop for OwnedBitmap {
 
 #[cfg(test)]
 mod tests {
-    use super::{bgra_to_rgba, icon_digest};
+    use super::{bgra_to_rgba, executable_file_name, icon_digest};
     use openmanic_application::ApplicationIcon;
 
     #[test]
@@ -200,5 +275,14 @@ mod tests {
             ApplicationIcon::try_new(2, 1, vec![1, 2, 3, 4, 0, 0, 0, 0]).expect("fixture icon");
         assert_eq!(icon_digest(&one), icon_digest(&one));
         assert_ne!(icon_digest(&one), icon_digest(&two));
+    }
+
+    #[test]
+    fn display_name_fallback_uses_the_executable_stem() {
+        assert_eq!(
+            executable_file_name(r"C:\Program Files\Zen Browser\zen.exe"),
+            "zen"
+        );
+        assert_eq!(executable_file_name(""), "Unknown application");
     }
 }

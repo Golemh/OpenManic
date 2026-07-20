@@ -168,17 +168,6 @@ fn render_route<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: ThemeToken
         changed = true;
     }
 
-    egui::ScrollArea::vertical()
-        .id_salt(route.label())
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add_space(24.0);
-            ui.colored_label(
-                tokens.content_secondary(),
-                "This initial shell retains navigation context while later tasks add route content.",
-            );
-            ui.add_space(320.0);
-        });
     changed
 }
 

@@ -44,7 +44,7 @@ pub use windows_control::{
     WindowsWindowTitleObservationRequest,
 };
 #[cfg(windows)]
-pub use windows_metadata::extract_application_icon;
+pub use windows_metadata::{extract_application_display_name, extract_application_icon};
 pub use windows_single_instance::{
     ActivationCommandDecode, LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT,
 };
