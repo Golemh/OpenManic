@@ -21,7 +21,11 @@ pub use catalog::{
     Application, ApplicationError, ApplicationName, ApplicationNameKind, Category, CategoryName,
     CategoryNameKind, NameError, ValidatedName,
 };
-pub use documents::{LayoutDocument, SavedViewDocument, SettingsDocument, ThemeSelection};
+pub use documents::{
+    DocumentError, LayoutDocument, SavedViewDefinition, SavedViewDocument, SavedViewField,
+    SavedViewFields, SavedViewRange, SavedViewRelativeRange, SavedViewScalar,
+    SavedViewTimeZoneBehavior, SettingsDocument, ThemeSelection,
+};
 pub use focus::{FocusSession, FocusSessionError, FocusSessionState};
 pub use ids::{
     ApplicationId, ApplicationIdKind, CategoryId, CategoryIdKind, FocusSessionId,

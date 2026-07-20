@@ -105,7 +105,7 @@ impl SavedViewDocument {
                 SAVED_VIEW_SCHEMA,
                 0,
                 SavedViewPayload {
-                    public_id: "default-overview-view".to_owned(),
+                    public_id: "00000000000000000000000000000000".to_owned(),
                     name: "Overview".to_owned(),
                     display_order: 0,
                     range: Range::Relative(RelativeRange::Week),
@@ -129,6 +129,196 @@ impl SavedViewDocument {
     pub fn name(&self) -> &str {
         &self.envelope.payload.name
     }
+
+    /// Returns the stable, serialized public identifier for this saved view.
+    #[must_use]
+    pub fn public_id(&self) -> &str {
+        &self.envelope.payload.public_id
+    }
+
+    /// Returns the optimistic entity revision carried by this document.
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.envelope.revision
+    }
+
+    /// Returns the user-controlled display order.
+    #[must_use]
+    pub const fn display_order(&self) -> u32 {
+        self.envelope.payload.display_order
+    }
+
+    /// Returns the complete validated definition in a transport-neutral form.
+    #[must_use]
+    pub fn definition(&self) -> SavedViewDefinition {
+        SavedViewDefinition {
+            public_id: self.envelope.payload.public_id.clone(),
+            name: self.envelope.payload.name.clone(),
+            display_order: self.envelope.payload.display_order,
+            range: SavedViewRange::from_internal(&self.envelope.payload.range),
+            grouping: self.envelope.payload.grouping.clone(),
+            filters: SavedViewFields::from_internal(&self.envelope.payload.filters),
+            sort: self.envelope.payload.sort.clone(),
+            widget_configuration: SavedViewFields::from_internal(
+                &self.envelope.payload.widget_configuration,
+            ),
+        }
+    }
+
+    /// Creates a validated, current-version saved-view document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DocumentError`] when any persisted value cannot form a valid saved view.
+    pub fn try_new(definition: SavedViewDefinition, revision: u64) -> Result<Self, DocumentError> {
+        let payload = SavedViewPayload {
+            public_id: definition.public_id,
+            name: definition.name,
+            display_order: definition.display_order,
+            range: definition.range.into_internal(),
+            grouping: definition.grouping,
+            filters: definition.filters.into_internal(),
+            sort: definition.sort,
+            widget_configuration: definition.widget_configuration.into_internal(),
+        };
+        validate_saved_view(&payload)?;
+        Ok(Self {
+            envelope: Envelope::new(SAVED_VIEW_SCHEMA, revision, payload),
+        })
+    }
+}
+
+/// Transport-neutral complete state restored by one saved Overview view.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavedViewDefinition {
+    /// Stable serialized public identifier.
+    pub public_id: String,
+    /// User-visible label.
+    pub name: String,
+    /// Deterministic position among saved views.
+    pub display_order: u32,
+    /// The selected Overview range rule.
+    pub range: SavedViewRange,
+    /// The aggregation grouping identifier.
+    pub grouping: String,
+    /// Versioned filter fields.
+    pub filters: SavedViewFields,
+    /// The sort identifier.
+    pub sort: String,
+    /// Versioned compatible widget configuration fields.
+    pub widget_configuration: SavedViewFields,
+}
+
+/// A saved Overview range rule.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SavedViewRange {
+    /// A relative range resolved at load time.
+    Relative(SavedViewRelativeRange),
+    /// An exact inclusive local-date range with its restoration time-zone behavior.
+    Fixed {
+        /// Inclusive ISO-8601 local start date.
+        start_local_date: String,
+        /// Inclusive ISO-8601 local end date.
+        end_local_date: String,
+        /// Time-zone behavior used to reproduce the range.
+        time_zone_behavior: SavedViewTimeZoneBehavior,
+    },
+}
+
+impl SavedViewRange {
+    fn from_internal(range: &Range) -> Self {
+        match range {
+            Range::Relative(relative) => Self::Relative((*relative).into()),
+            Range::Fixed { start_local_date, end_local_date, time_zone_behavior } => Self::Fixed {
+                start_local_date: start_local_date.clone(),
+                end_local_date: end_local_date.clone(),
+                time_zone_behavior: time_zone_behavior.clone().into(),
+            },
+        }
+    }
+
+    fn into_internal(self) -> Range {
+        match self {
+            Self::Relative(relative) => Range::Relative(relative.into()),
+            Self::Fixed { start_local_date, end_local_date, time_zone_behavior } => Range::Fixed {
+                start_local_date,
+                end_local_date,
+                time_zone_behavior: time_zone_behavior.into(),
+            },
+        }
+    }
+}
+
+/// Named relative Overview range.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SavedViewRelativeRange { Day, Week, Month, Year, Custom }
+
+impl From<RelativeRange> for SavedViewRelativeRange {
+    fn from(value: RelativeRange) -> Self {
+        match value { RelativeRange::Day => Self::Day, RelativeRange::Week => Self::Week, RelativeRange::Month => Self::Month, RelativeRange::Year => Self::Year, RelativeRange::Custom => Self::Custom }
+    }
+}
+
+impl From<SavedViewRelativeRange> for RelativeRange {
+    fn from(value: SavedViewRelativeRange) -> Self {
+        match value { SavedViewRelativeRange::Day => Self::Day, SavedViewRelativeRange::Week => Self::Week, SavedViewRelativeRange::Month => Self::Month, SavedViewRelativeRange::Year => Self::Year, SavedViewRelativeRange::Custom => Self::Custom }
+    }
+}
+
+/// Time-zone behavior retained with a fixed saved range.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SavedViewTimeZoneBehavior { Automatic, Manual(String) }
+
+impl From<TimeZoneMode> for SavedViewTimeZoneBehavior {
+    fn from(value: TimeZoneMode) -> Self { match value { TimeZoneMode::Automatic => Self::Automatic, TimeZoneMode::Manual(value) => Self::Manual(value) } }
+}
+
+impl From<SavedViewTimeZoneBehavior> for TimeZoneMode {
+    fn from(value: SavedViewTimeZoneBehavior) -> Self { match value { SavedViewTimeZoneBehavior::Automatic => Self::Automatic, SavedViewTimeZoneBehavior::Manual(value) => Self::Manual(value) } }
+}
+
+/// Versioned scalar fields belonging to a saved-view filter or widget configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavedViewFields {
+    /// Schema revision of the field collection.
+    pub schema_version: u16,
+    /// Named scalar values.
+    pub fields: Vec<SavedViewField>,
+}
+
+impl SavedViewFields {
+    fn from_internal(fields: &VersionedFields) -> Self { Self { schema_version: fields.schema_version, fields: fields.fields.iter().map(SavedViewField::from_internal).collect() } }
+    fn into_internal(self) -> VersionedFields { VersionedFields { schema_version: self.schema_version, fields: self.fields.into_iter().map(SavedViewField::into_internal).collect() } }
+}
+
+/// One named saved-view scalar field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SavedViewField {
+    /// Stable field name.
+    pub name: String,
+    /// Scalar field value.
+    pub value: SavedViewScalar,
+}
+
+impl SavedViewField {
+    fn from_internal(field: &DocumentField) -> Self { Self { name: field.name.clone(), value: SavedViewScalar::from_internal(&field.value) } }
+    fn into_internal(self) -> DocumentField { DocumentField { name: self.name, value: self.value.into_internal() } }
+}
+
+/// A supported scalar value in a saved-view document.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SavedViewScalar {
+    /// Boolean value.
+    Boolean(bool),
+    /// Signed integer value.
+    Integer(i64),
+    /// Text value.
+    Text(String),
+}
+
+impl SavedViewScalar {
+    fn from_internal(value: &Scalar) -> Self { match value { Scalar::Boolean(value) => Self::Boolean(*value), Scalar::Integer(value) => Self::Integer(*value), Scalar::Text(value) => Self::Text(value.clone()) } }
+    fn into_internal(self) -> Scalar { match self { Self::Boolean(value) => Scalar::Boolean(value), Self::Integer(value) => Scalar::Integer(value), Self::Text(value) => Scalar::Text(value) } }
 }
 
 /// A validated singleton settings value without excluded-application duplication.
@@ -275,7 +465,8 @@ struct InvalidDocument {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum DocumentError {
+/// A malformed or unsupported versioned document value.
+pub enum DocumentError {
     UnsupportedSchema { schema_version: u16 },
     EmptyCollection { field: &'static str },
     DuplicateValue { field: &'static str, value: String },

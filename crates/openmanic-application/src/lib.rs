@@ -19,6 +19,7 @@ mod ports;
 mod projection;
 mod runtime;
 mod schedule;
+mod saved_view;
 mod schedule_projection;
 mod schedule_time;
 mod timeline_projection;
@@ -82,6 +83,11 @@ pub use schedule::{
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
     ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
+};
+pub use saved_view::{
+    SavedViewCommand, SavedViewId, SavedViewLoad, SavedViewMutation, SavedViewPersistence,
+    SavedViewPersistenceError, SavedViewRejection, SavedViewService, SavedViewSnapshot,
+    SavedViewSnapshotError,
 };
 pub use schedule_projection::{
     ScheduleOccurrence, ScheduleOccurrenceId, project_schedule_occurrences,
