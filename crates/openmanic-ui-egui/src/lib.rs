@@ -43,6 +43,10 @@ pub use model::{
     SnapshotReception, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext, UiAction,
     UiModel, UserFacingError,
 };
+pub use overview::{
+    OverviewAction, OverviewController, OverviewDataState, OverviewEffect,
+    OverviewPresentedAllocation, OverviewSavedViewItem, OverviewViewModel,
+};
 pub use timeline::{
     AdaptiveTickLayout, BandSegmentGeometry, PixelRange, ScheduleBracketGeometry, TickGeneration,
     TickLayoutError, TimelineHit, TimelineRangeGeometry, TimelineTick, TimelineTransform,
