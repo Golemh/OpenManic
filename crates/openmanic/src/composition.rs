@@ -32,6 +32,7 @@ use openmanic_application::{
     RuntimeSupervisor, RuntimeWorker, ScheduleCommand, ScheduleId, ScheduleOccurrenceId,
     SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
     SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep, SnapshotEnvelope, ThreadRoot,
+    SettingsSnapshot,
     TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
     TimelineSnapshot, TimelineSourceActivity, TitleObservationResult, TitleStabilizer,
     TrackingCommand, TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
@@ -995,6 +996,7 @@ struct RuntimeResources {
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
     layout_snapshot: Arc<Mutex<LayoutSnapshot>>,
     theme_mode: Arc<Mutex<u8>>,
+    settings_snapshot: Arc<Mutex<SettingsSnapshot>>,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
     supervisor: RuntimeSupervisor,
@@ -1062,14 +1064,16 @@ impl RuntimeResources {
                 )
             });
         let layout_snapshot = Arc::new(Mutex::new(initial_layout));
-        let initial_theme_mode = store
+        let initial_settings = store
             .writer()
-            .theme_mode()
-            // Theme preferences are optional presentation state. Retain the
-            // complete built-in default when an older or invalid value is found.
+            .settings_snapshot()
+            // A corrupt optional settings document must not prevent recovery to the safe,
+            // local-first defaults. Subsequent explicit settings saves replace the singleton.
             .unwrap_or(None)
-            .unwrap_or(0);
+            .unwrap_or_else(SettingsSnapshot::safe_default);
+        let initial_theme_mode = initial_settings.theme_mode().code();
         let theme_mode = Arc::new(Mutex::new(initial_theme_mode));
+        let settings_snapshot = Arc::new(Mutex::new(initial_settings));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
         let worker_focus_completion_pending = Arc::clone(&focus_completion_pending);
@@ -1115,6 +1119,7 @@ impl RuntimeResources {
                 focus_snapshot,
                 layout_snapshot,
                 theme_mode,
+                settings_snapshot,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
                 supervisor: RuntimeSupervisor::new([
@@ -2759,6 +2764,10 @@ impl VerticalSlice {
                 _ => "openmanic.dark",
             })
             .to_owned();
+        let mut close_to_tray = WindowsTrayController::new();
+        if let Ok(settings) = self.runtime.settings_snapshot.lock() {
+            close_to_tray.set_close_to_tray_enabled(settings.close_to_tray());
+        }
         VerticalSliceApp {
             bootstrap: self.bootstrap,
             app: OpenManicApp::new_with_theme(self.ui, theme_key.clone()),
@@ -2775,7 +2784,7 @@ impl VerticalSlice {
             calendar_data: PresentableData::InitialLoading,
             calendar_projection_sequence: 0,
             timeline: TimelineRenderer::new(),
-            close_to_tray: WindowsTrayController::new(),
+            close_to_tray,
             projection_sequence: 1,
             requested_range: None,
             create_schedule_mode: false,
@@ -4210,7 +4219,14 @@ impl VerticalSliceApp {
         if !context.input(|input| input.viewport().close_requested()) {
             return;
         }
-        match self.close_to_tray.on_main_window_close(true) {
+        let tracking_enabled = self
+            .runtime
+            .settings_snapshot
+            .lock()
+            .map_or(false, |settings| {
+                settings.consent_revision() > 0 && settings.start_tracking_automatically()
+            });
+        match self.close_to_tray.on_main_window_close(tracking_enabled) {
             openmanic_platform::CloseToTrayDisposition::HideToTray { .. } => {
                 context.send_viewport_cmd(eframe::egui::ViewportCommand::CancelClose);
                 context.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(false));
