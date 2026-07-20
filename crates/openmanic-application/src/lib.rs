@@ -53,6 +53,13 @@ pub use focus::{
     FocusCommand, FocusKind, FocusMutation, FocusNotificationError, FocusNotificationPort,
     FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot,
 };
+pub use overview::{
+    OVERVIEW_SNAPSHOT_SCHEMA_REVISION, OverviewAllocation, OverviewAllocationIdentity,
+    OverviewCacheKey, OverviewContext, OverviewFilters, OverviewGrouping, OverviewProjectionError,
+    OverviewProjectionResult, OverviewProjectionSlotState, OverviewProjectionSource,
+    OverviewProjectionStatus, OverviewProjector, OverviewRange, OverviewSnapshot,
+    OverviewSourceActivity, SharedOverviewSelection,
+};
 pub use ids::{
     CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
     ProjectionSlot, RequestId, SchemaRevision,
