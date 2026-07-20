@@ -61,7 +61,8 @@ use openmanic_ui_egui::{
     CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
     LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp,
     PresentableData, TodayController, TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution,
-    TrackingControlAction, UiAction, UiController, UiModel, reflow_dashboard,
+    ShutdownController, ShutdownEffect, TrackingControlAction, UiAction, UiController, UiModel,
+    reflow_dashboard, render_shutdown_failure,
     render_distribution_snapshot, render_usage_snapshot,
 };
 
@@ -4399,6 +4400,28 @@ impl VerticalSliceApp {
             context.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
         }
     }
+
+    fn render_shutdown_recovery(&mut self, context: &eframe::egui::Context) {
+        let controller = ShutdownController;
+        let phase = self.shutdown.phase();
+        let Some(view_model) = controller.failure_view_model(phase) else {
+            return;
+        };
+        let Some(action) = render_shutdown_failure(context, view_model) else {
+            return;
+        };
+        match controller.apply(phase, action) {
+            Some(ShutdownEffect::RetryCriticalFlush) => {
+                let _ = self.shutdown.retry_critical_flush();
+                self.begin_shutdown(context);
+            }
+            Some(ShutdownEffect::QuitAnyway) => {
+                let _ = self.shutdown.quit_anyway();
+                self.begin_shutdown(context);
+            }
+            None => {}
+        }
+    }
 }
 
 fn calendar_schedule_target(block_id: CalendarBlockId) -> Option<(ScheduleId, Option<i32>)> {
@@ -4599,6 +4622,7 @@ impl eframe::App for VerticalSliceApp {
         if self.runtime.quit_requested.swap(false, Ordering::AcqRel) {
             self.begin_shutdown(&context);
         }
+        self.render_shutdown_recovery(&context);
         context.request_repaint_after(UI_POLL_INTERVAL);
     }
 }
