@@ -442,9 +442,7 @@ impl PlatformActionRouter {
             WindowsPlatformAction::Quit => {
                 self.quit_requested.store(true, Ordering::Release);
             }
-            // Focus is intentionally unavailable until its own accepted service exists. The tray
-            // action remains bounded and cannot fabricate a focus mutation in this vertical slice.
-            WindowsPlatformAction::StartFocusSession => {}
+            WindowsPlatformAction::StartFocusSession => self.route_focus(),
         }
     }
 
@@ -464,6 +462,36 @@ impl PlatformActionRouter {
         ) {
             self.ui_inbox.remove_pending(command_id);
         }
+    }
+
+    fn route_focus(&self) {
+        if !self.accepting.load(Ordering::Acquire) {
+            return;
+        }
+        let Some((session_id, draft)) = self.identifiers.focus_draft() else {
+            return;
+        };
+        let start = self.identifiers.focus_start(session_id);
+        if !self.submit_focus(draft) {
+            return;
+        }
+        let _ = self.submit_focus(start);
+    }
+
+    fn submit_focus(&self, command: CommandEnvelope<FocusCommand>) -> bool {
+        let command_id = command.command_id();
+        if !self.ui_inbox.try_push(UiIngress::Pending(command_id)) {
+            return false;
+        }
+        if matches!(
+            self.lanes
+                .try_submit(WorkLane::Critical, WriterWork::Focus(command)),
+            LaneSubmit::Enqueued
+        ) {
+            return true;
+        }
+        self.ui_inbox.remove_pending(command_id);
+        false
     }
 }
 
