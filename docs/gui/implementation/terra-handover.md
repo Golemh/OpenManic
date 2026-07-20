@@ -2,8 +2,8 @@
 
 ## Resume point
 
-- Branch: `codex/openmanic-mvp-implementation-continuation`
-- Start from branch tip `55ae7a9` (`docs: add phase 6 diagnostics evidence`), not an old task worktree.
+- Continue on branch: `codex/openmanic-mvp-implementation-continuation`
+- Continuation baseline: `dea28f5` (`docs: refresh phase 6 handover`); use this commit or the newer branch tip after it, not an old task worktree.
 - The implementation ledger at `docs/gui/implementation/task-ledger.md` is the ownership and integration record.
 - The canonical next-work authority is `docs/gui/spec/implementation-plan.md`.
 
