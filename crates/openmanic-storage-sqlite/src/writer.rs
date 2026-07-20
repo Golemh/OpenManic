@@ -298,6 +298,43 @@ impl StorageWriter {
         Ok(revision)
     }
 
+    /// Changes the exclusion policy for distinct existing applications in one revision.
+    ///
+    /// The tracking reducer observes this policy at its composition boundary; this mutation never
+    /// rewrites historical activity rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if an application no longer exists or the mutation cannot commit.
+    pub fn set_applications_excluded(
+        &mut self,
+        application_ids: &[ApplicationId],
+        excluded: bool,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin application exclusion mutation")?;
+        let revision = next_revision(&transaction)?;
+        let application_row_ids = application_ids
+            .iter()
+            .map(|id| {
+                application_row_id(&transaction, id.as_bytes())?
+                    .ok_or(StorageError::ApplicationMissing)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for application_row_id in application_row_ids {
+            transaction
+                .execute(
+                    "UPDATE application SET exclusion_policy = ?1 WHERE id = ?2",
+                    params![i64::from(excluded), application_row_id],
+                )
+                .map_err(|error| database_error(&error, "set application exclusion policy"))?;
+        }
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit application exclusion mutation"))?;
+        Ok(revision)
+    }
+
     /// Stores an application's current category association and observation bounds atomically.
     ///
     /// # Errors
@@ -509,6 +546,15 @@ impl CatalogPersistence for StorageWriter {
         category_id: Option<CategoryId>,
     ) -> Result<DataRevision, CatalogPersistenceError> {
         StorageWriter::assign_applications(self, application_ids, category_id)
+            .map_err(|error| catalog_persistence_error(&error))
+    }
+
+    fn set_applications_excluded(
+        &mut self,
+        application_ids: &[ApplicationId],
+        excluded: bool,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        StorageWriter::set_applications_excluded(self, application_ids, excluded)
             .map_err(|error| catalog_persistence_error(&error))
     }
 }
@@ -1860,6 +1906,34 @@ mod tests {
                 .map(|snapshot| snapshot.revision()),
             Ok(revision(1))
         );
+    }
+
+    #[test]
+    fn application_exclusion_policy_is_atomic_and_reversible() {
+        let database = TemporaryDatabase::new("application-exclusion-policy");
+        let mut store = open_store(database.path(), 31);
+        let writer = store.writer();
+        seed_active_application(writer, 32);
+        assert_eq!(
+            writer.set_applications_excluded(&[application_id(32)], true),
+            Ok(revision(3))
+        );
+        let excluded: i64 = writer
+            .writer
+            .connection_mut()
+            .query_row("SELECT exclusion_policy FROM application", [], |row| row.get(0))
+            .expect("stored exclusion policy");
+        assert_eq!(excluded, 1);
+        assert_eq!(
+            writer.set_applications_excluded(&[application_id(32)], false),
+            Ok(revision(4))
+        );
+        let excluded: i64 = writer
+            .writer
+            .connection_mut()
+            .query_row("SELECT exclusion_policy FROM application", [], |row| row.get(0))
+            .expect("stored exclusion policy");
+        assert_eq!(excluded, 0);
     }
 
     fn one_time_schedule_snapshot(

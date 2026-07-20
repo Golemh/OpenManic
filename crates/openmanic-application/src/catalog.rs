@@ -40,6 +40,13 @@ pub enum CatalogCommand {
         /// `None` explicitly means Uncategorized.
         category_id: Option<CategoryId>,
     },
+    /// Enables or disables privacy-preserving exclusion for selected applications.
+    SetApplicationsExcluded {
+        /// The distinct applications selected by an explicit user action.
+        application_ids: Vec<ApplicationId>,
+        /// Whether future observations should persist only Excluded evidence.
+        excluded: bool,
+    },
 }
 
 impl CatalogCommand {
@@ -67,6 +74,29 @@ impl CatalogCommand {
         Ok(Self::AssignApplications {
             application_ids,
             category_id,
+        })
+    }
+
+    /// Creates an explicit bulk exclusion-policy change after validating its selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogCommandError`] when the selection is empty or contains duplicates.
+    pub fn try_set_applications_excluded(
+        application_ids: impl IntoIterator<Item = ApplicationId>,
+        excluded: bool,
+    ) -> Result<Self, CatalogCommandError> {
+        let application_ids = application_ids.into_iter().collect::<Vec<_>>();
+        if application_ids.is_empty() {
+            return Err(CatalogCommandError::EmptyApplicationSelection);
+        }
+        let distinct = application_ids.iter().copied().collect::<BTreeSet<_>>();
+        if distinct.len() != application_ids.len() {
+            return Err(CatalogCommandError::DuplicateApplicationSelection);
+        }
+        Ok(Self::SetApplicationsExcluded {
+            application_ids,
+            excluded,
         })
     }
 }
@@ -127,6 +157,18 @@ pub trait CatalogPersistence {
         &mut self,
         application_ids: &[ApplicationId],
         category_id: Option<CategoryId>,
+    ) -> Result<DataRevision, CatalogPersistenceError>;
+
+    /// Sets the privacy exclusion policy for every supplied existing application.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CatalogPersistenceError`] when an application no longer exists or the policy
+    /// change cannot be committed.
+    fn set_applications_excluded(
+        &mut self,
+        application_ids: &[ApplicationId],
+        excluded: bool,
     ) -> Result<DataRevision, CatalogPersistenceError>;
 }
 
@@ -356,6 +398,12 @@ where
             } => self
                 .persistence
                 .assign_applications(application_ids, *category_id),
+            CatalogCommand::SetApplicationsExcluded {
+                application_ids,
+                excluded,
+            } => self
+                .persistence
+                .set_applications_excluded(application_ids, *excluded),
         };
         match result {
             Ok(revision) => {
@@ -405,6 +453,13 @@ mod tests {
                 Some(CategoryId::from_bytes([2; 16]))
             ),
             Ok(CatalogCommand::AssignApplications { .. })
+        ));
+        assert!(matches!(
+            CatalogCommand::try_set_applications_excluded([application], true),
+            Ok(CatalogCommand::SetApplicationsExcluded {
+                excluded: true,
+                ..
+            })
         ));
     }
 
@@ -529,6 +584,14 @@ mod tests {
             &mut self,
             _: &[ApplicationId],
             _: Option<CategoryId>,
+        ) -> Result<crate::DataRevision, CatalogPersistenceError> {
+            self.result
+        }
+
+        fn set_applications_excluded(
+            &mut self,
+            _: &[ApplicationId],
+            _: bool,
         ) -> Result<crate::DataRevision, CatalogPersistenceError> {
             self.result
         }
