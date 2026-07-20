@@ -402,6 +402,173 @@ pub enum DataRootLockError {
     FileSystem(FileSystemFailure),
 }
 
+/// Coordinates the store-specific portions of a data-root move.
+///
+/// The caller owns the live SQLite writer and its [`DataRootLock`].  It must checkpoint and close
+/// that writer before returning from [`DataRootMoveSession::quiesce_and_close`], then use its
+/// accepted backup/verification machinery to prove the copied store can be reopened.  Keeping
+/// those operations behind this small seam prevents bootstrap code from opening a second writer.
+pub trait DataRootMoveSession {
+    /// Stops capture, checkpoints the store, releases its writer lock, and closes all database
+    /// handles associated with the source root.
+    fn quiesce_and_close(&mut self) -> Result<(), ()>;
+
+    /// Verifies the copied store at `destination` without trusting the filesystem copy alone.
+    fn verify_destination(&mut self, destination: &Path) -> Result<(), ()>;
+
+    /// Reopens the accepted store at the verified destination.
+    fn reopen_destination(&mut self, destination: &Path) -> Result<(), ()>;
+
+    /// Reopens the retained source after a failed move before locator switch.
+    fn reopen_source(&mut self, source: &Path) -> Result<(), ()>;
+}
+
+/// Failure category for a coordinated data-directory move.
+///
+/// Paths and database contents intentionally remain out of this error because it is suitable for
+/// user-visible recovery and diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DataRootMoveError {
+    /// Source and destination identify the same requested directory.
+    SameDirectory,
+    /// The source is not an existing directory.
+    SourceUnavailable,
+    /// The destination contains data and therefore cannot be safely overwritten.
+    DestinationNotEmpty,
+    /// The destination failed the normal local/WAL/lock validation.
+    DestinationValidation(DataRootValidationError),
+    /// The active writer could not be safely quiesced before copying.
+    QuiesceFailed,
+    /// Copying a source entry to the destination failed.
+    CopyFailed(FileSystemFailure),
+    /// The copied store did not pass the storage-owned verification procedure.
+    VerificationFailed,
+    /// The verified store could not be reopened at the destination.
+    ReopenDestinationFailed,
+    /// The bootstrap locator could not be atomically switched after a successful reopen.
+    LocatorSwitchFailed(LocatorError),
+    /// Recovery to the retained source failed after the locator was left unchanged.
+    SourceRecoveryFailed,
+}
+
+impl DataRootMoveError {
+    /// Returns the stable, privacy-safe diagnostic code for this recovery condition.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::SameDirectory => "data-move.same-directory",
+            Self::SourceUnavailable => "data-move.source-unavailable",
+            Self::DestinationNotEmpty => "data-move.destination-not-empty",
+            Self::DestinationValidation(_) => "data-move.destination-invalid",
+            Self::QuiesceFailed => "data-move.quiesce-failed",
+            Self::CopyFailed(_) => "data-move.copy-failed",
+            Self::VerificationFailed => "data-move.verification-failed",
+            Self::ReopenDestinationFailed => "data-move.destination-reopen-failed",
+            Self::LocatorSwitchFailed(_) => "data-move.locator-switch-failed",
+            Self::SourceRecoveryFailed => "data-move.source-recovery-failed",
+        }
+    }
+}
+
+/// Moves a closed data root, verifies it through the active storage session, then atomically
+/// switches the bootstrap locator.
+///
+/// The destination must be empty.  The source is never removed by this operation: it remains
+/// available for recovery after every failure and after successful locator switch.  The caller
+/// must obtain user confirmation before calling this destructive-location operation.
+///
+/// # Errors
+///
+/// Returns a privacy-safe failure category.  The locator remains unchanged unless this function
+/// returns `Ok`; if locator persistence fails, it attempts to reopen the retained source.
+pub fn move_data_root<V, S>(
+    source: &Path,
+    destination: &Path,
+    locator_path: &Path,
+    store_id: Option<StoreId>,
+    validator: &V,
+    session: &mut S,
+) -> Result<BootstrapLocator, DataRootMoveError>
+where
+    V: DataRootValidator,
+    S: DataRootMoveSession,
+{
+    if source == destination {
+        return Err(DataRootMoveError::SameDirectory);
+    }
+    if !source.is_dir() {
+        return Err(DataRootMoveError::SourceUnavailable);
+    }
+    validator
+        .validate(destination)
+        .map_err(DataRootMoveError::DestinationValidation)?;
+    if fs::read_dir(destination)
+        .map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?
+        .next()
+        .is_some()
+    {
+        return Err(DataRootMoveError::DestinationNotEmpty);
+    }
+
+    session
+        .quiesce_and_close()
+        .map_err(|()| DataRootMoveError::QuiesceFailed)?;
+    copy_data_root_contents(source, destination)?;
+    if session.verify_destination(destination).is_err() {
+        return recover_source(session, source, DataRootMoveError::VerificationFailed);
+    }
+    if session.reopen_destination(destination).is_err() {
+        return recover_source(session, source, DataRootMoveError::ReopenDestinationFailed);
+    }
+
+    let locator = BootstrapLocator::new(destination.to_path_buf(), store_id);
+    if let Err(error) = persist_locator(locator_path, &locator) {
+        return recover_source(session, source, DataRootMoveError::LocatorSwitchFailed(error));
+    }
+    Ok(locator)
+}
+
+fn recover_source<S>(
+    session: &mut S,
+    source: &Path,
+    original_error: DataRootMoveError,
+) -> Result<BootstrapLocator, DataRootMoveError>
+where
+    S: DataRootMoveSession,
+{
+    session.reopen_source(source).map_err(|()| DataRootMoveError::SourceRecoveryFailed)?;
+    Err(original_error)
+}
+
+fn copy_data_root_contents(source: &Path, destination: &Path) -> Result<(), DataRootMoveError> {
+    for entry in fs::read_dir(source).map_err(|error| DataRootMoveError::CopyFailed((&error).into()))? {
+        let entry = entry.map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?;
+        let source_path = entry.path();
+        if source_path.file_name().is_some_and(|name| name == LOCK_FILE_NAME) {
+            continue;
+        }
+        let destination_path = destination.join(entry.file_name());
+        let metadata = entry
+            .metadata()
+            .map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?;
+        if metadata.is_dir() {
+            fs::create_dir(&destination_path)
+                .map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?;
+            copy_data_root_contents(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path)
+                .map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&destination_path)
+                .and_then(|file| file.sync_all())
+                .map_err(|error| DataRootMoveError::CopyFailed((&error).into()))?;
+        }
+    }
+    Ok(())
+}
+
 impl DataRootLockError {
     fn failure(self) -> FileSystemFailure {
         match self {
@@ -643,10 +810,11 @@ impl std::error::Error for DataRootResolutionError {}
 mod tests {
     use super::{
         ARTIFACT_DATA_DIRECTORY, BootstrapLocator, DataRootInputs, DataRootLock,
-        DataRootResolution, DataRootResolutionError, DataRootSource, DataRootValidationError,
-        DataRootValidator, DirectoryChoiceReason, FileSystemFailure, LocalDataRootValidator,
-        LocatorError, NetworkShareValidator, RejectKnownNetworkShares, StoreId, load_locator,
-        persist_locator, resolve_data_root,
+        DataRootMoveError, DataRootMoveSession, DataRootResolution, DataRootResolutionError,
+        DataRootSource, DataRootValidationError, DataRootValidator, DirectoryChoiceReason,
+        FileSystemFailure, LocalDataRootValidator, LocatorError, NetworkShareValidator,
+        RejectKnownNetworkShares, StoreId, load_locator, move_data_root, persist_locator,
+        resolve_data_root,
     };
     use std::cell::Cell;
     use std::collections::BTreeSet;
@@ -691,6 +859,34 @@ mod tests {
     impl DataRootValidator for CountingValidator {
         fn validate(&self, _: &Path) -> Result<(), DataRootValidationError> {
             self.calls.set(self.calls.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct MoveSession {
+        calls: Vec<&'static str>,
+        fail_verification: bool,
+    }
+
+    impl DataRootMoveSession for MoveSession {
+        fn quiesce_and_close(&mut self) -> Result<(), ()> {
+            self.calls.push("quiesce");
+            Ok(())
+        }
+
+        fn verify_destination(&mut self, _: &Path) -> Result<(), ()> {
+            self.calls.push("verify");
+            if self.fail_verification { Err(()) } else { Ok(()) }
+        }
+
+        fn reopen_destination(&mut self, _: &Path) -> Result<(), ()> {
+            self.calls.push("reopen-destination");
+            Ok(())
+        }
+
+        fn reopen_source(&mut self, _: &Path) -> Result<(), ()> {
+            self.calls.push("reopen-source");
             Ok(())
         }
     }
@@ -901,5 +1097,81 @@ mod tests {
             "bootstrap.data-root.filesystem"
         );
         fs::remove_dir_all(directory).expect("test directory is removed");
+    }
+
+    #[test]
+    fn data_root_move_verifies_then_switches_locator_without_removing_source() {
+        let directory = unique_test_directory("data-root-move");
+        let source = directory.join("source");
+        let destination = directory.join("destination");
+        let locator_path = directory.join("bootstrap.locator");
+        fs::create_dir_all(source.join("logs")).expect("source root is created");
+        fs::write(source.join("openmanic.sqlite3"), b"closed SQLite image")
+            .expect("database fixture is written");
+        fs::write(source.join("logs/bootstrap.log"), b"diagnostic fixture")
+            .expect("nested fixture is written");
+        let mut session = MoveSession::default();
+
+        let locator = move_data_root(
+            &source,
+            &destination,
+            &locator_path,
+            Some(StoreId::new("store-123".to_owned()).expect("valid store ID")),
+            &LocalDataRootValidator::default(),
+            &mut session,
+        )
+        .expect("closed source copies, verifies, and switches locator");
+
+        assert_eq!(locator.data_root(), destination);
+        assert_eq!(
+            fs::read(destination.join("openmanic.sqlite3")).expect("copied database is readable"),
+            b"closed SQLite image"
+        );
+        assert_eq!(
+            fs::read(source.join("logs/bootstrap.log")).expect("retained source is readable"),
+            b"diagnostic fixture"
+        );
+        assert_eq!(
+            load_locator(&locator_path).expect("locator loads"),
+            Some(locator)
+        );
+        assert_eq!(session.calls, ["quiesce", "verify", "reopen-destination"]);
+        fs::remove_dir_all(directory).expect("test data is removed");
+    }
+
+    #[test]
+    fn data_root_move_keeps_locator_on_verification_failure_and_recovers_source() {
+        let directory = unique_test_directory("data-root-move-verification");
+        let source = directory.join("source");
+        let destination = directory.join("destination");
+        let locator_path = directory.join("bootstrap.locator");
+        fs::create_dir_all(&source).expect("source root is created");
+        fs::write(source.join("openmanic.sqlite3"), b"closed SQLite image")
+            .expect("database fixture is written");
+        let old_locator = BootstrapLocator::new(source.clone(), None);
+        persist_locator(&locator_path, &old_locator).expect("old locator is persisted");
+        let mut session = MoveSession {
+            fail_verification: true,
+            ..MoveSession::default()
+        };
+
+        let error = move_data_root(
+            &source,
+            &destination,
+            &locator_path,
+            None,
+            &LocalDataRootValidator::default(),
+            &mut session,
+        )
+        .expect_err("failed verification must keep the previous locator");
+
+        assert_eq!(error, DataRootMoveError::VerificationFailed);
+        assert_eq!(
+            load_locator(&locator_path).expect("old locator remains readable"),
+            Some(old_locator)
+        );
+        assert!(source.join("openmanic.sqlite3").is_file());
+        assert_eq!(session.calls, ["quiesce", "verify", "reopen-source"]);
+        fs::remove_dir_all(directory).expect("test data is removed");
     }
 }

@@ -8,6 +8,11 @@ use std::io::{self, Write};
 use std::panic;
 use std::path::{Path, PathBuf};
 
+const BUNDLE_MANIFEST_FILE: &str = "diagnostics-manifest.txt";
+const BUNDLE_BOOTSTRAP_LOG_FILE: &str = "bootstrap.log";
+const BUNDLE_PANIC_MARKER_FILE: &str = "panic.marker";
+const BUNDLE_FORMAT_VERSION: u8 = 1;
+
 /// A fixed startup event that cannot carry arbitrary user data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticEvent {
@@ -49,6 +54,93 @@ impl DiagnosticError {
             Self::FileSystem => "bootstrap.diagnostics.filesystem",
         }
     }
+}
+
+/// Privacy-safe result of a local diagnostics-bundle export.
+///
+/// The bundle deliberately contains no selected data-root path, window title, application identity,
+/// database content, or arbitrary log text. Its files are a fixed manifest plus validated bootstrap
+/// event codes and/or a validated minimal panic marker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticsBundle {
+    bundle_directory: PathBuf,
+    included_files: Vec<&'static str>,
+}
+
+impl DiagnosticsBundle {
+    /// Returns the newly created local bundle directory selected by the caller.
+    #[must_use]
+    pub fn bundle_directory(&self) -> &Path {
+        &self.bundle_directory
+    }
+
+    /// Returns bundle-relative file names in deterministic order.
+    #[must_use]
+    pub fn included_files(&self) -> &[&'static str] {
+        &self.included_files
+    }
+}
+
+/// Failure to create a privacy-safe local diagnostics bundle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiagnosticsBundleError {
+    /// The selected output location could not be created or written.
+    FileSystem,
+}
+
+impl DiagnosticsBundleError {
+    /// Returns a stable code that is safe to display in ordinary diagnostics.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::FileSystem => "diagnostics.bundle.filesystem",
+        }
+    }
+}
+
+/// Creates a privacy-safe diagnostics bundle at a caller-selected empty destination.
+///
+/// The destination itself is never recorded in the bundle. Only recognized fixed bootstrap event
+/// codes and a structurally valid redacted panic marker are copied. Unknown or malformed local log
+/// content is intentionally omitted rather than being included as support data.
+///
+/// # Errors
+///
+/// Returns [`DiagnosticsBundleError`] if the destination cannot be created or the selected safe
+/// content cannot be written.
+pub fn export_diagnostics_bundle(
+    data_root: &Path,
+    destination: &Path,
+) -> Result<DiagnosticsBundle, DiagnosticsBundleError> {
+    fs::create_dir(destination).map_err(map_bundle_file_system_error)?;
+
+    let mut included_files = vec![BUNDLE_MANIFEST_FILE];
+    let bootstrap_events = read_safe_bootstrap_events(&data_root.join("logs/bootstrap.log"));
+    if !bootstrap_events.is_empty() {
+        fs::write(
+            destination.join(BUNDLE_BOOTSTRAP_LOG_FILE),
+            bootstrap_events.join("\n") + "\n",
+        )
+        .map_err(map_bundle_file_system_error)?;
+        included_files.push(BUNDLE_BOOTSTRAP_LOG_FILE);
+    }
+
+    if let Some(marker) = read_safe_panic_marker(&data_root.join("crash/panic.marker")) {
+        fs::write(destination.join(BUNDLE_PANIC_MARKER_FILE), marker)
+            .map_err(map_bundle_file_system_error)?;
+        included_files.push(BUNDLE_PANIC_MARKER_FILE);
+    }
+
+    let manifest = format!(
+        "format_version={BUNDLE_FORMAT_VERSION}\nprivacy=validated-fixed-diagnostics-only\nfiles={}\n",
+        included_files.join(",")
+    );
+    fs::write(destination.join(BUNDLE_MANIFEST_FILE), manifest).map_err(map_bundle_file_system_error)?;
+
+    Ok(DiagnosticsBundle {
+        bundle_directory: destination.to_owned(),
+        included_files,
+    })
 }
 
 /// A bounded bootstrap diagnostic writer rooted in the chosen local data directory.
@@ -148,10 +240,55 @@ fn map_file_system_error(_: io::Error) -> DiagnosticError {
     DiagnosticError::FileSystem
 }
 
+fn read_safe_bootstrap_events(path: &Path) -> Vec<&'static str> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    content
+        .lines()
+        .filter_map(|line| {
+            [
+                DiagnosticEvent::DataRootResolved,
+                DiagnosticEvent::DirectoryChoiceRequired,
+                DiagnosticEvent::DataRootOverrideRejected,
+                DiagnosticEvent::LocatorRecoveryRequired,
+            ]
+            .into_iter()
+            .find(|event| line == event.code())
+            .map(|event| event.code())
+        })
+        .collect()
+}
+
+fn read_safe_panic_marker(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut lines = content.lines();
+    let event = lines.next()?;
+    let thread = lines.next()?;
+    let line = lines.next()?.strip_prefix("location_line=")?;
+    let column = lines.next()?.strip_prefix("location_column=")?;
+    if lines.next().is_some()
+        || event != "event=panic"
+        || thread != "thread=redacted"
+        || line.parse::<u32>().is_err()
+        || column.parse::<u32>().is_err()
+    {
+        return None;
+    }
+    Some(format!(
+        "event=panic\nthread=redacted\nlocation_line={line}\nlocation_column={column}\n"
+    ))
+}
+
+fn map_bundle_file_system_error(_: io::Error) -> DiagnosticsBundleError {
+    DiagnosticsBundleError::FileSystem
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        DiagnosticEvent, MinimalDiagnostics, redact_path_for_diagnostics,
+        DiagnosticEvent, MinimalDiagnostics, export_diagnostics_bundle, redact_path_for_diagnostics,
         redact_title_for_diagnostics, write_panic_marker,
     };
     use std::fs;
@@ -206,5 +343,65 @@ mod tests {
         assert!(!marker.contains("title"));
         assert!(!marker.contains("C:/"));
         fs::remove_dir_all(crash_directory).expect("test crash directory is removed");
+    }
+
+    #[test]
+    fn diagnostics_bundle_has_a_deterministic_manifest_and_excludes_untrusted_text() {
+        let data_root = unique_test_directory("diagnostics-bundle-source");
+        let destination = unique_test_directory("diagnostics-bundle-destination");
+        fs::create_dir_all(data_root.join("logs")).expect("test log directory is created");
+        fs::create_dir_all(data_root.join("crash")).expect("test crash directory is created");
+        fs::write(
+            data_root.join("logs/bootstrap.log"),
+            "bootstrap.data-root.resolved\nPrivate window title C:/private/data\n",
+        )
+        .expect("test log writes");
+        fs::write(
+            data_root.join("crash/panic.marker"),
+            "event=panic\nthread=redacted\nlocation_line=37\nlocation_column=9\nprivate=must-not-export\n",
+        )
+        .expect("test marker writes");
+
+        let bundle = export_diagnostics_bundle(&data_root, &destination).expect("bundle exports");
+        assert_eq!(
+            bundle.included_files(),
+            &["diagnostics-manifest.txt", "bootstrap.log"]
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("diagnostics-manifest.txt"))
+                .expect("manifest reads"),
+            "format_version=1\nprivacy=validated-fixed-diagnostics-only\nfiles=diagnostics-manifest.txt,bootstrap.log\n"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("bootstrap.log")).expect("bundle log reads"),
+            "bootstrap.data-root.resolved\n"
+        );
+        assert!(!destination.join("panic.marker").exists());
+        let bundle_text = fs::read_to_string(destination.join("bootstrap.log"))
+            .expect("bundle log reads");
+        assert!(!bundle_text.contains("Private window title"));
+        assert!(!bundle_text.contains("C:/private/data"));
+        fs::remove_dir_all(data_root).expect("test source is removed");
+        fs::remove_dir_all(destination).expect("test destination is removed");
+    }
+
+    #[test]
+    fn diagnostics_bundle_includes_only_a_valid_redacted_panic_marker() {
+        let data_root = unique_test_directory("diagnostics-bundle-panic-source");
+        let destination = unique_test_directory("diagnostics-bundle-panic-destination");
+        fs::create_dir_all(data_root.join("crash")).expect("test crash directory is created");
+        write_panic_marker(&data_root.join("crash"), 37, 9).expect("test marker writes");
+
+        let bundle = export_diagnostics_bundle(&data_root, &destination).expect("bundle exports");
+        assert_eq!(
+            bundle.included_files(),
+            &["diagnostics-manifest.txt", "panic.marker"]
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("panic.marker")).expect("bundle marker reads"),
+            "event=panic\nthread=redacted\nlocation_line=37\nlocation_column=9\n"
+        );
+        fs::remove_dir_all(data_root).expect("test source is removed");
+        fs::remove_dir_all(destination).expect("test destination is removed");
     }
 }
