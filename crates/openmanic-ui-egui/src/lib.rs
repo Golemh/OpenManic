@@ -17,6 +17,7 @@ mod calendar;
 mod controller;
 mod distribution;
 mod model;
+mod overview;
 mod reducer;
 mod repaint;
 mod shell;
