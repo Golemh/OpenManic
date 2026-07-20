@@ -26,7 +26,8 @@ use openmanic_application::{
     EntityRevision, FocusCommand, FocusNotificationError, FocusNotificationPort, FocusPersistence,
     FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome,
     ScheduleCommand,
-    ScheduleId, SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
+    ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
+    ScheduleService, ScheduleSnapshot,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
     TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
@@ -34,8 +35,8 @@ use openmanic_application::{
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval,
-    FocusSessionId, FocusSessionState, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId,
-    TrackerRunId, UtcMicros,
+    FocusSessionId, FocusSessionState, OneTimeScheduleId, ScheduleEditScope, ScheduleRule,
+    ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -121,6 +122,7 @@ struct TodaySnapshot {
     timeline: TimelineSnapshot,
     usage: ApplicationUsageSnapshot,
     distribution: openmanic_ui_egui::DistributionSnapshot,
+    schedules: Vec<ScheduleSnapshot>,
 }
 
 impl TodaySnapshot {
@@ -134,6 +136,10 @@ impl TodaySnapshot {
 
     const fn distribution(&self) -> &openmanic_ui_egui::DistributionSnapshot {
         &self.distribution
+    }
+
+    fn schedules(&self) -> &[ScheduleSnapshot] {
+        &self.schedules
     }
 }
 
@@ -393,6 +399,43 @@ impl CommandIdentifiers {
             submitted_at_utc,
             ScheduleCommand::Create(snapshot),
         ))
+    }
+
+    fn schedule_delete(
+        &self,
+        snapshot: &ScheduleSnapshot,
+    ) -> CommandEnvelope<ScheduleCommand> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            Some(snapshot.entity_revision()),
+            submitted_at_utc,
+            ScheduleCommand::Delete(snapshot.id()),
+        )
+    }
+
+    fn schedule_delete_occurrence(
+        &self,
+        series_id: ScheduleSeriesId,
+        anchor_date: i32,
+        scope: ScheduleEditScope,
+        expected_revision: EntityRevision,
+    ) -> CommandEnvelope<ScheduleCommand> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            Some(expected_revision),
+            submitted_at_utc,
+            ScheduleCommand::DeleteOccurrence {
+                series_id,
+                anchor_date,
+                scope,
+            },
+        )
     }
 
     fn focus_draft(&self) -> Option<(FocusSessionId, CommandEnvelope<FocusCommand>)> {
@@ -1521,6 +1564,7 @@ fn build_today_snapshot(
             timeline,
             usage,
             distribution,
+            schedules,
         },
     ))
 }
@@ -1784,11 +1828,19 @@ struct VerticalSliceApp {
     requested_range: Option<HalfOpenInterval>,
     create_schedule_mode: bool,
     schedule_draft: Option<ScheduleDraft>,
+    schedule_delete_request: Option<ScheduleDeleteRequest>,
     latest_schedule_command: Option<CommandId>,
     latest_focus_command: Option<CommandId>,
     latest_focus_session: Option<FocusSessionId>,
     #[cfg(windows)]
     instance_owner: WindowsInstanceOwner,
+}
+
+#[derive(Clone)]
+struct ScheduleDeleteRequest {
+    snapshot: ScheduleSnapshot,
+    anchor_date: Option<i32>,
+    scope: ScheduleEditScope,
 }
 
 impl VerticalSlice {
@@ -1860,6 +1912,7 @@ impl VerticalSlice {
             requested_range: None,
             create_schedule_mode: false,
             schedule_draft: None,
+            schedule_delete_request: None,
             latest_schedule_command: None,
             latest_focus_command: None,
             latest_focus_session: None,
@@ -1963,6 +2016,7 @@ impl VerticalSliceApp {
             }
         }
         self.render_schedule_editor(ui);
+        self.render_existing_schedule_controls(ui, &snapshot);
         ui.add_space(12.0);
         ui.heading("Application usage");
         render_usage_snapshot(ui, snapshot.usage());
@@ -2141,6 +2195,108 @@ impl VerticalSliceApp {
             self.schedule_draft = None;
         }
         self.render_schedule_status(ui);
+    }
+
+    fn render_existing_schedule_controls(&mut self, ui: &mut eframe::egui::Ui, today: &TodaySnapshot) {
+        let entries = today
+            .timeline()
+            .schedule_occurrences()
+            .iter()
+            .filter_map(|occurrence| {
+                let (schedule_id, anchor_date) = match occurrence.id() {
+                    ScheduleOccurrenceId::OneTime(schedule_id) => (schedule_id, None),
+                    ScheduleOccurrenceId::Recurring {
+                        schedule_id,
+                        anchor_date,
+                    } => (schedule_id, Some(anchor_date)),
+                };
+                today
+                    .schedules()
+                    .iter()
+                    .find(|snapshot| snapshot.id() == schedule_id)
+                    .cloned()
+                    .map(|snapshot| (snapshot, anchor_date, occurrence.interval()))
+            })
+            .collect::<Vec<_>>();
+        if !entries.is_empty() {
+            ui.add_space(12.0);
+            ui.heading("Schedules in this view");
+            for (schedule, anchor_date, interval) in entries {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} — {} to {} UTC",
+                        schedule.rule().label(),
+                        interval.start().get(),
+                        interval.end().get()
+                    ));
+                    if ui.button("Delete…").clicked() {
+                        self.schedule_delete_request = Some(ScheduleDeleteRequest {
+                            snapshot: schedule,
+                            anchor_date,
+                            scope: ScheduleEditScope::OnlyThisDate,
+                        });
+                    }
+                });
+            }
+        }
+        self.render_schedule_delete_confirmation(ui);
+    }
+
+    fn render_schedule_delete_confirmation(&mut self, ui: &mut eframe::egui::Ui) {
+        let Some(mut request) = self.schedule_delete_request.clone() else {
+            return;
+        };
+        let mut confirm = false;
+        let mut cancel = false;
+        ui.group(|ui| {
+            ui.strong("Delete schedule?");
+            ui.label("This action changes only your personal schedule and never activity history.");
+            if request.anchor_date.is_some() {
+                ui.radio_value(
+                    &mut request.scope,
+                    ScheduleEditScope::OnlyThisDate,
+                    "Only this occurrence",
+                );
+                ui.radio_value(
+                    &mut request.scope,
+                    ScheduleEditScope::ThisAndFuture,
+                    "This and future occurrences",
+                );
+                ui.radio_value(
+                    &mut request.scope,
+                    ScheduleEditScope::EveryOccurrence,
+                    "Every occurrence",
+                );
+            }
+            confirm = ui.button("Confirm delete").clicked();
+            cancel = ui.button("Keep schedule").clicked();
+        });
+        if cancel {
+            self.schedule_delete_request = None;
+            return;
+        }
+        if !confirm {
+            self.schedule_delete_request = Some(request);
+            return;
+        }
+        let command = match (request.snapshot.id(), request.anchor_date) {
+            (ScheduleId::Series(series_id), Some(anchor_date)) => self
+                .runtime
+                .identifiers
+                .schedule_delete_occurrence(
+                    series_id,
+                    anchor_date,
+                    request.scope,
+                    request.snapshot.entity_revision(),
+                ),
+            _ => self.runtime.identifiers.schedule_delete(&request.snapshot),
+        };
+        if let Some(command_id) = self.runtime.try_submit_schedule(command) {
+            self.latest_schedule_command = Some(command_id);
+            self.schedule_delete_request = None;
+        } else {
+            self.schedule_delete_request = Some(request);
+        }
     }
 
     fn render_schedule_status(&self, ui: &mut eframe::egui::Ui) {
@@ -2454,10 +2610,13 @@ mod tests {
     use std::sync::Arc;
 
     use openmanic_application::{
-        LaneCapacities, LaneReceive, TrackingCommand, TrackingEvidence, WorkLane,
-        bounded_runtime_lanes,
+        EntityRevision, LaneCapacities, LaneReceive, ScheduleCommand, ScheduleId,
+        ScheduleSnapshot, TrackingCommand, TrackingEvidence, WorkLane, bounded_runtime_lanes,
     };
-    use openmanic_domain::{ApplicationId, FocusSessionState, HalfOpenInterval, UtcMicros};
+    use openmanic_domain::{
+        ApplicationId, FocusSessionState, HalfOpenInterval, ScheduleEditScope, ScheduleRule,
+        ScheduleSeriesId, UtcMicros,
+    };
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
@@ -2623,6 +2782,45 @@ mod tests {
             focus_remaining_us(FocusSessionState::Ready, UtcMicros::new(0)),
             None
         );
+    }
+
+    #[test]
+    fn schedule_delete_commands_retain_the_snapshot_revision_and_explicit_scope() {
+        let identifiers = CommandIdentifiers::default();
+        let series_id = ScheduleSeriesId::from_bytes([7; 16]);
+        let snapshot = ScheduleSnapshot::try_new(
+            ScheduleId::Series(series_id),
+            ScheduleRule::repeating(
+                "Review",
+                None,
+                1,
+                9 * 3_600,
+                10 * 3_600,
+                0,
+                None,
+                "Etc/UTC",
+            )
+            .expect("valid recurring fixture"),
+            EntityRevision::new(4),
+            UtcMicros::new(10),
+        )
+        .expect("matching schedule identity");
+        let command = identifiers.schedule_delete_occurrence(
+            series_id,
+            20,
+            ScheduleEditScope::ThisAndFuture,
+            snapshot.entity_revision(),
+        );
+
+        assert_eq!(command.expected_entity_revision(), Some(EntityRevision::new(4)));
+        assert!(matches!(
+            command.payload(),
+            ScheduleCommand::DeleteOccurrence {
+                series_id: actual_series_id,
+                anchor_date: 20,
+                scope: ScheduleEditScope::ThisAndFuture,
+            } if *actual_series_id == series_id
+        ));
     }
 
     #[test]
