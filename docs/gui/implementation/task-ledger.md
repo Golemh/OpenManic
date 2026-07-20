@@ -194,7 +194,8 @@ Remaining risk or waiver:
   cancellation.
 - **G6 limitation:** the automated quality gate is green, but the real-Windows/manual acceptance
   evidence is incomplete. A live debug build on Windows showed the full scrollable Settings data
-  surface; a verified backup completed and appeared as a named completed job; restore and move
-  confirmation wording was inspected and cancelled without replacing or relocating data. Actual
-  restore/move behavior, Explorer/tray recovery, autostart repair, and portable-artifact
-  replacement remain unobserved before declaring G6 accepted.
+  surface; a verified backup and privacy-safe diagnostics export both completed as named jobs; the
+  live diagnostics manifest contained only fixed privacy metadata. Restore and move confirmation
+  wording was inspected and cancelled without replacing or relocating data. Actual restore/move
+  behavior, Explorer/tray recovery, autostart repair, and portable-artifact replacement remain
+  unobserved before declaring G6 accepted.
