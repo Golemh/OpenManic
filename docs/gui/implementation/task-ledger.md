@@ -171,3 +171,13 @@ Remaining risk or waiver:
 - **Remaining risk / waiver:** live operating-system theme observation and narrow-window touch
   affordances are explicitly deferred in `phase-5-edge-cases.md`; no external theme documents are
   accepted in this MVP phase.
+
+## OM-600 through OM-643 — Phase 6 data operations and delivery
+
+- **Objective:** deliver local data interchange and recovery operations, portable Windows delivery
+  controls, onboarding/settings, job presentation, and lifecycle completion.
+- **Requirement/spec references:** implementation plan §18 and the corresponding data-model,
+  architecture, delivery/setup, and UI specifications.
+- **Branch/worktree:** `codex/openmanic-mvp-implementation-continuation`, primary integration checkout.
+- **Base SHA:** `c4b19bfa3b1c5bed04eb0525e62cacbcb9444e0d`.
+- **Status:** in progress; focused implementation checks only until the consolidated G6 gate.

@@ -23,6 +23,7 @@ use crate::repository::{
     database_error, decode_layout_document, encode_layout_definition, encode_saved_view_definition,
     load_saved_views, read_schedule_snapshot,
 };
+use crate::backup::{create_user_backup, restore_user_backup};
 use crate::{
     ConnectionConfiguration, SqliteReadSession, SqliteWriter, StorageError, StoreOpenOptions,
 };
@@ -2116,6 +2117,27 @@ impl SqliteStore {
     /// Returns [`StorageError`] if the reader cannot open the already migrated local store.
     pub fn open_read_session(&self) -> Result<SqliteReadSession, StorageError> {
         SqliteReadSession::open(&self.database_path)
+    }
+
+    /// Creates a verified full-fidelity SQLite online backup at a new user-selected path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the destination already exists, the backup API fails, or
+    /// SQLite quick/foreign-key verification rejects the completed image.
+    pub fn create_backup(&mut self, destination: &Path) -> Result<(), StorageError> {
+        create_user_backup(&*self.writer.writer.connection_mut(), destination)
+    }
+
+    /// Restores a previously verified full-fidelity SQLite backup into the current store.
+    ///
+    /// Callers must obtain explicit destructive confirmation and quiesce dependent work first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when verification or the SQLite restore API fails.
+    pub fn restore_backup(&mut self, source: &Path) -> Result<(), StorageError> {
+        restore_user_backup(self.writer.writer.connection_mut(), source)
     }
 }
 

@@ -6,6 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+jiff.workspace = true
 openmanic-application.workspace = true
 openmanic-domain.workspace = true
 rusqlite.workspace = true

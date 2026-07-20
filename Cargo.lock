@@ -1920,6 +1920,7 @@ dependencies = [
 name = "openmanic-storage-sqlite"
 version = "0.1.0"
 dependencies = [
+ "jiff",
  "openmanic-application",
  "openmanic-domain",
  "rusqlite",

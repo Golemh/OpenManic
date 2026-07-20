@@ -55,6 +55,39 @@ pub(crate) fn create_verified_backup(
     Ok(VerifiedBackup { path })
 }
 
+/// Creates and verifies a user-selected full-fidelity online backup without replacing it.
+pub(crate) fn create_user_backup(source: &Connection, path: &Path) -> Result<(), StorageError> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| StorageError::BackupPathUnavailable)?;
+    if file.sync_all().is_err() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(StorageError::BackupPathUnavailable);
+    }
+    drop(file);
+    if run_online_backup(source, path).is_err() {
+        let _ = fs::remove_file(path);
+        return Err(StorageError::BackupCreationFailed);
+    }
+    verify_backup(path)
+}
+
+/// Verifies and restores a user-selected full-fidelity online backup.
+pub(crate) fn restore_user_backup(
+    destination: &mut Connection,
+    backup_path: &Path,
+) -> Result<(), StorageError> {
+    verify_backup(backup_path)?;
+    destination
+        .restore("main", backup_path, None::<fn(rusqlite::backup::Progress)>)
+        .map_err(|_| StorageError::BackupRestoreFailed)?;
+    connection::configure_writer(destination)?;
+    verify_database_integrity(destination).map_err(restored_database_integrity_error)
+}
+
 fn run_online_backup(source: &Connection, path: &Path) -> Result<(), StorageError> {
     let mut destination = Connection::open(path).map_err(|_| StorageError::BackupCreationFailed)?;
     {

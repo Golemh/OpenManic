@@ -1,10 +1,14 @@
 //! Read repositories that map strict SQLite rows into storage-owned snapshots.
 
-use std::path::Path;
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+    path::Path,
+};
 
 use openmanic_application::{
-    DataRevision, EntityRevision, FocusKind, FocusSnapshot, SavedViewId, SavedViewLoad,
-    SavedViewSnapshot, ScheduleId, ScheduleSnapshot,
+    CsvExportRequest, DataOperationOutcome, DataRevision, EntityRevision, FocusKind,
+    FocusSnapshot, SavedViewId, SavedViewLoad, SavedViewSnapshot, ScheduleId, ScheduleSnapshot,
 };
 use openmanic_domain::{
     ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
@@ -214,6 +218,283 @@ impl SqliteReadSession {
             .map_err(|error| database_error(&error, "commit read snapshot"))?;
         Ok(snapshot)
     }
+
+    /// Streams a versioned CSV interchange file from one correlated read transaction.
+    ///
+    /// The method holds only one SQLite row at a time while writing; it never materializes a
+    /// full dashboard snapshot or exposes a SQLite row identity as an interchange identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the destination, SQLite reader, timestamp conversion, or
+    /// stream write fails.
+    pub fn export_csv(
+        &mut self,
+        request: &CsvExportRequest,
+        completed_at_utc: UtcMicros,
+    ) -> Result<DataOperationOutcome, StorageError> {
+        let file = File::create(request.destination().path()).map_err(|_| {
+            StorageError::DataOperationFailed {
+                operation: "create CSV export",
+            }
+        })?;
+        let mut output = BufWriter::new(file);
+        let transaction = self
+            .reader
+            .connection()
+            .unchecked_transaction()
+            .map_err(|error| database_error(&error, "begin CSV export"))?;
+        let revision = transaction
+            .query_row(
+                "SELECT data_revision FROM store_metadata WHERE singleton_id = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| database_error(&error, "read CSV export revision"))?;
+        let revision = data_revision(revision)?;
+        write_csv_record(
+            &mut output,
+            &[
+                "record_type",
+                "format_version",
+                "stable_id",
+                "start_utc",
+                "end_utc",
+                "start_utc_us",
+                "end_utc_us",
+                "activity_state",
+                "activity_cause",
+                "application_id",
+                "category_id",
+                "display_name",
+            ],
+        )?;
+        let mut count = 0_u64;
+        count = count.saturating_add(export_categories(&transaction, &mut output)?);
+        count = count.saturating_add(export_applications(&transaction, &mut output)?);
+        count = count.saturating_add(export_activities(&transaction, request, &mut output)?);
+        output.flush().map_err(|_| StorageError::DataOperationFailed {
+            operation: "flush CSV export",
+        })?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit CSV export read"))?;
+        Ok(DataOperationOutcome::new(count, revision, completed_at_utc))
+    }
+}
+
+fn export_categories(
+    transaction: &Transaction<'_>,
+    output: &mut impl Write,
+) -> Result<u64, StorageError> {
+    let mut statement = transaction
+        .prepare("SELECT public_id, display_name FROM category ORDER BY public_id")
+        .map_err(|error| database_error(&error, "prepare CSV categories"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| database_error(&error, "query CSV categories"))?;
+    let mut count = 0_u64;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| database_error(&error, "read CSV category"))?
+    {
+        let id = fixed_id(
+            row.get::<_, Vec<u8>>(0)
+                .map_err(|error| database_error(&error, "read CSV category ID"))?,
+            "CSV category ID",
+        )?;
+        let name: String = row
+            .get(1)
+            .map_err(|error| database_error(&error, "read CSV category name"))?;
+        write_csv_record(
+            output,
+            &["category", "1", &hex_id(id), "", "", "", "", "", "", "", "", &name],
+        )?;
+        count = count.saturating_add(1);
+    }
+    Ok(count)
+}
+
+fn export_applications(
+    transaction: &Transaction<'_>,
+    output: &mut impl Write,
+) -> Result<u64, StorageError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT application.public_id, application.display_name, category.public_id
+               FROM application
+          LEFT JOIN category ON category.id = application.category_id
+           ORDER BY application.public_id",
+        )
+        .map_err(|error| database_error(&error, "prepare CSV applications"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| database_error(&error, "query CSV applications"))?;
+    let mut count = 0_u64;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| database_error(&error, "read CSV application"))?
+    {
+        let id = fixed_id(
+            row.get::<_, Vec<u8>>(0)
+                .map_err(|error| database_error(&error, "read CSV application ID"))?,
+            "CSV application ID",
+        )?;
+        let name: String = row
+            .get(1)
+            .map_err(|error| database_error(&error, "read CSV application name"))?;
+        let category_id = row
+            .get::<_, Option<Vec<u8>>>(2)
+            .map_err(|error| database_error(&error, "read CSV application category"))?
+            .map(|value| fixed_id(value, "CSV application category ID").map(hex_id))
+            .transpose()?;
+        write_csv_record(
+            output,
+            &[
+                "application",
+                "1",
+                &hex_id(id),
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                &hex_id(id),
+                category_id.as_deref().unwrap_or(""),
+                &name,
+            ],
+        )?;
+        count = count.saturating_add(1);
+    }
+    Ok(count)
+}
+
+fn export_activities(
+    transaction: &Transaction<'_>,
+    request: &CsvExportRequest,
+    output: &mut impl Write,
+) -> Result<u64, StorageError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT tracker_run.public_id, activity_interval.start_utc_us, activity_interval.end_utc_us,
+                    activity_interval.state, activity_interval.cause, application.public_id
+               FROM activity_interval
+               JOIN tracker_run ON tracker_run.id = activity_interval.tracker_run_id
+          LEFT JOIN application ON application.id = activity_interval.application_id
+              WHERE activity_interval.end_utc_us > ?1 AND activity_interval.start_utc_us < ?2
+           ORDER BY activity_interval.start_utc_us, activity_interval.id",
+        )
+        .map_err(|error| database_error(&error, "prepare CSV activities"))?;
+    let mut rows = statement
+        .query(rusqlite::params![request.range().start().get(), request.range().end().get()])
+        .map_err(|error| database_error(&error, "query CSV activities"))?;
+    let mut count = 0_u64;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| database_error(&error, "read CSV activity"))?
+    {
+        let tracker = fixed_id(
+            row.get::<_, Vec<u8>>(0)
+                .map_err(|error| database_error(&error, "read CSV activity tracker"))?,
+            "CSV activity tracker ID",
+        )?;
+        let start: i64 = row
+            .get(1)
+            .map_err(|error| database_error(&error, "read CSV activity start"))?;
+        let end: i64 = row
+            .get(2)
+            .map_err(|error| database_error(&error, "read CSV activity end"))?;
+        let state: i64 = row
+            .get(3)
+            .map_err(|error| database_error(&error, "read CSV activity state"))?;
+        let cause: i64 = row
+            .get(4)
+            .map_err(|error| database_error(&error, "read CSV activity cause"))?;
+        let application_id = row
+            .get::<_, Option<Vec<u8>>>(5)
+            .map_err(|error| database_error(&error, "read CSV activity application"))?
+            .map(|value| fixed_id(value, "CSV activity application ID").map(hex_id))
+            .transpose()?;
+        let start_utc = rfc3339(start)?;
+        let end_utc = rfc3339(end)?;
+        let stable_id = format!("{}:{start}:{end}:{state}:{cause}", hex_id(tracker));
+        write_csv_record(
+            output,
+            &[
+                "activity",
+                "1",
+                &stable_id,
+                &start_utc,
+                &end_utc,
+                &start.to_string(),
+                &end.to_string(),
+                &state.to_string(),
+                &cause.to_string(),
+                application_id.as_deref().unwrap_or(""),
+                "",
+                "",
+            ],
+        )?;
+        count = count.saturating_add(1);
+    }
+    Ok(count)
+}
+
+fn rfc3339(micros: i64) -> Result<String, StorageError> {
+    jiff::Timestamp::from_microsecond(micros)
+        .map(|timestamp| timestamp.to_string())
+        .map_err(|_| StorageError::InvalidStoredValue {
+            field: "CSV UTC instant",
+        })
+}
+
+fn hex_id(id: [u8; 16]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut result = String::with_capacity(32);
+    for byte in id {
+        result.push(char::from(HEX[usize::from(byte >> 4)]));
+        result.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    result
+}
+
+fn write_csv_record(output: &mut impl Write, fields: &[&str]) -> Result<(), StorageError> {
+    for (index, field) in fields.iter().enumerate() {
+        if index > 0 {
+            output.write_all(b",").map_err(|_| StorageError::DataOperationFailed {
+                operation: "write CSV export",
+            })?;
+        }
+        let needs_quotes = field.contains([',', '"', '\n', '\r']);
+        if needs_quotes {
+            output.write_all(b"\"").map_err(|_| StorageError::DataOperationFailed {
+                operation: "write CSV export",
+            })?;
+        }
+        for character in field.chars() {
+            if character == '"' {
+                output.write_all(b"\"\"").map_err(|_| StorageError::DataOperationFailed {
+                    operation: "write CSV export",
+                })?;
+            } else {
+                let mut encoded = [0_u8; 4];
+                output
+                    .write_all(character.encode_utf8(&mut encoded).as_bytes())
+                    .map_err(|_| StorageError::DataOperationFailed {
+                        operation: "write CSV export",
+                    })?;
+            }
+        }
+        if needs_quotes {
+            output.write_all(b"\"").map_err(|_| StorageError::DataOperationFailed {
+                operation: "write CSV export",
+            })?;
+        }
+    }
+    output.write_all(b"\n").map_err(|_| StorageError::DataOperationFailed {
+        operation: "write CSV export",
+    })
 }
 
 pub(crate) struct ActivityRepository;
@@ -1317,11 +1598,103 @@ mod tests {
     use openmanic_domain::{
         Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName, UtcMicros,
     };
+    use openmanic_application::{
+        CsvExportRequest, DataOperationDestination, JobId, TitleDisclosure,
+    };
 
-    use super::read_snapshot;
+    use super::{read_snapshot, write_csv_record};
     use crate::{SqliteStore, StoreOpenOptions};
 
     static NEXT_DATABASE_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn csv_writer_quotes_delimiters_newlines_and_quotes_deterministically() {
+        let mut output = Vec::new();
+        write_csv_record(&mut output, &["plain", "comma,value", "quote\"value", "line\nbreak"])
+            .expect("in-memory CSV output must be writable");
+        assert_eq!(
+            String::from_utf8(output).expect("CSV fixture is UTF-8"),
+            "plain,\"comma,value\",\"quote\"\"value\",\"line\nbreak\"\n"
+        );
+    }
+
+    #[test]
+    fn csv_export_streams_deterministic_category_and_application_rows() {
+        let database = TemporaryDatabase::new();
+        let destination = database.path().with_extension("csv");
+        let mut store =
+            SqliteStore::open(database.path(), &StoreOpenOptions::new([34; 16], 0, "test"))
+                .expect("the isolated store should open");
+        let category = category(8, "Personal, projects");
+        store
+            .writer()
+            .upsert_category(&category, UtcMicros::new(0))
+            .expect("the fixture category should commit");
+        let application = Application::try_new(
+            ApplicationId::from_bytes([9; 16]),
+            ApplicationName::try_new("Browser").expect("fixture application name should validate"),
+            Some(category.id()),
+            UtcMicros::new(0),
+            UtcMicros::new(0),
+        )
+        .expect("fixture application should validate");
+        store
+            .writer()
+            .upsert_application(&application)
+            .expect("the fixture application should commit");
+        let request = CsvExportRequest::new(
+            JobId::new(1),
+            openmanic_domain::HalfOpenInterval::try_new(UtcMicros::new(0), UtcMicros::new(1))
+                .expect("positive fixture range"),
+            DataOperationDestination::new(destination.clone()),
+            TitleDisclosure::Exclude,
+        );
+
+        let outcome = store
+            .open_read_session()
+            .expect("the reader should open")
+            .export_csv(&request, UtcMicros::new(2))
+            .expect("the CSV export should complete");
+        let contents = fs::read_to_string(&destination).expect("the CSV should be readable");
+        assert_eq!(outcome.row_count(), 2);
+        assert!(contents.starts_with("record_type,format_version,stable_id,start_utc"));
+        assert!(contents.contains("category,1,08080808080808080808080808080808"));
+        assert!(contents.contains("application,1,09090909090909090909090909090909"));
+        assert!(contents.contains("\"Personal, projects\""));
+        let _ = fs::remove_file(destination);
+    }
+
+    #[test]
+    fn user_backup_and_restore_use_verified_online_sqlite_images() {
+        let database = TemporaryDatabase::new();
+        let backup = database.path().with_extension("backup.sqlite3");
+        let mut store =
+            SqliteStore::open(database.path(), &StoreOpenOptions::new([35; 16], 0, "test"))
+                .expect("the isolated store should open");
+        store
+            .writer()
+            .upsert_category(&category(10, "Before backup"), UtcMicros::new(0))
+            .expect("the backup fixture category should commit");
+        store
+            .create_backup(&backup)
+            .expect("the online backup should verify");
+        store
+            .writer()
+            .upsert_category(&category(11, "After backup"), UtcMicros::new(1))
+            .expect("the post-backup category should commit");
+        store
+            .restore_backup(&backup)
+            .expect("the verified backup should restore");
+
+        let snapshot = store
+            .open_read_session()
+            .expect("the restored reader should open")
+            .snapshot()
+            .expect("the restored store should read");
+        assert_eq!(snapshot.categories().len(), 1);
+        assert_eq!(snapshot.categories()[0].category().name().as_str(), "Before backup");
+        let _ = fs::remove_file(backup);
+    }
 
     struct TemporaryDatabase {
         path: PathBuf,

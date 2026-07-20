@@ -26,6 +26,12 @@ pub enum StorageError {
         /// The named persistence operation that failed.
         operation: &'static str,
     },
+    /// A bounded user-directed file data operation could not complete.
+    #[error("local data operation failed: {operation}")]
+    DataOperationFailed {
+        /// Stable operation label without a user path or row payload.
+        operation: &'static str,
+    },
     /// SQLite could not obtain a required lock within the configured bounded wait.
     #[error("SQLite remained busy during {operation}")]
     Busy {

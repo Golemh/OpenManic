@@ -10,6 +10,7 @@ mod application_metadata;
 mod calendar_projection;
 mod catalog;
 mod commands;
+mod data_operations;
 mod errors;
 mod events;
 mod focus;
@@ -46,6 +47,12 @@ pub use catalog::{
     CatalogService, CatalogSnapshot,
 };
 pub use commands::{CommandEnvelope, CommandReceipt, TrackingCommand, TrackingEvidence};
+pub use data_operations::{
+    CSV_INTERCHANGE_VERSION, CsvExportRequest, DataOperationDestination, DataOperationOutcome,
+    DataOperationProgress, DataOperationProgressError, CsvImportRequest, ImportDestinationScope,
+    ImportBatchId, ImportFailure, ImportFailureError, ImportScopeError, ImportScopeOutcome,
+    TitleDisclosure,
+};
 pub use errors::{ApplicationError, ApplicationPort, PortFailureReason};
 pub use events::{
     AppEvent, EventEnvelope, JobEvent, JobState, MutationConfirmation, MutationOutcome,
