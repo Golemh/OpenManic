@@ -390,6 +390,10 @@ pub(crate) struct ScheduleRepository;
 pub(crate) struct FocusRepository;
 
 impl FocusRepository {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one transaction-scoped reader keeps the focus SQL row layout and validation adjacent"
+    )]
     fn read(transaction: &Transaction<'_>) -> Result<Vec<FocusRecord>, StorageError> {
         let mut statement = transaction
             .prepare(
@@ -515,18 +519,18 @@ fn focus_interval(state: FocusSessionState) -> Result<Option<HalfOpenInterval>, 
         .transpose()
 }
 
-fn focus_state_from_columns(
-    columns: (
-        i64,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-        Option<i64>,
-    ),
-) -> Result<FocusSessionState, StorageError> {
+type FocusStateColumns = (
+    i64,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+fn focus_state_from_columns(columns: FocusStateColumns) -> Result<FocusSessionState, StorageError> {
     match columns {
         (0, None, None, None, None, None, None, None) => Ok(FocusSessionState::Ready),
         (1, Some(start), Some(end), None, None, None, None, None) => {
@@ -792,7 +796,7 @@ pub(crate) fn encode_saved_view_definition(definition: &SavedViewDefinition) -> 
             push_saved_view_part(&mut output, end_local_date);
             match time_zone_behavior {
                 SavedViewTimeZoneBehavior::Automatic => {
-                    push_saved_view_part(&mut output, "automatic")
+                    push_saved_view_part(&mut output, "automatic");
                 }
                 SavedViewTimeZoneBehavior::Manual(zone) => {
                     push_saved_view_part(&mut output, "manual");

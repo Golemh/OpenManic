@@ -18,8 +18,8 @@ mod overview;
 mod ports;
 mod projection;
 mod runtime;
-mod schedule;
 mod saved_view;
+mod schedule;
 mod schedule_projection;
 mod schedule_time;
 mod timeline_projection;
@@ -54,6 +54,11 @@ pub use focus::{
     FocusCommand, FocusKind, FocusMutation, FocusNotificationError, FocusNotificationPort,
     FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot,
 };
+pub use ids::{
+    CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
+    ProjectionSlot, RequestId, SchemaRevision,
+};
+pub use openmanic_domain::{ApplicationId, FocusSessionId, PowerTransitionEvidence, UtcMicros};
 pub use overview::{
     OVERVIEW_SNAPSHOT_SCHEMA_REVISION, OverviewAllocation, OverviewAllocationIdentity,
     OverviewCacheKey, OverviewContext, OverviewFilters, OverviewGrouping, OverviewProjectionError,
@@ -61,11 +66,6 @@ pub use overview::{
     OverviewProjectionStatus, OverviewProjector, OverviewRange, OverviewSnapshot,
     OverviewSourceActivity, SharedOverviewSelection,
 };
-pub use ids::{
-    CommandId, DataRevision, EntityRevision, JobId, OrderingKey, ProjectionContextKey,
-    ProjectionSlot, RequestId, SchemaRevision,
-};
-pub use openmanic_domain::{ApplicationId, FocusSessionId, PowerTransitionEvidence, UtcMicros};
 pub use ports::{
     CommandPort, ProjectionPort, TrackingPersistencePort, TrackingPersistenceRetentionReason,
     TrackingPersistenceSubmit,
@@ -79,15 +79,15 @@ pub use runtime::{
     ShutdownPhase, ShutdownStep, ThreadRoot, WorkLane, WorkerEscalation, WorkerFailure,
     WorkerHealth, WorkerHealthState, bounded_runtime_lanes, latest_mailbox,
 };
-pub use schedule::{
-    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
-    ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
-    ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
-};
 pub use saved_view::{
     SavedViewCommand, SavedViewId, SavedViewLoad, SavedViewMutation, SavedViewPersistence,
     SavedViewPersistenceError, SavedViewRejection, SavedViewService, SavedViewSnapshot,
     SavedViewSnapshotError,
+};
+pub use schedule::{
+    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
+    ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
+    ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
 };
 pub use schedule_projection::{
     ScheduleOccurrence, ScheduleOccurrenceId, project_schedule_occurrences,

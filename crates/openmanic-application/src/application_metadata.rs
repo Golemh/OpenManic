@@ -348,7 +348,10 @@ impl ApplicationIconCache {
     /// The application-to-key association is rebuilt only as background results arrive. A cache
     /// miss deliberately returns the same deterministic fallback marker as an absent decode.
     #[must_use]
-    pub fn lookup_application(&mut self, application_id: ApplicationId) -> ApplicationIconLookup<'_> {
+    pub fn lookup_application(
+        &mut self,
+        application_id: ApplicationId,
+    ) -> ApplicationIconLookup<'_> {
         let Some(key) = self.keys_by_application.get(&application_id).copied() else {
             return ApplicationIconLookup::Fallback;
         };

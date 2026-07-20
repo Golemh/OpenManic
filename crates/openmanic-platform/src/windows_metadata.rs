@@ -8,8 +8,8 @@ use openmanic_application::{
 use windows::{
     Win32::{
         Graphics::Gdi::{
-            BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-            DeleteObject, GetDIBits, GetObjectW, HBITMAP, HGDIOBJ,
+            BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, DeleteObject, GetDIBits,
+            GetObjectW, HBITMAP, HGDIOBJ,
         },
         Storage::FileSystem::FILE_ATTRIBUTE_NORMAL,
         UI::{
@@ -25,7 +25,9 @@ use crate::WindowsApplicationMetadataRequest;
 /// Extracts a decoded executable icon, returning an ordinary fallback when Windows cannot supply
 /// a usable icon. This function is intentionally called only from the metadata worker.
 #[must_use]
-pub fn extract_application_icon(request: &WindowsApplicationMetadataRequest) -> ApplicationIconResult {
+pub fn extract_application_icon(
+    request: &WindowsApplicationMetadataRequest,
+) -> ApplicationIconResult {
     decode_executable_icon(request.executable_path()).map_or(
         ApplicationIconResult::Fallback {
             application_id: request.application_id(),
@@ -194,8 +196,8 @@ mod tests {
     #[test]
     fn digest_is_deterministic_and_covers_dimensions() {
         let one = ApplicationIcon::try_new(1, 1, vec![1, 2, 3, 4]).expect("fixture icon");
-        let two = ApplicationIcon::try_new(2, 1, vec![1, 2, 3, 4, 0, 0, 0, 0])
-            .expect("fixture icon");
+        let two =
+            ApplicationIcon::try_new(2, 1, vec![1, 2, 3, 4, 0, 0, 0, 0]).expect("fixture icon");
         assert_eq!(icon_digest(&one), icon_digest(&one));
         assert_ne!(icon_digest(&one), icon_digest(&two));
     }

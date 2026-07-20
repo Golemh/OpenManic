@@ -20,32 +20,54 @@ pub enum OverviewAction {
     /// Shares a compatible exact interval with Timeline and requests a correlated projection.
     SetSharedSelection(Option<SharedOverviewSelection>),
     /// Restores a complete previously loaded saved view.
-    LoadSavedView { id: SavedViewId },
+    LoadSavedView {
+        /// Stable identity of the loaded saved view.
+        id: SavedViewId,
+    },
     /// Creates a new saved view with composition-supplied identity and observation time.
     CreateSavedView {
+        /// Stable identity assigned by composition.
         id: SavedViewId,
+        /// Validated controls to persist.
         definition: SavedViewDefinition,
+        /// Authoritative observation time supplied by composition.
         observed_at_utc: UtcMicros,
     },
     /// Renames one loaded saved view.
     RenameSavedView {
+        /// Stable identity of the saved view to rename.
         id: SavedViewId,
+        /// Replacement display name.
         name: String,
+        /// Authoritative observation time supplied by composition.
         observed_at_utc: UtcMicros,
     },
     /// Duplicates one loaded saved view.
     DuplicateSavedView {
+        /// Stable identity of the loaded source view.
         source_id: SavedViewId,
+        /// New stable identity assigned by composition.
         duplicate_id: SavedViewId,
+        /// Display name for the duplicate.
         name: String,
+        /// Authoritative observation time supplied by composition.
         observed_at_utc: UtcMicros,
     },
     /// Replaces the complete saved-view order.
-    ReorderSavedViews { ordered_ids: Vec<SavedViewId> },
+    ReorderSavedViews {
+        /// Complete replacement display ordering.
+        ordered_ids: Vec<SavedViewId>,
+    },
     /// Opens the explicit destructive-action confirmation state.
-    RequestDeleteSavedView { id: SavedViewId },
+    RequestDeleteSavedView {
+        /// Stable identity of the requested deletion target.
+        id: SavedViewId,
+    },
     /// Confirms deletion only for the currently requested view.
-    ConfirmDeleteSavedView { id: SavedViewId },
+    ConfirmDeleteSavedView {
+        /// Stable identity of the confirmed deletion target.
+        id: SavedViewId,
+    },
     /// Dismisses an outstanding delete confirmation.
     CancelDeleteSavedView,
 }
@@ -59,7 +81,9 @@ pub enum OverviewEffect {
     RestoreSavedView(SavedViewSnapshot),
     /// Composition dispatches this command through the sole saved-view service.
     SavedViewCommand {
+        /// Durable command routed through the sole saved-view service.
         command: SavedViewCommand,
+        /// Current revision required for mutations of an existing view.
         expected_revision: Option<EntityRevision>,
     },
 }
@@ -138,7 +162,10 @@ pub enum OverviewDataState {
     /// The request completed but no allocation matches the range and filters.
     Empty(EmptyReason),
     /// Usable data, optionally with a non-blocking notice.
-    Ready { notice: Option<String> },
+    Ready {
+        /// Optional non-blocking recovery or restoration notice.
+        notice: Option<String>,
+    },
     /// No usable snapshot is available; retain recovery text from composition.
     Error(UserFacingError),
 }
@@ -222,6 +249,10 @@ impl OverviewController {
 
     /// Reduces an action and returns a typed shell effect only when it is valid locally.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the exhaustive action-to-effect reducer keeps all local transition rules together"
+    )]
     pub fn apply(&mut self, action: OverviewAction) -> Option<OverviewEffect> {
         match action {
             OverviewAction::SetSharedSelection(selection) => {

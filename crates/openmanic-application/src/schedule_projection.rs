@@ -135,25 +135,36 @@ mod tests {
         let recurring = ScheduleSnapshot::try_new(
             ScheduleId::Series(ScheduleSeriesId::from_bytes([2; 16])),
             ScheduleRule::repeating(
-                "Daily planning", None, 0b0111_1111, 9 * 3_600, 10 * 3_600, 0, None, "Etc/UTC",
+                "Daily planning",
+                None,
+                0b0111_1111,
+                9 * 3_600,
+                10 * 3_600,
+                0,
+                None,
+                "Etc/UTC",
             )
             .expect("valid recurring rule"),
             EntityRevision::new(0),
             UtcMicros::new(1),
         )
         .expect("matching recurring identity");
-        let visible = HalfOpenInterval::try_new(
-            UtcMicros::new(100),
-            UtcMicros::new(9 * 3_600_000_000 + 1),
-        )
-        .expect("positive visible range");
+        let visible =
+            HalfOpenInterval::try_new(UtcMicros::new(100), UtcMicros::new(9 * 3_600_000_000 + 1))
+                .expect("positive visible range");
 
         let occurrences = project_schedule_occurrences(visible, &[one_time, recurring])
             .expect("projection should resolve");
         assert_eq!(occurrences.len(), 2);
         assert_eq!(occurrences[0].interval().start().get(), 90);
-        assert!(matches!(occurrences[0].id(), ScheduleOccurrenceId::OneTime(_)));
-        assert!(matches!(occurrences[1].id(), ScheduleOccurrenceId::Recurring { anchor_date: 0, .. }));
+        assert!(matches!(
+            occurrences[0].id(),
+            ScheduleOccurrenceId::OneTime(_)
+        ));
+        assert!(matches!(
+            occurrences[1].id(),
+            ScheduleOccurrenceId::Recurring { anchor_date: 0, .. }
+        ));
         assert_eq!(occurrences[1].interval().start().get(), 9 * 3_600_000_000);
     }
 }

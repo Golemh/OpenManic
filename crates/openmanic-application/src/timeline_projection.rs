@@ -930,8 +930,8 @@ impl std::error::Error for TimelineProjectionError {}
 #[cfg(test)]
 mod tests {
     use openmanic_domain::{
-        ActivityCause, ActivityEvidence, ApplicationId, CategoryId, HalfOpenInterval, TrackerRunId,
-        OneTimeScheduleId, ScheduleRule,
+        ActivityCause, ActivityEvidence, ApplicationId, CategoryId, HalfOpenInterval,
+        OneTimeScheduleId, ScheduleRule, TrackerRunId,
     };
 
     use super::{
@@ -940,8 +940,8 @@ mod tests {
         TimelineProjector, TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity,
     };
     use crate::{
-        DataRevision, ProjectionContextKey, ProjectionRequest, ProjectionSlot, ProjectionSlotState,
-        RequestId, ScheduleId, ScheduleSnapshot, SnapshotRejection, EntityRevision,
+        DataRevision, EntityRevision, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
+        ProjectionSlotState, RequestId, ScheduleId, ScheduleSnapshot, SnapshotRejection,
     };
     use openmanic_domain::{ActivityInterval, ActivityState, UtcMicros};
 
@@ -969,7 +969,10 @@ mod tests {
         .expect("schedule-aware snapshot");
 
         assert_eq!(snapshot.schedule_occurrences().len(), 1);
-        assert_eq!(snapshot.schedule_occurrences()[0].interval().start().get(), 5);
+        assert_eq!(
+            snapshot.schedule_occurrences()[0].interval().start().get(),
+            5
+        );
     }
 
     #[test]

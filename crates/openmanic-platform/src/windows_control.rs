@@ -62,37 +62,57 @@ impl WindowsWindowTitleObservationRequest {
         observed_at_utc_us: i64,
         title: String,
     ) -> Self {
-        Self { application_id, observed_at_utc_us, title }
+        Self {
+            application_id,
+            observed_at_utc_us,
+            title,
+        }
     }
 
     /// Returns the resolved foreground application.
     #[must_use]
-    pub const fn application_id(&self) -> openmanic_application::ApplicationId { self.application_id }
+    pub const fn application_id(&self) -> openmanic_application::ApplicationId {
+        self.application_id
+    }
 
     /// Returns when the platform observed this title.
     #[must_use]
-    pub const fn observed_at_utc_us(&self) -> i64 { self.observed_at_utc_us }
+    pub const fn observed_at_utc_us(&self) -> i64 {
+        self.observed_at_utc_us
+    }
 
     /// Returns the raw title exclusively for private stabilization; callers must not log it.
     #[must_use]
-    pub fn title(&self) -> &str { &self.title }
+    pub fn title(&self) -> &str {
+        &self.title
+    }
 }
 
 #[cfg(windows)]
 impl WindowsApplicationMetadataRequest {
     /// Creates a request using the already-resolved executable path; no raw handle escapes.
     #[must_use]
-    pub fn new(application_id: openmanic_application::ApplicationId, executable_path: String) -> Self {
-        Self { application_id, executable_path }
+    pub fn new(
+        application_id: openmanic_application::ApplicationId,
+        executable_path: String,
+    ) -> Self {
+        Self {
+            application_id,
+            executable_path,
+        }
     }
 
     /// Returns the stable catalog application identifier.
     #[must_use]
-    pub const fn application_id(&self) -> openmanic_application::ApplicationId { self.application_id }
+    pub const fn application_id(&self) -> openmanic_application::ApplicationId {
+        self.application_id
+    }
 
     /// Returns the worker-only executable path.
     #[must_use]
-    pub fn executable_path(&self) -> &str { &self.executable_path }
+    pub fn executable_path(&self) -> &str {
+        &self.executable_path
+    }
 }
 
 /// Summary of one nonblocking control-loop drain.
@@ -168,7 +188,10 @@ impl WindowsControlAdapter {
     /// Adds a bounded, nonblocking route for worker-only metadata requests.
     #[cfg(windows)]
     #[must_use]
-    pub fn with_metadata_requests(mut self, sender: SyncSender<WindowsApplicationMetadataRequest>) -> Self {
+    pub fn with_metadata_requests(
+        mut self,
+        sender: SyncSender<WindowsApplicationMetadataRequest>,
+    ) -> Self {
         self.metadata_requests = Some(sender);
         self
     }
@@ -176,7 +199,10 @@ impl WindowsControlAdapter {
     /// Adds a bounded, nonblocking route for private title observations.
     #[cfg(windows)]
     #[must_use]
-    pub fn with_title_requests(mut self, sender: SyncSender<WindowsWindowTitleObservationRequest>) -> Self {
+    pub fn with_title_requests(
+        mut self,
+        sender: SyncSender<WindowsWindowTitleObservationRequest>,
+    ) -> Self {
         self.title_requests = Some(sender);
         self
     }
@@ -341,10 +367,17 @@ impl WindowsControlAdapter {
                     self.normalizer.acknowledge_reconciliation();
                 }
                 let application_id = stable_application_id(application.identity());
-                if let (Some(sender), Some(path)) = (&self.metadata_requests, application.display_path()) {
-                    let _ = sender.try_send(WindowsApplicationMetadataRequest::new(application_id, path.to_owned()));
+                if let (Some(sender), Some(path)) =
+                    (&self.metadata_requests, application.display_path())
+                {
+                    let _ = sender.try_send(WindowsApplicationMetadataRequest::new(
+                        application_id,
+                        path.to_owned(),
+                    ));
                 }
-                if let (Some(sender), Some(title)) = (&self.title_requests, current_window_title(event.window())) {
+                if let (Some(sender), Some(title)) =
+                    (&self.title_requests, current_window_title(event.window()))
+                {
                     let _ = sender.try_send(WindowsWindowTitleObservationRequest::new(
                         application_id,
                         event.received_at_utc().get(),
@@ -352,12 +385,7 @@ impl WindowsControlAdapter {
                     ));
                 }
                 if publish_foreground {
-                    self.announce_foreground(
-                        event,
-                        application_id,
-                        sink,
-                        drain,
-                    );
+                    self.announce_foreground(event, application_id, sink, drain);
                 }
             }
             ApplicationIdentityResolution::Unresolved { .. } => {
@@ -449,8 +477,9 @@ const WINDOW_TITLE_CAPTURE_MAX_CODE_UNITS: usize = 4_096;
 
 #[cfg(windows)]
 fn current_window_title(window: RawWindowHandle) -> Option<String> {
-    use windows::{
-        Win32::{Foundation::HWND, UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW}},
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetWindowTextLengthW, GetWindowTextW},
     };
 
     let hwnd = HWND(window.value() as *mut core::ffi::c_void);
@@ -459,7 +488,9 @@ fn current_window_title(window: RawWindowHandle) -> Option<String> {
     if length <= 0 {
         return None;
     }
-    let length = usize::try_from(length).ok()?.min(WINDOW_TITLE_CAPTURE_MAX_CODE_UNITS);
+    let length = usize::try_from(length)
+        .ok()?
+        .min(WINDOW_TITLE_CAPTURE_MAX_CODE_UNITS);
     let capacity = length.checked_add(1)?;
     let mut buffer = vec![0_u16; capacity];
     // SAFETY: `buffer` is valid writable UTF-16 storage with a trailing NUL slot and

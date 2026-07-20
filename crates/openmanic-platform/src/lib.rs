@@ -13,10 +13,10 @@ mod adapter;
 mod capabilities;
 mod fake;
 mod windows_control;
-#[cfg(windows)]
-mod windows_metadata;
 mod windows_identity;
 mod windows_lifecycle;
+#[cfg(windows)]
+mod windows_metadata;
 mod windows_raw;
 mod windows_single_instance;
 mod windows_tray;

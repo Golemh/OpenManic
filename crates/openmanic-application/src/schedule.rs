@@ -312,14 +312,20 @@ where
                         MutationRejectionReason::RevisionConflict,
                     );
                 };
-                match self.persistence.replace_schedule(snapshot, expected_revision) {
-                    Ok(revision) => ScheduleMutation::confirmed(command, revision, snapshot.clone()),
+                match self
+                    .persistence
+                    .replace_schedule(snapshot, expected_revision)
+                {
+                    Ok(revision) => {
+                        ScheduleMutation::confirmed(command, revision, snapshot.clone())
+                    }
                     Err(SchedulePersistenceError::Conflict) => {
                         ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
                     }
-                    Err(SchedulePersistenceError::RevisionConflict) => {
-                        ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
-                    }
+                    Err(SchedulePersistenceError::RevisionConflict) => ScheduleMutation::rejected(
+                        command,
+                        MutationRejectionReason::RevisionConflict,
+                    ),
                     Err(SchedulePersistenceError::Failed) => ScheduleMutation::rejected(
                         command,
                         MutationRejectionReason::PersistenceFailure,
@@ -333,11 +339,15 @@ where
                         MutationRejectionReason::RevisionConflict,
                     );
                 };
-                match self.persistence.delete_schedule(*schedule_id, expected_revision) {
+                match self
+                    .persistence
+                    .delete_schedule(*schedule_id, expected_revision)
+                {
                     Ok(revision) => ScheduleMutation::confirmed_without_snapshot(command, revision),
-                    Err(SchedulePersistenceError::RevisionConflict) => {
-                        ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
-                    }
+                    Err(SchedulePersistenceError::RevisionConflict) => ScheduleMutation::rejected(
+                        command,
+                        MutationRejectionReason::RevisionConflict,
+                    ),
                     Err(SchedulePersistenceError::Conflict) => {
                         ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
                     }
@@ -376,7 +386,9 @@ where
         let snapshot = match self.persistence.load_schedule(schedule_id) {
             Ok(Some(snapshot)) if snapshot.entity_revision() == expected_revision => snapshot,
             Ok(Some(_) | None)
-            | Err(SchedulePersistenceError::Conflict | SchedulePersistenceError::RevisionConflict) => {
+            | Err(
+                SchedulePersistenceError::Conflict | SchedulePersistenceError::RevisionConflict,
+            ) => {
                 return ScheduleMutation::rejected(
                     command,
                     MutationRejectionReason::RevisionConflict,
@@ -401,8 +413,8 @@ where
                     override_.end_earlier_fold,
                 )
             }
-            (ScheduleEditScope::ThisAndFuture, RecurringScheduleEdit::Rule(change)) => {
-                rule.change_this_and_future(
+            (ScheduleEditScope::ThisAndFuture, RecurringScheduleEdit::Rule(change)) => rule
+                .change_this_and_future(
                     anchor_date,
                     change.label.clone(),
                     change.category_id,
@@ -410,18 +422,16 @@ where
                     change.start_second_of_day,
                     change.end_second_of_day,
                     change.time_zone_id.clone(),
-                )
-            }
-            (ScheduleEditScope::EveryOccurrence, RecurringScheduleEdit::Rule(change)) => {
-                rule.replace_every_occurrence(
+                ),
+            (ScheduleEditScope::EveryOccurrence, RecurringScheduleEdit::Rule(change)) => rule
+                .replace_every_occurrence(
                     change.label.clone(),
                     change.category_id,
                     change.weekday_mask,
                     change.start_second_of_day,
                     change.end_second_of_day,
                     change.time_zone_id.clone(),
-                )
-            }
+                ),
             _ => return ScheduleMutation::rejected(command, MutationRejectionReason::Validation),
         };
         if edited.is_err() {
@@ -464,7 +474,9 @@ where
         }
         let mut rule = snapshot.rule().clone();
         let delete_series = match scope {
-            ScheduleEditScope::OnlyThisDate => rule.skip_only_this_date(anchor_date).map(|()| false),
+            ScheduleEditScope::OnlyThisDate => {
+                rule.skip_only_this_date(anchor_date).map(|()| false)
+            }
             ScheduleEditScope::ThisAndFuture => rule.delete_this_and_future(anchor_date),
             ScheduleEditScope::EveryOccurrence => unreachable!("handled before rule mutation"),
         };
@@ -493,7 +505,10 @@ where
         ) else {
             return ScheduleMutation::rejected(command, MutationRejectionReason::Validation);
         };
-        match self.persistence.replace_schedule(&replacement, expected_revision) {
+        match self
+            .persistence
+            .replace_schedule(&replacement, expected_revision)
+        {
             Ok(revision) => ScheduleMutation::confirmed(command, revision, replacement),
             Err(SchedulePersistenceError::Conflict) => {
                 ScheduleMutation::rejected(command, MutationRejectionReason::Conflict)
@@ -513,7 +528,10 @@ where
         schedule_id: ScheduleId,
         expected_revision: EntityRevision,
     ) -> ScheduleMutation {
-        match self.persistence.delete_schedule(schedule_id, expected_revision) {
+        match self
+            .persistence
+            .delete_schedule(schedule_id, expected_revision)
+        {
             Ok(revision) => ScheduleMutation::confirmed_without_snapshot(command, revision),
             Err(SchedulePersistenceError::RevisionConflict) => {
                 ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict)
@@ -605,7 +623,10 @@ mod tests {
         .expect("matching recurring fixture")
     }
 
-    fn delete_occurrence(scope: ScheduleEditScope, anchor_date: i32) -> CommandEnvelope<ScheduleCommand> {
+    fn delete_occurrence(
+        scope: ScheduleEditScope,
+        anchor_date: i32,
+    ) -> CommandEnvelope<ScheduleCommand> {
         CommandEnvelope::new(
             SchemaRevision::new(1),
             CommandId::new(1),
@@ -704,7 +725,9 @@ mod tests {
 
         let outcome = service.handle(&delete_occurrence(ScheduleEditScope::OnlyThisDate, 105));
         assert!(matches!(outcome.outcome(), MutationOutcome::Confirmed(_)));
-        let replacement = outcome.snapshot().expect("only-this deletion replaces the series");
+        let replacement = outcome
+            .snapshot()
+            .expect("only-this deletion replaces the series");
         assert!(replacement.rule().is_skipped_on(105));
 
         let outcome = service.handle(&delete_occurrence(ScheduleEditScope::EveryOccurrence, 105));
@@ -727,7 +750,11 @@ mod tests {
             replacement: None,
             deleted: false,
         });
-        let outcome = service.handle(&edit_occurrence(ScheduleEditScope::OnlyThisDate, 105, only_this));
+        let outcome = service.handle(&edit_occurrence(
+            ScheduleEditScope::OnlyThisDate,
+            105,
+            only_this,
+        ));
         assert!(matches!(outcome.outcome(), MutationOutcome::Confirmed(_)));
         assert_eq!(
             outcome

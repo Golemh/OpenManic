@@ -481,10 +481,7 @@ mod tests {
         ));
         assert!(matches!(
             CatalogCommand::try_set_applications_excluded([application], true),
-            Ok(CatalogCommand::SetApplicationsExcluded {
-                excluded: true,
-                ..
-            })
+            Ok(CatalogCommand::SetApplicationsExcluded { excluded: true, .. })
         ));
     }
 

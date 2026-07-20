@@ -408,9 +408,27 @@ fn paint_schedule_overlays(
         let top = band_rects.category.min.y + 2.0;
         let bottom = band_rects.application.max.y - 2.0;
         let stroke = Stroke::new(if adjusted { 2.0 } else { 1.0 }, SCHEDULE_BRACKET);
-        painter.line_segment([Pos2::new(pixels.start_x(), top), Pos2::new(pixels.end_x(), top)], stroke);
-        painter.line_segment([Pos2::new(pixels.start_x(), top), Pos2::new(pixels.start_x(), bottom)], stroke);
-        painter.line_segment([Pos2::new(pixels.end_x(), top), Pos2::new(pixels.end_x(), bottom)], stroke);
+        painter.line_segment(
+            [
+                Pos2::new(pixels.start_x(), top),
+                Pos2::new(pixels.end_x(), top),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(pixels.start_x(), top),
+                Pos2::new(pixels.start_x(), bottom),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(pixels.end_x(), top),
+                Pos2::new(pixels.end_x(), bottom),
+            ],
+            stroke,
+        );
     }
 }
 

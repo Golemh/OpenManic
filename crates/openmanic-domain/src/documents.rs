@@ -229,7 +229,11 @@ impl SavedViewRange {
     fn from_internal(range: &Range) -> Self {
         match range {
             Range::Relative(relative) => Self::Relative((*relative).into()),
-            Range::Fixed { start_local_date, end_local_date, time_zone_behavior } => Self::Fixed {
+            Range::Fixed {
+                start_local_date,
+                end_local_date,
+                time_zone_behavior,
+            } => Self::Fixed {
                 start_local_date: start_local_date.clone(),
                 end_local_date: end_local_date.clone(),
                 time_zone_behavior: time_zone_behavior.clone().into(),
@@ -240,7 +244,11 @@ impl SavedViewRange {
     fn into_internal(self) -> Range {
         match self {
             Self::Relative(relative) => Range::Relative(relative.into()),
-            Self::Fixed { start_local_date, end_local_date, time_zone_behavior } => Range::Fixed {
+            Self::Fixed {
+                start_local_date,
+                end_local_date,
+                time_zone_behavior,
+            } => Range::Fixed {
                 start_local_date,
                 end_local_date,
                 time_zone_behavior: time_zone_behavior.into(),
@@ -251,30 +259,68 @@ impl SavedViewRange {
 
 /// Named relative Overview range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SavedViewRelativeRange { Day, Week, Month, Year, Custom }
+pub enum SavedViewRelativeRange {
+    /// The local calendar day containing the reference instant.
+    Day,
+    /// The local calendar week containing the reference instant.
+    Week,
+    /// The local calendar month containing the reference instant.
+    Month,
+    /// The local calendar year containing the reference instant.
+    Year,
+    /// A product-defined relative range.
+    Custom,
+}
 
 impl From<RelativeRange> for SavedViewRelativeRange {
     fn from(value: RelativeRange) -> Self {
-        match value { RelativeRange::Day => Self::Day, RelativeRange::Week => Self::Week, RelativeRange::Month => Self::Month, RelativeRange::Year => Self::Year, RelativeRange::Custom => Self::Custom }
+        match value {
+            RelativeRange::Day => Self::Day,
+            RelativeRange::Week => Self::Week,
+            RelativeRange::Month => Self::Month,
+            RelativeRange::Year => Self::Year,
+            RelativeRange::Custom => Self::Custom,
+        }
     }
 }
 
 impl From<SavedViewRelativeRange> for RelativeRange {
     fn from(value: SavedViewRelativeRange) -> Self {
-        match value { SavedViewRelativeRange::Day => Self::Day, SavedViewRelativeRange::Week => Self::Week, SavedViewRelativeRange::Month => Self::Month, SavedViewRelativeRange::Year => Self::Year, SavedViewRelativeRange::Custom => Self::Custom }
+        match value {
+            SavedViewRelativeRange::Day => Self::Day,
+            SavedViewRelativeRange::Week => Self::Week,
+            SavedViewRelativeRange::Month => Self::Month,
+            SavedViewRelativeRange::Year => Self::Year,
+            SavedViewRelativeRange::Custom => Self::Custom,
+        }
     }
 }
 
 /// Time-zone behavior retained with a fixed saved range.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SavedViewTimeZoneBehavior { Automatic, Manual(String) }
+pub enum SavedViewTimeZoneBehavior {
+    /// Resolve the range in the user's current automatic time zone.
+    Automatic,
+    /// Resolve the range in the explicitly persisted IANA time-zone identifier.
+    Manual(String),
+}
 
 impl From<TimeZoneMode> for SavedViewTimeZoneBehavior {
-    fn from(value: TimeZoneMode) -> Self { match value { TimeZoneMode::Automatic => Self::Automatic, TimeZoneMode::Manual(value) => Self::Manual(value) } }
+    fn from(value: TimeZoneMode) -> Self {
+        match value {
+            TimeZoneMode::Automatic => Self::Automatic,
+            TimeZoneMode::Manual(value) => Self::Manual(value),
+        }
+    }
 }
 
 impl From<SavedViewTimeZoneBehavior> for TimeZoneMode {
-    fn from(value: SavedViewTimeZoneBehavior) -> Self { match value { SavedViewTimeZoneBehavior::Automatic => Self::Automatic, SavedViewTimeZoneBehavior::Manual(value) => Self::Manual(value) } }
+    fn from(value: SavedViewTimeZoneBehavior) -> Self {
+        match value {
+            SavedViewTimeZoneBehavior::Automatic => Self::Automatic,
+            SavedViewTimeZoneBehavior::Manual(value) => Self::Manual(value),
+        }
+    }
 }
 
 /// Versioned scalar fields belonging to a saved-view filter or widget configuration.
@@ -287,8 +333,26 @@ pub struct SavedViewFields {
 }
 
 impl SavedViewFields {
-    fn from_internal(fields: &VersionedFields) -> Self { Self { schema_version: fields.schema_version, fields: fields.fields.iter().map(SavedViewField::from_internal).collect() } }
-    fn into_internal(self) -> VersionedFields { VersionedFields { schema_version: self.schema_version, fields: self.fields.into_iter().map(SavedViewField::into_internal).collect() } }
+    fn from_internal(fields: &VersionedFields) -> Self {
+        Self {
+            schema_version: fields.schema_version,
+            fields: fields
+                .fields
+                .iter()
+                .map(SavedViewField::from_internal)
+                .collect(),
+        }
+    }
+    fn into_internal(self) -> VersionedFields {
+        VersionedFields {
+            schema_version: self.schema_version,
+            fields: self
+                .fields
+                .into_iter()
+                .map(SavedViewField::into_internal)
+                .collect(),
+        }
+    }
 }
 
 /// One named saved-view scalar field.
@@ -301,8 +365,18 @@ pub struct SavedViewField {
 }
 
 impl SavedViewField {
-    fn from_internal(field: &DocumentField) -> Self { Self { name: field.name.clone(), value: SavedViewScalar::from_internal(&field.value) } }
-    fn into_internal(self) -> DocumentField { DocumentField { name: self.name, value: self.value.into_internal() } }
+    fn from_internal(field: &DocumentField) -> Self {
+        Self {
+            name: field.name.clone(),
+            value: SavedViewScalar::from_internal(&field.value),
+        }
+    }
+    fn into_internal(self) -> DocumentField {
+        DocumentField {
+            name: self.name,
+            value: self.value.into_internal(),
+        }
+    }
 }
 
 /// A supported scalar value in a saved-view document.
@@ -317,8 +391,20 @@ pub enum SavedViewScalar {
 }
 
 impl SavedViewScalar {
-    fn from_internal(value: &Scalar) -> Self { match value { Scalar::Boolean(value) => Self::Boolean(*value), Scalar::Integer(value) => Self::Integer(*value), Scalar::Text(value) => Self::Text(value.clone()) } }
-    fn into_internal(self) -> Scalar { match self { Self::Boolean(value) => Scalar::Boolean(value), Self::Integer(value) => Scalar::Integer(value), Self::Text(value) => Scalar::Text(value) } }
+    fn from_internal(value: &Scalar) -> Self {
+        match value {
+            Scalar::Boolean(value) => Self::Boolean(*value),
+            Scalar::Integer(value) => Self::Integer(*value),
+            Scalar::Text(value) => Self::Text(value.clone()),
+        }
+    }
+    fn into_internal(self) -> Scalar {
+        match self {
+            Self::Boolean(value) => Scalar::Boolean(value),
+            Self::Integer(value) => Scalar::Integer(value),
+            Self::Text(value) => Scalar::Text(value),
+        }
+    }
 }
 
 /// A validated singleton settings value without excluded-application duplication.
@@ -467,14 +553,70 @@ struct InvalidDocument {
 #[derive(Clone, Debug, Eq, PartialEq)]
 /// A malformed or unsupported versioned document value.
 pub enum DocumentError {
-    UnsupportedSchema { schema_version: u16 },
-    EmptyCollection { field: &'static str },
-    DuplicateValue { field: &'static str, value: String },
-    InvalidIdentifier { field: &'static str, value: String },
-    InvalidValue { field: &'static str, value: String },
-    InvalidWidth { width_span: u8 },
-    InvertedDateRange { start: String, end: String },
-    InvalidTimeZoneId { value: String },
+    /// The document declares a schema version this build does not understand.
+    ///
+    /// `schema_version` is the unsupported value from the document.
+    UnsupportedSchema {
+        /// The unsupported value read from the document.
+        schema_version: u16,
+    },
+    /// A collection required by the document is empty.
+    ///
+    /// `field` identifies the empty collection.
+    EmptyCollection {
+        /// The collection's document field name.
+        field: &'static str,
+    },
+    /// A collection contains the same value more than once.
+    ///
+    /// `field` identifies the collection and `value` is the duplicate value.
+    DuplicateValue {
+        /// The collection's document field name.
+        field: &'static str,
+        /// The repeated value.
+        value: String,
+    },
+    /// A string used as an identifier is invalid.
+    ///
+    /// `field` identifies the field and `value` is the invalid identifier.
+    InvalidIdentifier {
+        /// The document field name.
+        field: &'static str,
+        /// The rejected identifier.
+        value: String,
+    },
+    /// A document value violates its field's validation rules.
+    ///
+    /// `field` identifies the field and `value` is the rejected value.
+    InvalidValue {
+        /// The document field name.
+        field: &'static str,
+        /// The rejected value.
+        value: String,
+    },
+    /// A saved-view lane width lies outside the supported range.
+    ///
+    /// `width_span` is the rejected lane width.
+    InvalidWidth {
+        /// The rejected lane width.
+        width_span: u8,
+    },
+    /// A fixed date range ends before it starts.
+    ///
+    /// `start` and `end` are the supplied date strings.
+    InvertedDateRange {
+        /// The supplied start date.
+        start: String,
+        /// The supplied end date.
+        end: String,
+    },
+    /// A persisted IANA time-zone identifier is invalid.
+    ///
+    /// `value` is the rejected identifier.
+    InvalidTimeZoneId {
+        /// The rejected IANA time-zone identifier.
+        value: String,
+    },
 }
 
 impl fmt::Display for DocumentError {

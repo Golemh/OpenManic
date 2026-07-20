@@ -1001,21 +1001,18 @@ struct RuntimeResources {
     activation_handle: Option<JoinHandle<()>>,
 }
 
+type RuntimeStartResult = (
+    RuntimeResources,
+    LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
+    LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
+);
+
 impl RuntimeResources {
     #[expect(
         clippy::too_many_lines,
         reason = "construction names every owned runtime boundary so startup and shutdown ownership stay auditable."
     )]
-    fn start(
-        store: SqliteStore,
-    ) -> Result<
-        (
-            Self,
-            LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
-            LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
-        ),
-        CompositionError,
-    > {
+    fn start(store: SqliteStore) -> Result<RuntimeStartResult, CompositionError> {
         let capacities = LaneCapacities::try_new(
             WRITER_CRITICAL_CAPACITY,
             WRITER_NORMAL_CAPACITY,
@@ -1546,6 +1543,10 @@ fn run_metadata_worker(
 #[expect(
     clippy::too_many_arguments,
     reason = "the worker receives each independently owned runtime boundary explicitly."
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the worker loop keeps each receiver's ordering and snapshot publication behavior auditable"
 )]
 fn run_writer_worker(
     store: SqliteStore,
@@ -2702,6 +2703,10 @@ impl VerticalSliceApp {
         let _ = self.runtime.calendar_projection_requests.publish(request);
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the calendar's immediate-mode block rendering keeps selection and schedule controls adjacent"
+    )]
     fn render_calendar_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Calendar {
             return;
@@ -2743,7 +2748,7 @@ impl VerticalSliceApp {
                     ui.label(notice);
                 }
             }
-        };
+        }
         for presented in model.blocks() {
             ui.horizontal(|ui| {
                 let block = presented.block();
@@ -2784,7 +2789,7 @@ impl VerticalSliceApp {
         if let Some(effect) = self.calendar.apply(action, snapshot.map(AsRef::as_ref)) {
             match effect {
                 CalendarEffect::RequestDay { day_offset } => {
-                    self.publish_calendar_projection(day_offset)
+                    self.publish_calendar_projection(day_offset);
                 }
                 CalendarEffect::NavigateToTimeline(_) => self
                     .app
@@ -2799,18 +2804,11 @@ impl VerticalSliceApp {
         ui: &mut eframe::egui::Ui,
         block_id: CalendarBlockId,
     ) {
-        let CalendarBlockId::Schedule(occurrence_id) = block_id else {
+        let Some((schedule_id, anchor_date)) = calendar_schedule_target(block_id) else {
             return;
         };
         let Some(today) = self.app.controller().model().data().visible_value() else {
             return;
-        };
-        let (schedule_id, anchor_date) = match occurrence_id {
-            ScheduleOccurrenceId::OneTime(id) => (id, None),
-            ScheduleOccurrenceId::Recurring {
-                schedule_id,
-                anchor_date,
-            } => (schedule_id, Some(anchor_date)),
         };
         let Some(schedule) = today
             .schedules()
@@ -3775,6 +3773,19 @@ impl VerticalSliceApp {
     }
 }
 
+fn calendar_schedule_target(block_id: CalendarBlockId) -> Option<(ScheduleId, Option<i32>)> {
+    let CalendarBlockId::Schedule(occurrence_id) = block_id else {
+        return None;
+    };
+    Some(match occurrence_id {
+        ScheduleOccurrenceId::OneTime(id) => (id, None),
+        ScheduleOccurrenceId::Recurring {
+            schedule_id,
+            anchor_date,
+        } => (schedule_id, Some(anchor_date)),
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScheduleDraftAction {
     None,
@@ -4078,8 +4089,9 @@ mod tests {
     use std::sync::Arc;
 
     use openmanic_application::{
-        CatalogCommand, EntityRevision, LaneCapacities, LaneReceive, ScheduleCommand, ScheduleId,
-        ScheduleSnapshot, TrackingCommand, TrackingEvidence, WorkLane, bounded_runtime_lanes,
+        CalendarBlockId, CatalogCommand, EntityRevision, LaneCapacities, LaneReceive,
+        ScheduleCommand, ScheduleId, ScheduleOccurrenceId, ScheduleSnapshot, TrackingCommand,
+        TrackingEvidence, WorkLane, bounded_runtime_lanes,
     };
     use openmanic_domain::{
         ApplicationId, FocusSessionState, HalfOpenInterval, ScheduleEditScope, ScheduleRule,
@@ -4089,8 +4101,8 @@ mod tests {
 
     use super::{
         CommandIdentifiers, PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError,
-        UiInbox, UiIngress, day_range, focus_remaining_label, focus_remaining_us,
-        recurring_schedule_rule, store_identity,
+        UiInbox, UiIngress, calendar_schedule_target, day_range, focus_remaining_label,
+        focus_remaining_us, recurring_schedule_rule, store_identity,
     };
 
     #[test]
@@ -4281,6 +4293,35 @@ mod tests {
                 series_id: actual_series_id,
                 anchor_date: 20,
                 scope: ScheduleEditScope::ThisAndFuture,
+            } if *actual_series_id == series_id
+        ));
+    }
+
+    #[test]
+    fn calendar_occurrence_target_uses_the_timeline_delete_contract() {
+        let identifiers = CommandIdentifiers::default();
+        let series_id = ScheduleSeriesId::from_bytes([12; 16]);
+        let block_id = CalendarBlockId::Schedule(ScheduleOccurrenceId::Recurring {
+            schedule_id: ScheduleId::Series(series_id),
+            anchor_date: 25,
+        });
+        let (schedule_id, anchor_date) = calendar_schedule_target(block_id)
+            .expect("schedule blocks expose an occurrence target");
+
+        assert_eq!(schedule_id, ScheduleId::Series(series_id));
+        assert_eq!(anchor_date, Some(25));
+        let command = identifiers.schedule_delete_occurrence(
+            series_id,
+            anchor_date.expect("recurring occurrences retain an anchor date"),
+            ScheduleEditScope::OnlyThisDate,
+            EntityRevision::new(2),
+        );
+        assert!(matches!(
+            command.payload(),
+            ScheduleCommand::DeleteOccurrence {
+                series_id: actual_series_id,
+                anchor_date: 25,
+                scope: ScheduleEditScope::OnlyThisDate,
             } if *actual_series_id == series_id
         ));
     }

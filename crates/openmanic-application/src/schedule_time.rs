@@ -4,7 +4,9 @@ use core::fmt;
 use std::collections::BTreeSet;
 
 use jiff::{Span, civil::Date, tz};
-use openmanic_domain::{CategoryId, HalfOpenInterval, ScheduleOccurrenceException, ScheduleRule, UtcMicros};
+use openmanic_domain::{
+    CategoryId, HalfOpenInterval, ScheduleOccurrenceException, ScheduleRule, UtcMicros,
+};
 
 /// The stable civil-date encoding used by schedule segments and occurrence anchors.
 ///
@@ -192,7 +194,9 @@ pub fn schedule_rule_conflicts_with_intervals(
     existing: &[HalfOpenInterval],
 ) -> Result<bool, ScheduleTimeError> {
     if let Some(candidate) = rule.one_time_interval() {
-        return Ok(existing.iter().any(|interval| candidate.overlaps(*interval)));
+        return Ok(existing
+            .iter()
+            .any(|interval| candidate.overlaps(*interval)));
     }
     let segments = rule.segments();
     for interval in existing {
@@ -425,8 +429,8 @@ fn civil_datetime(
         .map_err(|_| ScheduleTimeError::SecondOfDayOutOfRange)?;
     let minute = i8::try_from((second_of_day % 3_600) / 60)
         .map_err(|_| ScheduleTimeError::SecondOfDayOutOfRange)?;
-    let second = i8::try_from(second_of_day % 60)
-        .map_err(|_| ScheduleTimeError::SecondOfDayOutOfRange)?;
+    let second =
+        i8::try_from(second_of_day % 60).map_err(|_| ScheduleTimeError::SecondOfDayOutOfRange)?;
     Ok(date.at(hour, minute, second, 0))
 }
 
@@ -464,7 +468,9 @@ impl fmt::Display for ScheduleTimeError {
             Self::UnresolvableCivilTime => "schedule civil time cannot be resolved",
             Self::UtcInstantOutOfRange => "schedule UTC instant is outside the supported range",
             Self::NonPositiveOccurrence => "schedule occurrence is not positive",
-            Self::ContradictoryBoundaryResolution => "schedule boundary resolution is contradictory",
+            Self::ContradictoryBoundaryResolution => {
+                "schedule boundary resolution is contradictory"
+            }
         })
     }
 }
@@ -572,8 +578,14 @@ mod tests {
         )
         .expect("positive interval");
 
-        assert_eq!(schedule_rule_conflicts_with_intervals(&rule, &[conflicting]), Ok(true));
-        assert_eq!(schedule_rule_conflicts_with_intervals(&rule, &[adjacent]), Ok(false));
+        assert_eq!(
+            schedule_rule_conflicts_with_intervals(&rule, &[conflicting]),
+            Ok(true)
+        );
+        assert_eq!(
+            schedule_rule_conflicts_with_intervals(&rule, &[adjacent]),
+            Ok(false)
+        );
     }
 
     #[test]
@@ -626,8 +638,14 @@ mod tests {
             .skip_only_this_date(0)
             .expect("valid skip");
 
-        assert_eq!(repeating_schedule_rules_conflict(&daily, &overlapping), Ok(true));
-        assert_eq!(repeating_schedule_rules_conflict(&daily, &adjacent), Ok(false));
+        assert_eq!(
+            repeating_schedule_rules_conflict(&daily, &overlapping),
+            Ok(true)
+        );
+        assert_eq!(
+            repeating_schedule_rules_conflict(&daily, &adjacent),
+            Ok(false)
+        );
         assert_eq!(
             repeating_schedule_rules_conflict(&daily, &skipped_single_day),
             Ok(false)
@@ -637,7 +655,14 @@ mod tests {
     #[test]
     fn bounded_expansion_keeps_only_occurrences_intersecting_the_visible_range() {
         let rule = ScheduleRule::repeating(
-            "Daily planning", None, 0b0111_1111, 9 * 3_600, 10 * 3_600, 0, None, "Etc/UTC",
+            "Daily planning",
+            None,
+            0b0111_1111,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Etc/UTC",
         )
         .expect("valid recurring rule");
         let visible = HalfOpenInterval::try_new(

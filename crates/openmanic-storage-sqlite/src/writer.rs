@@ -2460,6 +2460,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the one-time persistence contract is intentionally verified end-to-end in one fixture"
+    )]
     fn schedule_persistence_writes_one_time_schedule_and_category_reference() {
         let database = TemporaryDatabase::new("schedule-one-time");
         let mut store = open_store(database.path(), 21);

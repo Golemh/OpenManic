@@ -1215,8 +1215,10 @@ mod tests {
     fn deleting_this_and_future_truncates_lineage_and_later_exceptions() {
         let mut rule = repeating_rule();
         rule.skip_only_this_date(105).expect("covered past anchor");
-        rule.skip_only_this_date(125).expect("covered future anchor");
-        rule.skip_only_this_date(135).expect("covered deleted anchor");
+        rule.skip_only_this_date(125)
+            .expect("covered future anchor");
+        rule.skip_only_this_date(135)
+            .expect("covered deleted anchor");
         rule.change_this_and_future(
             120,
             "London hours",

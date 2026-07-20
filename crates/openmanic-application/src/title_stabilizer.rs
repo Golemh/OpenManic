@@ -115,7 +115,9 @@ impl TitleStabilizer {
             return TitleObservationResult::Ignored;
         };
         if candidate.accepted
-            || observed_at_utc.get().saturating_sub(candidate.stable_since_utc.get())
+            || observed_at_utc
+                .get()
+                .saturating_sub(candidate.stable_since_utc.get())
                 < TITLE_STABILITY_US
         {
             return TitleObservationResult::Ignored;
@@ -135,7 +137,11 @@ fn normalize_title(raw_title: &str) -> Option<String> {
     let mut normalized = String::new();
     let mut previous_was_space = true;
     for character in raw_title.chars() {
-        let replacement = if character.is_control() { ' ' } else { character };
+        let replacement = if character.is_control() {
+            ' '
+        } else {
+            character
+        };
         if replacement.is_whitespace() {
             if !previous_was_space {
                 normalized.push(' ');
@@ -161,23 +167,33 @@ fn normalize_title(raw_title: &str) -> Option<String> {
 }
 
 fn title_hash(text: &str) -> u64 {
-    text.as_bytes().iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-        hash.wrapping_mul(0x0000_0100_0000_01b3) ^ u64::from(*byte)
-    })
+    text.as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            hash.wrapping_mul(0x0000_0100_0000_01b3) ^ u64::from(*byte)
+        })
 }
 
 #[cfg(test)]
 mod tests {
     use openmanic_domain::{ApplicationId, UtcMicros};
 
-    use super::{MAX_WINDOW_TITLE_BYTES, TITLE_STABILITY_US, TitleObservationResult, TitleStabilizer};
+    use super::{
+        MAX_WINDOW_TITLE_BYTES, TITLE_STABILITY_US, TitleObservationResult, TitleStabilizer,
+    };
 
     #[test]
     fn accepts_one_normalized_stable_title_without_activity_side_effects() {
         let mut stabilizer = TitleStabilizer::default();
         let application = ApplicationId::from_bytes([1; 16]);
         assert!(matches!(
-            stabilizer.observe(application, UtcMicros::new(10), "  Plan\tfor today  ", true, false),
+            stabilizer.observe(
+                application,
+                UtcMicros::new(10),
+                "  Plan\tfor today  ",
+                true,
+                false
+            ),
             TitleObservationResult::Ignored
         ));
         let accepted = stabilizer.observe(
@@ -187,9 +203,17 @@ mod tests {
             true,
             false,
         );
-        assert!(matches!(accepted, TitleObservationResult::Accepted(title) if title.text() == "Plan for today"));
+        assert!(
+            matches!(accepted, TitleObservationResult::Accepted(title) if title.text() == "Plan for today")
+        );
         assert!(matches!(
-            stabilizer.observe(application, UtcMicros::new(20 + TITLE_STABILITY_US), "Plan for today", true, false),
+            stabilizer.observe(
+                application,
+                UtcMicros::new(20 + TITLE_STABILITY_US),
+                "Plan for today",
+                true,
+                false
+            ),
             TitleObservationResult::Ignored
         ));
     }
@@ -214,7 +238,13 @@ mod tests {
         }
         let mut stabilizer = TitleStabilizer::default();
         assert!(matches!(
-            stabilizer.observe(application, UtcMicros::new(3_000_000), "Private", true, true),
+            stabilizer.observe(
+                application,
+                UtcMicros::new(3_000_000),
+                "Private",
+                true,
+                true
+            ),
             TitleObservationResult::Ignored
         ));
     }
@@ -225,7 +255,15 @@ mod tests {
         let application = ApplicationId::from_bytes([3; 16]);
         let raw = "é".repeat(MAX_WINDOW_TITLE_BYTES);
         let _ = stabilizer.observe(application, UtcMicros::new(0), &raw, true, false);
-        let result = stabilizer.observe(application, UtcMicros::new(TITLE_STABILITY_US), &raw, true, false);
-        assert!(matches!(result, TitleObservationResult::Accepted(title) if title.text().len() <= MAX_WINDOW_TITLE_BYTES));
+        let result = stabilizer.observe(
+            application,
+            UtcMicros::new(TITLE_STABILITY_US),
+            &raw,
+            true,
+            false,
+        );
+        assert!(
+            matches!(result, TitleObservationResult::Accepted(title) if title.text().len() <= MAX_WINDOW_TITLE_BYTES)
+        );
     }
 }

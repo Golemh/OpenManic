@@ -1281,7 +1281,10 @@ mod tests {
         assert_confirmed(&reconciliation, 2);
         assert_eq!(service.last_platform_sequence(), Some(7));
         assert_eq!(
-            service.checkpoint().expect("reconciliation committed").state(),
+            service
+                .checkpoint()
+                .expect("reconciliation committed")
+                .state(),
             openmanic_domain::ActivityState::Excluded
         );
         assert_eq!(
