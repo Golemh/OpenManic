@@ -1372,6 +1372,7 @@ struct VerticalSliceApp {
     close_to_tray: WindowsTrayController,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
+    create_schedule_mode: bool,
     schedule_draft: Option<ScheduleDraft>,
     latest_schedule_command: Option<CommandId>,
     #[cfg(windows)]
@@ -1445,6 +1446,7 @@ impl VerticalSlice {
             close_to_tray: WindowsTrayController::new(),
             projection_sequence: 1,
             requested_range: None,
+            create_schedule_mode: false,
             schedule_draft: None,
             latest_schedule_command: None,
             #[cfg(windows)]
@@ -1522,10 +1524,16 @@ impl VerticalSliceApp {
         };
 
         ui.separator();
-        ui.heading("Timeline");
+        ui.horizontal(|ui| {
+            ui.heading("Timeline");
+            ui.toggle_value(&mut self.create_schedule_mode, "Create schedule");
+            if self.create_schedule_mode {
+                ui.label("Drag on the timeline to choose exact start and end times.");
+            }
+        });
         let output = self
             .timeline
-            .show_snapshot(ui, snapshot.timeline(), &context, false);
+            .show_snapshot(ui, snapshot.timeline(), &context, self.create_schedule_mode);
         for action in output.actions().iter().copied() {
             match action {
                 TimelineRenderAction::Today(action) => {
