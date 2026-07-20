@@ -995,6 +995,10 @@ struct RuntimeResources {
 }
 
 impl RuntimeResources {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "construction names every owned runtime boundary so startup and shutdown ownership stay auditable."
+    )]
     fn start(
         store: SqliteStore,
     ) -> Result<(Self, LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>), CompositionError>
@@ -1405,9 +1409,23 @@ fn run_platform_worker(
 }
 
 #[cfg(windows)]
+type MetadataWorkerStart = (
+    SyncSender<WindowsApplicationMetadataRequest>,
+    mpsc::Sender<()>,
+    JoinHandle<()>,
+);
+
+#[cfg(windows)]
+type TitleWorkerStart = (
+    SyncSender<WindowsWindowTitleObservationRequest>,
+    mpsc::Sender<()>,
+    JoinHandle<()>,
+);
+
+#[cfg(windows)]
 fn spawn_metadata_worker(
     application_icons: Arc<Mutex<ApplicationIconCache>>,
-) -> Result<(SyncSender<WindowsApplicationMetadataRequest>, mpsc::Sender<()>, JoinHandle<()>), CompositionError> {
+) -> Result<MetadataWorkerStart, CompositionError> {
     let (request_sender, request_receiver) = mpsc::sync_channel(APPLICATION_METADATA_REQUEST_CAPACITY);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
@@ -1420,7 +1438,7 @@ fn spawn_metadata_worker(
 #[cfg(windows)]
 fn spawn_title_worker(
     lanes: Arc<RuntimeLanes<WriterWork>>,
-) -> Result<(SyncSender<WindowsWindowTitleObservationRequest>, mpsc::Sender<()>, JoinHandle<()>), CompositionError> {
+) -> Result<TitleWorkerStart, CompositionError> {
     let (request_sender, request_receiver) = mpsc::sync_channel(WINDOW_TITLE_OBSERVATION_CAPACITY);
     let (stop_sender, stop_receiver) = mpsc::channel();
     let handle = thread::Builder::new()
@@ -1431,6 +1449,10 @@ fn spawn_title_worker(
 }
 
 #[cfg(windows)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the worker owns its receivers and lane publisher for its complete thread lifetime."
+)]
 fn run_title_worker(
     requests: Receiver<WindowsWindowTitleObservationRequest>,
     stop: Receiver<()>,
@@ -1455,6 +1477,10 @@ fn run_title_worker(
 }
 
 #[cfg(windows)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the worker owns its receivers and icon cache publisher for its complete thread lifetime."
+)]
 fn run_metadata_worker(
     requests: Receiver<WindowsApplicationMetadataRequest>,
     stop: Receiver<()>,
@@ -1479,6 +1505,10 @@ fn run_metadata_worker(
 #[expect(
     clippy::needless_pass_by_value,
     reason = "the named worker exclusively owns all receivers and publishers for its lifetime"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the worker receives each independently owned runtime boundary explicitly."
 )]
 fn run_writer_worker(
     store: SqliteStore,
@@ -1622,6 +1652,10 @@ fn drain_writer_lanes(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the dispatch remains explicit so each typed work item reaches its sole authoritative service."
+)]
 fn process_writer_work(
     work: WriterWork,
     services: &mut WriterServices,
@@ -1632,7 +1666,7 @@ fn process_writer_work(
     focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     if let WriterWork::WindowTitle(observation) = work {
-        process_window_title_observation(observation, services, store);
+        process_window_title_observation(&observation, services, store);
         return;
     }
     if let WriterWork::Focus(command) = work {
@@ -1715,7 +1749,7 @@ fn process_writer_work(
 }
 
 fn process_window_title_observation(
-    observation: WindowTitleObservation,
+    observation: &WindowTitleObservation,
     services: &mut WriterServices,
     store: &Arc<Mutex<SqliteStore>>,
 ) {
@@ -1740,7 +1774,11 @@ fn process_window_title_observation(
     ) else {
         return;
     };
-    let Some(tracker_run_id) = services.tracking.checkpoint().map(|checkpoint| checkpoint.tracker_run_id()) else {
+    let Some(tracker_run_id) = services
+        .tracking
+        .checkpoint()
+        .map(openmanic_application::TrackingCheckpoint::tracker_run_id)
+    else {
         return;
     };
     let _ = writer_store.writer().persist_window_title(tracker_run_id, &title);
@@ -2317,6 +2355,10 @@ struct VerticalSliceApp {
     selected_category_id: Option<CategoryId>,
     selected_category_applications: BTreeSet<ApplicationId>,
     application_search: String,
+    #[expect(
+        clippy::option_option,
+        reason = "the UI distinguishes all categories, Uncategorized, and one explicit category."
+    )]
     application_filter_category: Option<Option<CategoryId>>,
     show_excluded_applications_only: bool,
     editing_category_id: Option<CategoryId>,
@@ -2559,6 +2601,11 @@ impl VerticalSliceApp {
         render_distribution_snapshot(ui, snapshot.distribution());
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        clippy::excessive_nesting,
+        reason = "the Categories screen keeps its interactive controls together to preserve one coherent selection state."
+    )]
     fn render_categories_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Categories {
             return;
@@ -2603,7 +2650,10 @@ impl VerticalSliceApp {
                     ui.label(category.name().as_str());
                     if ui.button("Rename").clicked() {
                         self.editing_category_id = Some(category.id());
-                        self.category_rename_name = category.name().as_str().to_owned();
+                        category
+                            .name()
+                            .as_str()
+                            .clone_into(&mut self.category_rename_name);
                         self.category_delete_confirmation = None;
                     }
                     if ui.button("Delete category").clicked() {
@@ -2907,6 +2957,11 @@ impl VerticalSliceApp {
             .queue_tracking(self.app.controller_mut(), request);
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        clippy::excessive_nesting,
+        reason = "focus controls intentionally render every state and recovery action from one immutable snapshot."
+    )]
     fn render_focus_controls(&mut self, ui: &mut eframe::egui::Ui) {
         if self
             .runtime
@@ -3033,6 +3088,10 @@ impl VerticalSliceApp {
         }
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the compact control strip intentionally keeps each action beside its rendered button."
+    )]
     fn render_focus_lifecycle_controls(
         &mut self,
         ui: &mut eframe::egui::Ui,
@@ -3090,6 +3149,10 @@ impl VerticalSliceApp {
         self.render_schedule_status(ui);
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "each occurrence retains its own edit and delete controls with the immutable occurrence identity."
+    )]
     fn render_existing_schedule_controls(&mut self, ui: &mut eframe::egui::Ui, today: &TodaySnapshot) {
         let entries = today
             .timeline()
@@ -3230,6 +3293,10 @@ impl VerticalSliceApp {
             .ok_or(ScheduleDraftValidationError::QueueUnavailable)
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the queued replacement keeps an owned immutable snapshot until command construction completes."
+    )]
     fn queue_schedule_replacement(
         &self,
         existing: ScheduleSnapshot,
@@ -3396,6 +3463,10 @@ impl ScheduleDraft {
         })
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the draft owns the snapshot-derived edit metadata and callers intentionally transfer its immutable input."
+    )]
     fn from_recurring(
         snapshot: ScheduleSnapshot,
         series_id: ScheduleSeriesId,
