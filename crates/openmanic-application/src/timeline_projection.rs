@@ -14,7 +14,8 @@ use openmanic_domain::{
 };
 
 use crate::{
-    DataRevision, ProjectionContextKey, ProjectionRequest, SchemaRevision, SnapshotEnvelope,
+    DataRevision, ProjectionContextKey, ProjectionRequest, ScheduleOccurrence, ScheduleSnapshot,
+    ScheduleTimeError, SchemaRevision, SnapshotEnvelope, project_schedule_occurrences,
 };
 
 /// The schema revision of a [`TimelineSnapshot`] published to a renderer.
@@ -140,6 +141,7 @@ pub struct TimelineProjectionSource<'a> {
     source_revision: DataRevision,
     activities: &'a [TimelineSourceActivity],
     applications: &'a [TimelineApplication],
+    schedules: &'a [ScheduleSnapshot],
 }
 
 impl<'a> TimelineProjectionSource<'a> {
@@ -154,7 +156,15 @@ impl<'a> TimelineProjectionSource<'a> {
             source_revision,
             activities,
             applications,
+            schedules: &[],
         }
+    }
+
+    /// Attaches correlated schedule facts from the same committed read snapshot.
+    #[must_use]
+    pub const fn with_schedules(mut self, schedules: &'a [ScheduleSnapshot]) -> Self {
+        self.schedules = schedules;
+        self
     }
 
     /// Returns the one committed revision shared by all source facts.
@@ -173,6 +183,12 @@ impl<'a> TimelineProjectionSource<'a> {
     #[must_use]
     pub const fn applications(self) -> &'a [TimelineApplication] {
         self.applications
+    }
+
+    /// Returns immutable personal schedules from the same committed source revision.
+    #[must_use]
+    pub const fn schedules(self) -> &'a [ScheduleSnapshot] {
+        self.schedules
     }
 }
 
@@ -441,6 +457,7 @@ pub struct TimelineSnapshot {
     application_band: IntervalIndex<ApplicationBandValue>,
     totals: TimelineTotals,
     completeness: DataCompleteness,
+    schedule_occurrences: Vec<ScheduleOccurrence>,
 }
 
 impl TimelineSnapshot {
@@ -490,6 +507,12 @@ impl TimelineSnapshot {
     #[must_use]
     pub const fn completeness(&self) -> DataCompleteness {
         self.completeness
+    }
+
+    /// Returns visible personal-schedule occurrences sharing this snapshot's source revision.
+    #[must_use]
+    pub fn schedule_occurrences(&self) -> &[ScheduleOccurrence] {
+        &self.schedule_occurrences
     }
 }
 
@@ -545,6 +568,8 @@ impl TimelineProjector {
     ) -> Result<TimelineSnapshot, TimelineProjectionError> {
         let applications = application_categories(source.applications())?;
         let visible_range = context.visible_range();
+        let schedule_occurrences = project_schedule_occurrences(visible_range, source.schedules())
+            .map_err(TimelineProjectionError::ScheduleResolution)?;
         let raw_segments = raw_segments(visible_range, source.activities())?;
 
         let unknown_missing_duration_us = raw_segments
@@ -588,6 +613,7 @@ impl TimelineProjector {
             application_band,
             totals,
             completeness,
+            schedule_occurrences,
         })
     }
 }
@@ -835,6 +861,8 @@ fn positive_range(
 /// Explains why a source cannot be projected without inventing an interpretation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimelineProjectionError {
+    /// A persisted recurring schedule boundary could not be resolved for the visible range.
+    ScheduleResolution(ScheduleTimeError),
     /// Internal source boundaries could not form a positive half-open interval.
     InvalidRange {
         /// Requested inclusive start boundary.
@@ -866,6 +894,9 @@ pub enum TimelineProjectionError {
 impl fmt::Display for TimelineProjectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ScheduleResolution(error) => {
+                write!(formatter, "schedule occurrence resolution failed: {error}")
+            }
             Self::InvalidRange { start, end } => write!(
                 formatter,
                 "timeline interval [{}, {}) must be positive",
@@ -900,6 +931,7 @@ impl std::error::Error for TimelineProjectionError {}
 mod tests {
     use openmanic_domain::{
         ActivityCause, ActivityEvidence, ApplicationId, CategoryId, HalfOpenInterval, TrackerRunId,
+        OneTimeScheduleId, ScheduleRule,
     };
 
     use super::{
@@ -909,9 +941,36 @@ mod tests {
     };
     use crate::{
         DataRevision, ProjectionContextKey, ProjectionRequest, ProjectionSlot, ProjectionSlotState,
-        RequestId, SnapshotRejection,
+        RequestId, ScheduleId, ScheduleSnapshot, SnapshotRejection, EntityRevision,
     };
     use openmanic_domain::{ActivityInterval, ActivityState, UtcMicros};
+
+    #[test]
+    fn snapshot_carries_visible_schedule_occurrences_from_the_correlated_source() {
+        let schedule = ScheduleSnapshot::try_new(
+            ScheduleId::OneTime(OneTimeScheduleId::from_bytes([9; 16])),
+            ScheduleRule::one_time(
+                "Appointment",
+                None,
+                HalfOpenInterval::try_new(UtcMicros::new(5), UtcMicros::new(15))
+                    .expect("positive schedule"),
+                "Etc/UTC",
+            )
+            .expect("valid schedule"),
+            EntityRevision::new(0),
+            UtcMicros::new(0),
+        )
+        .expect("matching schedule identity");
+        let snapshot = TimelineProjector::build(
+            context(0, 10),
+            TimelineProjectionSource::new(DataRevision::new(1), &[], &[])
+                .with_schedules(&[schedule]),
+        )
+        .expect("schedule-aware snapshot");
+
+        assert_eq!(snapshot.schedule_occurrences().len(), 1);
+        assert_eq!(snapshot.schedule_occurrences()[0].interval().start().get(), 5);
+    }
 
     #[test]
     fn projection_preserves_raw_identity_and_synthesizes_explicit_unknown_gaps() {

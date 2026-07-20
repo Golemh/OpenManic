@@ -1016,11 +1016,17 @@ fn build_today_snapshot(
             )
         })
         .collect::<Vec<_>>();
+    let schedules = read
+        .schedules()
+        .iter()
+        .map(|record| record.snapshot().clone())
+        .collect::<Vec<_>>();
     let source = openmanic_application::TimelineProjectionSource::new(
         read.revision(),
         &activities,
         &applications,
-    );
+    )
+    .with_schedules(&schedules);
     let timeline = TimelineProjector::build(*request.payload(), source).map_err(|_| ())?;
     let (usage, distribution) = build_summaries(read, request.payload().visible_range())?;
     Ok(SnapshotEnvelope::new(
