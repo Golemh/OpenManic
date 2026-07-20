@@ -1674,11 +1674,28 @@ fn process_catalog_command(
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
 ) {
+    let newly_excluded = match command.payload() {
+        CatalogCommand::SetApplicationsExcluded {
+            application_ids,
+            excluded: true,
+        } => Some(application_ids.as_slice()),
+        _ => None,
+    };
     let outcome = services.catalog.handle(command);
     let committed_revision = match &outcome {
         MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
         MutationOutcome::Rejected(_) => None,
     };
+    if committed_revision.is_some() && let Some(application_ids) = newly_excluded {
+        for application_id in application_ids {
+            let _ = services.tracking.reconcile_active_application_excluded(
+                command.schema_revision(),
+                command.command_id(),
+                command.submitted_at_utc(),
+                *application_id,
+            );
+        }
+    }
     let event = EventEnvelope::new(
         command.schema_revision(),
         next_ui_event_sequence(&mut services.ui_event_sequence),

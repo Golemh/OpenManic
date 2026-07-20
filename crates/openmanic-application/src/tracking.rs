@@ -413,6 +413,50 @@ where
         }
     }
 
+    /// Immediately replaces trusted attribution for the active application with an excluded
+    /// state after its privacy policy changes. This is local reconciliation, so it deliberately
+    /// preserves the last accepted platform sequence for the next real foreground observation.
+    #[must_use]
+    pub fn reconcile_active_application_excluded(
+        &mut self,
+        schema_revision: SchemaRevision,
+        command_id: CommandId,
+        at: UtcMicros,
+        application_id: ApplicationId,
+    ) -> EventEnvelope<AppEvent> {
+        if self.pending.is_some()
+            || self.user_paused
+            || !self
+                .checkpoint
+                .is_some_and(|checkpoint| checkpoint.application_id() == Some(application_id))
+        {
+            return self.no_change_event(schema_revision, command_id, at);
+        }
+        let Some(target) = state_descriptor(
+            ActivityState::Excluded,
+            ActivityCause::ApplicationExcluded,
+            None,
+        ) else {
+            return self.rejected_event(
+                schema_revision,
+                command_id,
+                at,
+                MutationRejectionReason::Validation,
+            );
+        };
+        self.persist_transition(TrackingTransition {
+            schema_revision,
+            command_id,
+            occurred_at_utc: at,
+            next_start: at,
+            target,
+            next_platform_sequence: self.last_platform_sequence,
+            next_user_paused: false,
+            closed_intervals: Vec::new(),
+            close_current_at: None,
+        })
+    }
+
     /// Retries the one retained atomic mutation, if writer backpressure left one pending.
     #[must_use]
     pub fn retry_pending(&mut self) -> Option<EventEnvelope<AppEvent>> {
@@ -1210,6 +1254,55 @@ mod tests {
                 .is_immediately_before(second_closed.range())
         );
         assert!(!first_closed.range().overlaps(second_closed.range()));
+    }
+
+    #[test]
+    fn excluding_the_active_application_closes_attribution_without_consuming_future_sequence() {
+        let mut service = service([
+            SubmitPlan::Commit(1),
+            SubmitPlan::Commit(2),
+            SubmitPlan::Commit(3),
+        ]);
+        let _ = service.handle(evidence_command(
+            1,
+            0,
+            TrackingEvidence::Foreground {
+                sequence: 7,
+                observed_at_utc: time(0),
+                application_id: app(1),
+            },
+        ));
+        let reconciliation = service.reconcile_active_application_excluded(
+            SchemaRevision::new(1),
+            CommandId::new(2),
+            time(10),
+            app(1),
+        );
+        assert_confirmed(&reconciliation, 2);
+        assert_eq!(service.last_platform_sequence(), Some(7));
+        assert_eq!(
+            service.checkpoint().expect("reconciliation committed").state(),
+            openmanic_domain::ActivityState::Excluded
+        );
+        assert_eq!(
+            service
+                .checkpoint()
+                .expect("reconciliation committed")
+                .application_id(),
+            None
+        );
+        assert_confirmed(
+            &service.handle(evidence_command(
+                3,
+                11,
+                TrackingEvidence::Foreground {
+                    sequence: 8,
+                    observed_at_utc: time(11),
+                    application_id: app(2),
+                },
+            )),
+            3,
+        );
     }
 
     #[test]
