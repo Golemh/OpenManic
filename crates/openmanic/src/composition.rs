@@ -27,6 +27,7 @@ use openmanic_application::{
     EntityRevision, FocusCommand, FocusNotificationError, FocusNotificationPort, FocusPersistence,
     FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome,
     ApplicationIconCache, ApplicationIconCacheLimits, ApplicationIconLookup, ApplicationIconResult,
+    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     ScheduleCommand, ScheduleId,
     ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
     ScheduleService, ScheduleSnapshot,
@@ -502,6 +503,21 @@ impl CommandIdentifiers {
                 anchor_date,
                 scope,
             },
+        )
+    }
+
+    fn schedule_edit_occurrence(
+        &self,
+        series_id: ScheduleSeriesId,
+        anchor_date: i32,
+        scope: ScheduleEditScope,
+        expected_revision: EntityRevision,
+        edit: RecurringScheduleEdit,
+    ) -> CommandEnvelope<ScheduleCommand> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        CommandEnvelope::new(
+            SchemaRevision::new(1), command_id, ordering_key, Some(expected_revision),
+            submitted_at_utc, ScheduleCommand::EditOccurrence { series_id, anchor_date, scope, edit },
         )
     }
 
@@ -2904,7 +2920,9 @@ impl VerticalSliceApp {
             return;
         };
         let submission = match action {
-            ScheduleDraftAction::Save => Some(if let Some(existing) = existing {
+            ScheduleDraftAction::Save => Some(if let Some(recurring) = self.schedule_draft.as_ref().and_then(|draft| draft.recurring.clone()) {
+                self.queue_recurring_schedule_edit(recurring, range, &label, weekday_mask)
+            } else if let Some(existing) = existing {
                 self.queue_schedule_replacement(existing, range, &label, repeats, weekday_mask)
             } else {
                 self.queue_schedule_draft(range, &label, repeats, weekday_mask)
@@ -2969,7 +2987,15 @@ impl VerticalSliceApp {
                     if !schedule.rule().is_repeating()
                         && ui.button("Edit…").clicked()
                     {
-                        self.schedule_draft = ScheduleDraft::from_existing(schedule);
+                        self.schedule_draft = ScheduleDraft::from_existing(schedule.clone());
+                    }
+                    if schedule.rule().is_repeating()
+                        && let (ScheduleId::Series(series_id), Some(anchor_date)) = (schedule.id(), anchor_date)
+                        && ui.button("Edit…").clicked()
+                    {
+                        self.schedule_draft = Some(ScheduleDraft::from_recurring(
+                            schedule, series_id, anchor_date, interval,
+                        ));
                     }
                 });
             }
@@ -3083,6 +3109,36 @@ impl VerticalSliceApp {
             .ok_or(ScheduleDraftValidationError::QueueUnavailable)
     }
 
+    fn queue_recurring_schedule_edit(
+        &self,
+        recurring: RecurringScheduleEditRequest,
+        range: HalfOpenInterval,
+        label: &str,
+        weekday_mask: u8,
+    ) -> Result<CommandId, ScheduleDraftValidationError> {
+        let edit = match recurring.scope {
+            ScheduleEditScope::OnlyThisDate => RecurringScheduleEdit::OnlyThisDate(
+                RecurringOccurrenceOverride { interval: range, start_after_gap: false, start_earlier_fold: false, end_after_gap: false, end_earlier_fold: false },
+            ),
+            ScheduleEditScope::ThisAndFuture | ScheduleEditScope::EveryOccurrence => {
+                const DAY_US: i64 = 86_400_000_000;
+                const SECOND_US: i64 = 1_000_000;
+                let start_second = u32::try_from(range.start().get().rem_euclid(DAY_US) / SECOND_US)
+                    .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+                let end_second = u32::try_from(range.end().get().rem_euclid(DAY_US) / SECOND_US)
+                    .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
+                RecurringScheduleEdit::Rule(RecurringScheduleRuleChange {
+                    label: label.to_owned(), category_id: None, weekday_mask,
+                    start_second_of_day: start_second, end_second_of_day: end_second,
+                    time_zone_id: "Etc/UTC".to_owned(),
+                })
+            }
+        };
+        self.runtime.try_submit_schedule(self.runtime.identifiers.schedule_edit_occurrence(
+            recurring.series_id, recurring.anchor_date, recurring.scope, recurring.expected_revision, edit,
+        )).ok_or(ScheduleDraftValidationError::QueueUnavailable)
+    }
+
     fn dispatch_ui_commands(&mut self) {
         let mut dispatcher = RuntimeCommandDispatcher {
             lanes: self.runtime.lanes.clone(),
@@ -3170,6 +3226,7 @@ struct ScheduleDraft {
     weekday_mask: u8,
     validation_error: Option<ScheduleDraftValidationError>,
     existing: Option<ScheduleSnapshot>,
+    recurring: Option<RecurringScheduleEditRequest>,
 }
 
 impl ScheduleDraft {
@@ -3181,6 +3238,7 @@ impl ScheduleDraft {
             weekday_mask: 0b0111_1111,
             validation_error: None,
             existing: None,
+            recurring: None,
         }
     }
 
@@ -3193,9 +3251,17 @@ impl ScheduleDraft {
             weekday_mask: 0b0111_1111,
             validation_error: None,
             existing: Some(snapshot),
+            recurring: None,
         })
     }
+
+    fn from_recurring(snapshot: ScheduleSnapshot, series_id: ScheduleSeriesId, anchor_date: i32, range: HalfOpenInterval) -> Self {
+        Self { range, label: snapshot.rule().label().to_owned(), repeats: true, weekday_mask: snapshot.rule().segments().first().map_or(0b0111_1111, |segment| segment.weekday_mask()), validation_error: None, existing: None, recurring: Some(RecurringScheduleEditRequest { series_id, anchor_date, scope: ScheduleEditScope::OnlyThisDate, expected_revision: snapshot.entity_revision() }) }
+    }
 }
+
+#[derive(Clone, Debug)]
+struct RecurringScheduleEditRequest { series_id: ScheduleSeriesId, anchor_date: i32, scope: ScheduleEditScope, expected_revision: EntityRevision }
 
 fn render_schedule_draft(
     ui: &mut eframe::egui::Ui,
@@ -3216,6 +3282,11 @@ fn render_schedule_draft(
         if draft.repeats {
             render_weekday_selector(ui, &mut draft.weekday_mask);
             ui.label("Choose at least one day. Recurring times use UTC until local-zone editing is added.");
+        }
+        if let Some(recurring) = draft.recurring.as_mut() {
+            ui.radio_value(&mut recurring.scope, ScheduleEditScope::OnlyThisDate, "Only this occurrence");
+            ui.radio_value(&mut recurring.scope, ScheduleEditScope::ThisAndFuture, "This and future occurrences");
+            ui.radio_value(&mut recurring.scope, ScheduleEditScope::EveryOccurrence, "Every occurrence");
         }
         if let Some(error) = draft.validation_error {
             ui.colored_label(eframe::egui::Color32::from_rgb(200, 70, 70), error.message());
