@@ -11,7 +11,7 @@ use openmanic_application::{
     SchedulePersistenceError, ScheduleSnapshot, TrackingPersistenceIntent, TrackingPersistencePort,
     TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
     schedule_rule_conflicts_with_intervals,
-    SettingsSnapshot, SettingsThemeMode,
+    SettingsPersistence, SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode,
 };
 use openmanic_domain::{
     ActivityCause, ActivityInterval, ActivityState, Application, ApplicationId, Category,
@@ -1126,6 +1126,103 @@ impl LayoutPersistence for &mut StorageWriter {
         expected_revision: Option<EntityRevision>,
     ) -> Result<DataRevision, LayoutPersistenceError> {
         <StorageWriter as LayoutPersistence>::replace_layout(*self, snapshot, expected_revision)
+    }
+}
+
+impl SettingsPersistence for StorageWriter {
+    fn load_settings(&mut self) -> Result<Option<SettingsSnapshot>, SettingsPersistenceError> {
+        self.settings_snapshot().map_err(settings_persistence_error)
+    }
+
+    fn replace_settings(
+        &mut self,
+        settings: &SettingsSnapshot,
+        expected_revision: Option<EntityRevision>,
+    ) -> Result<DataRevision, SettingsPersistenceError> {
+        let transaction = self
+            .begin_writer_transaction("begin settings replacement")
+            .map_err(|_| SettingsPersistenceError::Failed)?;
+        let existing: Option<i64> = transaction
+            .query_row(
+                "SELECT revision FROM user_settings WHERE singleton_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| SettingsPersistenceError::Failed)?;
+        let existing = existing
+            .map(|revision| {
+                u64::try_from(revision)
+                    .map(EntityRevision::new)
+                    .map_err(|_| SettingsPersistenceError::InvalidDocument)
+            })
+            .transpose()?;
+        if existing != expected_revision {
+            return Err(SettingsPersistenceError::RevisionConflict);
+        }
+        let entity_revision = expected_revision
+            .map_or(0, EntityRevision::get)
+            .checked_add(u64::from(existing.is_some()))
+            .ok_or(SettingsPersistenceError::Failed)?;
+        let revision = next_revision(&transaction).map_err(|_| SettingsPersistenceError::Failed)?;
+        let parameters = params![
+            i64::try_from(settings.consent_revision()).map_err(|_| SettingsPersistenceError::Failed)?,
+            i64::from(u8::from(settings.start_tracking_automatically())),
+            i64::from(u8::from(settings.start_at_login())),
+            i64::from(u8::from(settings.close_to_tray())),
+            i64::from(settings.idle_threshold_seconds()),
+            i64::from(settings.idle_policy_code()),
+            i64::from(u8::from(settings.collect_window_titles())),
+            i64::from(settings.time_zone_mode()),
+            settings.manual_time_zone_id(),
+            i64::from(settings.theme_mode().code()),
+            i64::from(settings.density_code()),
+            i64::from(u8::from(settings.notifications_enabled())),
+            i64::from(u8::from(settings.focus_sounds_enabled())),
+            i64::from(u8::from(settings.tray_explanation_acknowledged())),
+            i64::try_from(entity_revision).map_err(|_| SettingsPersistenceError::Failed)?,
+        ];
+        if existing.is_some() {
+            transaction
+                .execute(
+                    "UPDATE user_settings SET first_launch_consent_revision = ?1, start_tracking_automatically = ?2, start_at_login = ?3, close_to_tray = ?4, idle_threshold_seconds = ?5, idle_policy = ?6, collect_window_titles = ?7, time_zone_mode = ?8, manual_time_zone_id = ?9, theme_mode = ?10, density = ?11, notifications_enabled = ?12, focus_sounds_enabled = ?13, tray_explanation_acknowledged = ?14, revision = ?15 WHERE singleton_id = 1",
+                    parameters,
+                )
+                .map_err(|_| SettingsPersistenceError::Failed)?;
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO user_settings(singleton_id, schema_version, first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision, updated_utc_us) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0)",
+                    parameters,
+                )
+                .map_err(|_| SettingsPersistenceError::Failed)?;
+        }
+        update_revision(&transaction, revision).map_err(|_| SettingsPersistenceError::Failed)?;
+        transaction
+            .commit()
+            .map_err(|_| SettingsPersistenceError::Failed)?;
+        Ok(revision)
+    }
+}
+
+impl SettingsPersistence for &mut StorageWriter {
+    fn load_settings(&mut self) -> Result<Option<SettingsSnapshot>, SettingsPersistenceError> {
+        <StorageWriter as SettingsPersistence>::load_settings(*self)
+    }
+
+    fn replace_settings(
+        &mut self,
+        settings: &SettingsSnapshot,
+        expected_revision: Option<EntityRevision>,
+    ) -> Result<DataRevision, SettingsPersistenceError> {
+        <StorageWriter as SettingsPersistence>::replace_settings(*self, settings, expected_revision)
+    }
+}
+
+fn settings_persistence_error(error: StorageError) -> SettingsPersistenceError {
+    match error {
+        StorageError::InvalidStoredValue { .. } => SettingsPersistenceError::InvalidDocument,
+        _ => SettingsPersistenceError::Failed,
     }
 }
 
@@ -2591,7 +2688,8 @@ mod tests {
         FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusService,
         FocusSnapshot, LayoutPersistence, LayoutSnapshot, OrderingKey, SavedViewId,
         SavedViewPersistence, SavedViewSnapshot, ScheduleId, SchedulePersistence,
-        SchedulePersistenceError, ScheduleSnapshot, SchemaRevision, TitleObservationResult,
+        SchedulePersistenceError, ScheduleSnapshot, SchemaRevision, SettingsPersistence,
+        SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode, TitleObservationResult,
         TitleStabilizer, TrackingCheckpoint, TrackingPersistenceIntent, TrackingPersistencePort,
         TrackingPersistenceSubmit,
     };
@@ -3567,6 +3665,94 @@ mod tests {
         assert_eq!(updated.entity_revision(), EntityRevision::new(1));
         assert_eq!(updated.updated_at_utc(), time(20));
         assert_eq!(updated.document().revision(), 1);
+    }
+
+    fn settings_snapshot(revision: EntityRevision) -> SettingsSnapshot {
+        SettingsSnapshot::new(
+            3,
+            false,
+            true,
+            false,
+            120,
+            2,
+            true,
+            1,
+            Some("Europe/Amsterdam".to_owned()),
+            SettingsThemeMode::Light,
+            3,
+            false,
+            false,
+            true,
+            revision,
+        )
+    }
+
+    #[test]
+    fn settings_replacement_is_complete_atomic_and_revision_guarded() {
+        let database = TemporaryDatabase::new("settings-replacement");
+        let mut store = open_store(database.path(), 36);
+        let initial = settings_snapshot(EntityRevision::new(0));
+
+        assert_eq!(SettingsPersistence::load_settings(store.writer()), Ok(None));
+        assert_eq!(
+            SettingsPersistence::replace_settings(store.writer(), &initial, None),
+            Ok(revision(1))
+        );
+        assert_eq!(
+            SettingsPersistence::load_settings(store.writer()),
+            Ok(Some(initial.clone()))
+        );
+
+        let replacement = SettingsSnapshot::new(
+            7,
+            true,
+            false,
+            true,
+            900,
+            3,
+            false,
+            0,
+            None,
+            SettingsThemeMode::FollowSystem,
+            4,
+            true,
+            true,
+            false,
+            EntityRevision::new(0),
+        );
+        assert_eq!(
+            SettingsPersistence::replace_settings(
+                store.writer(),
+                &replacement,
+                Some(EntityRevision::new(0)),
+            ),
+            Ok(revision(2))
+        );
+        let expected_replacement = SettingsSnapshot::new(
+            replacement.consent_revision(),
+            replacement.start_tracking_automatically(),
+            replacement.start_at_login(),
+            replacement.close_to_tray(),
+            replacement.idle_threshold_seconds(),
+            replacement.idle_policy_code(),
+            replacement.collect_window_titles(),
+            replacement.time_zone_mode(),
+            replacement.manual_time_zone_id().map(str::to_owned),
+            replacement.theme_mode(),
+            replacement.density_code(),
+            replacement.notifications_enabled(),
+            replacement.focus_sounds_enabled(),
+            replacement.tray_explanation_acknowledged(),
+            EntityRevision::new(1),
+        );
+        assert_eq!(
+            SettingsPersistence::load_settings(store.writer()),
+            Ok(Some(expected_replacement))
+        );
+        assert_eq!(
+            SettingsPersistence::replace_settings(store.writer(), &replacement, None),
+            Err(SettingsPersistenceError::RevisionConflict)
+        );
     }
 
     #[test]

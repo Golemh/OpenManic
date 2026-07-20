@@ -16,6 +16,8 @@ mod windows_control;
 mod windows_identity;
 mod windows_lifecycle;
 #[cfg(windows)]
+mod windows_autostart;
+#[cfg(windows)]
 mod windows_metadata;
 mod windows_raw;
 mod windows_single_instance;
@@ -41,6 +43,8 @@ pub use windows_control::{
 };
 #[cfg(windows)]
 pub use windows_metadata::extract_application_icon;
+#[cfg(windows)]
+pub use windows_autostart::{WindowsAutostart, WindowsAutostartError, WindowsAutostartStatus};
 pub use windows_single_instance::{
     ActivationCommandDecode, LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT,
 };
