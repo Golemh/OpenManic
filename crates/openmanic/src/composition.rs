@@ -1365,10 +1365,10 @@ impl VerticalSliceApp {
                 }
             }
         }
-        if let Some(range) = self.schedule_draft_range {
-            if render_schedule_draft(ui, range) {
-                self.schedule_draft_range = None;
-            }
+        if let Some(range) = self.schedule_draft_range
+            && render_schedule_draft(ui, range)
+        {
+            self.schedule_draft_range = None;
         }
         ui.add_space(12.0);
         ui.heading("Application usage");
