@@ -64,6 +64,7 @@ pub use runtime::{
     WorkerHealth, WorkerHealthState, bounded_runtime_lanes, latest_mailbox,
 };
 pub use schedule::{
+    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
     ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
 };

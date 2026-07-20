@@ -1,7 +1,8 @@
 //! Typed schedule commands and immutable snapshots for the ordered schedule service.
 
 use openmanic_domain::{
-    OneTimeScheduleId, ScheduleEditScope, ScheduleRule, ScheduleSeriesId, UtcMicros,
+    CategoryId, HalfOpenInterval, OneTimeScheduleId, ScheduleEditScope, ScheduleRule,
+    ScheduleSeriesId, UtcMicros,
 };
 
 use crate::{
@@ -82,6 +83,47 @@ pub enum ScheduleSnapshotError {
     IdentityDoesNotMatchRule,
 }
 
+/// One validated-at-application-boundary recurring civil rule replacement.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecurringScheduleRuleChange {
+    /// User-visible schedule label.
+    pub label: String,
+    /// Optional personal category association.
+    pub category_id: Option<CategoryId>,
+    /// Monday-first weekday selection bit mask.
+    pub weekday_mask: u8,
+    /// Local start time in whole seconds after midnight.
+    pub start_second_of_day: u32,
+    /// Local end time in whole seconds after midnight.
+    pub end_second_of_day: u32,
+    /// IANA time-zone identifier retained with the replacement rule segment.
+    pub time_zone_id: String,
+}
+
+/// A resolved UTC override for exactly one recurring occurrence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecurringOccurrenceOverride {
+    /// The exact replacement interval.
+    pub interval: HalfOpenInterval,
+    /// Whether the start used the first valid instant after a DST gap.
+    pub start_after_gap: bool,
+    /// Whether the start used the earlier instant in a DST fold.
+    pub start_earlier_fold: bool,
+    /// Whether the end used the first valid instant after a DST gap.
+    pub end_after_gap: bool,
+    /// Whether the end used the earlier instant in a DST fold.
+    pub end_earlier_fold: bool,
+}
+
+/// The replacement form compatible with one explicit recurrence edit scope.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RecurringScheduleEdit {
+    /// Replaces only the selected resolved occurrence.
+    OnlyThisDate(RecurringOccurrenceOverride),
+    /// Replaces civil recurrence intent at an explicit future or whole-series scope.
+    Rule(RecurringScheduleRuleChange),
+}
+
 /// A schedule mutation accepted by the ordered schedule service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScheduleCommand {
@@ -99,6 +141,17 @@ pub enum ScheduleCommand {
         anchor_date: i32,
         /// The user-confirmed recurrence deletion scope.
         scope: ScheduleEditScope,
+    },
+    /// Edits a recurring occurrence at the specified explicit scope.
+    EditOccurrence {
+        /// The stable recurring series identity.
+        series_id: ScheduleSeriesId,
+        /// The selected occurrence's local civil anchor date.
+        anchor_date: i32,
+        /// The user-confirmed recurrence edit scope.
+        scope: ScheduleEditScope,
+        /// The scope-compatible replacement.
+        edit: RecurringScheduleEdit,
     },
 }
 
@@ -295,7 +348,82 @@ where
                 anchor_date,
                 scope,
             } => self.delete_occurrence(command, *series_id, *anchor_date, *scope),
+            ScheduleCommand::EditOccurrence {
+                series_id,
+                anchor_date,
+                scope,
+                edit,
+            } => self.edit_occurrence(command, *series_id, *anchor_date, *scope, edit),
         }
+    }
+
+    fn edit_occurrence(
+        &mut self,
+        command: &CommandEnvelope<ScheduleCommand>,
+        series_id: ScheduleSeriesId,
+        anchor_date: i32,
+        scope: ScheduleEditScope,
+        edit: &RecurringScheduleEdit,
+    ) -> ScheduleMutation {
+        let Some(expected_revision) = command.expected_entity_revision() else {
+            return ScheduleMutation::rejected(command, MutationRejectionReason::RevisionConflict);
+        };
+        let schedule_id = ScheduleId::Series(series_id);
+        let snapshot = match self.persistence.load_schedule(schedule_id) {
+            Ok(Some(snapshot)) if snapshot.entity_revision() == expected_revision => snapshot,
+            Ok(Some(_) | None)
+            | Err(SchedulePersistenceError::Conflict | SchedulePersistenceError::RevisionConflict) => {
+                return ScheduleMutation::rejected(
+                    command,
+                    MutationRejectionReason::RevisionConflict,
+                );
+            }
+            Err(SchedulePersistenceError::Failed) => {
+                return ScheduleMutation::rejected(
+                    command,
+                    MutationRejectionReason::PersistenceFailure,
+                );
+            }
+        };
+        let mut rule = snapshot.rule().clone();
+        let edited = match (scope, edit) {
+            (ScheduleEditScope::OnlyThisDate, RecurringScheduleEdit::OnlyThisDate(override_)) => {
+                rule.override_only_this_date(
+                    anchor_date,
+                    override_.interval,
+                    override_.start_after_gap,
+                    override_.start_earlier_fold,
+                    override_.end_after_gap,
+                    override_.end_earlier_fold,
+                )
+            }
+            (ScheduleEditScope::ThisAndFuture, RecurringScheduleEdit::Rule(change)) => {
+                rule.change_this_and_future(
+                    anchor_date,
+                    change.label.clone(),
+                    change.category_id,
+                    change.weekday_mask,
+                    change.start_second_of_day,
+                    change.end_second_of_day,
+                    change.time_zone_id.clone(),
+                )
+            }
+            (ScheduleEditScope::EveryOccurrence, RecurringScheduleEdit::Rule(change)) => {
+                rule.replace_every_occurrence(
+                    change.label.clone(),
+                    change.category_id,
+                    change.weekday_mask,
+                    change.start_second_of_day,
+                    change.end_second_of_day,
+                    change.time_zone_id.clone(),
+                )
+            }
+            _ => return ScheduleMutation::rejected(command, MutationRejectionReason::Validation),
+        };
+        if edited.is_err() {
+            return ScheduleMutation::rejected(command, MutationRejectionReason::Validation);
+        }
+        self.replace_scoped_rule(command, schedule_id, expected_revision, snapshot, rule)
     }
 
     fn delete_occurrence(
@@ -354,6 +482,17 @@ where
         if delete_series {
             return self.delete_loaded_schedule(command, schedule_id, expected_revision);
         }
+        self.replace_scoped_rule(command, schedule_id, expected_revision, snapshot, rule)
+    }
+
+    fn replace_scoped_rule(
+        &mut self,
+        command: &CommandEnvelope<ScheduleCommand>,
+        schedule_id: ScheduleId,
+        expected_revision: EntityRevision,
+        snapshot: ScheduleSnapshot,
+        rule: ScheduleRule,
+    ) -> ScheduleMutation {
         let replacement = match ScheduleSnapshot::try_new(
             schedule_id,
             rule,
@@ -406,6 +545,7 @@ mod tests {
     };
 
     use super::{
+        RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
         ScheduleCommand, ScheduleId, SchedulePersistence, SchedulePersistenceError,
         ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
     };
@@ -489,6 +629,37 @@ mod tests {
         )
     }
 
+    fn edit_occurrence(
+        scope: ScheduleEditScope,
+        anchor_date: i32,
+        edit: RecurringScheduleEdit,
+    ) -> CommandEnvelope<ScheduleCommand> {
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            CommandId::new(2),
+            OrderingKey::new(2),
+            Some(EntityRevision::new(0)),
+            UtcMicros::new(2),
+            ScheduleCommand::EditOccurrence {
+                series_id: ScheduleSeriesId::from_bytes([3; 16]),
+                anchor_date,
+                scope,
+                edit,
+            },
+        )
+    }
+
+    fn rule_change(label: &str) -> RecurringScheduleEdit {
+        RecurringScheduleEdit::Rule(RecurringScheduleRuleChange {
+            label: label.to_owned(),
+            category_id: None,
+            weekday_mask: 1,
+            start_second_of_day: 8 * 3_600,
+            end_second_of_day: 9 * 3_600,
+            time_zone_id: "Europe/London".to_owned(),
+        })
+    }
+
     #[test]
     fn stable_identity_must_match_one_time_or_recurring_rule_form() {
         let one_time = ScheduleRule::one_time(
@@ -548,5 +719,58 @@ mod tests {
         let outcome = service.handle(&delete_occurrence(ScheduleEditScope::EveryOccurrence, 105));
         assert!(matches!(outcome.outcome(), MutationOutcome::Confirmed(_)));
         assert!(outcome.snapshot().is_none());
+    }
+
+    #[test]
+    fn scoped_edits_apply_only_the_scope_compatible_rule_mutation() {
+        let only_this = RecurringScheduleEdit::OnlyThisDate(RecurringOccurrenceOverride {
+            interval: HalfOpenInterval::try_new(UtcMicros::new(500), UtcMicros::new(600))
+                .expect("positive override"),
+            start_after_gap: false,
+            start_earlier_fold: false,
+            end_after_gap: false,
+            end_earlier_fold: false,
+        });
+        let mut service = ScheduleService::new(FixturePersistence {
+            snapshot: Some(recurring_snapshot()),
+            replacement: None,
+            deleted: false,
+        });
+        let outcome = service.handle(&edit_occurrence(ScheduleEditScope::OnlyThisDate, 105, only_this));
+        assert!(matches!(outcome.outcome(), MutationOutcome::Confirmed(_)));
+        assert_eq!(
+            outcome
+                .snapshot()
+                .expect("only-this edit replaces series")
+                .rule()
+                .resolved_override_on(105),
+            HalfOpenInterval::try_new(UtcMicros::new(500), UtcMicros::new(600)).ok()
+        );
+
+        let outcome = service.handle(&edit_occurrence(
+            ScheduleEditScope::ThisAndFuture,
+            120,
+            rule_change("Future review"),
+        ));
+        assert!(matches!(outcome.outcome(), MutationOutcome::Confirmed(_)));
+        assert_eq!(
+            outcome
+                .snapshot()
+                .expect("future edit replaces series")
+                .rule()
+                .time_zone_for_anchor_date(120),
+            Some("Europe/London")
+        );
+
+        let rejected = service.handle(&edit_occurrence(
+            ScheduleEditScope::OnlyThisDate,
+            105,
+            rule_change("Mismatched scope"),
+        ));
+        assert!(matches!(
+            rejected.outcome(),
+            MutationOutcome::Rejected(rejection)
+                if rejection.reason() == crate::MutationRejectionReason::Validation
+        ));
     }
 }
