@@ -58,6 +58,7 @@ impl ActivityRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationRecord {
     application: Application,
+    excluded: bool,
 }
 
 impl ApplicationRecord {
@@ -65,6 +66,12 @@ impl ApplicationRecord {
     #[must_use]
     pub fn application(&self) -> &Application {
         &self.application
+    }
+
+    /// Returns whether future foreground evidence for this application is excluded.
+    #[must_use]
+    pub const fn excluded(&self) -> bool {
+        self.excluded
     }
 }
 
@@ -227,7 +234,8 @@ impl ApplicationRepository {
         let mut statement = transaction
             .prepare(
                 "SELECT application.public_id, application.display_name, category.public_id,
-                        application.first_seen_utc_us, application.last_seen_utc_us
+                        application.first_seen_utc_us, application.last_seen_utc_us,
+                        application.exclusion_policy
                    FROM application
               LEFT JOIN category ON category.id = application.category_id
                ORDER BY application.display_name, application.public_id",
@@ -241,12 +249,19 @@ impl ApplicationRepository {
                     row.get::<_, Option<Vec<u8>>>(2)?,
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
                 ))
             })
             .map_err(|error| database_error(&error, "read application snapshot"))?;
         rows.map(|row| {
-            let (id, display_name, category_id, first_seen_utc_us, last_seen_utc_us) =
-                row.map_err(|error| database_error(&error, "read application snapshot"))?;
+            let (
+                id,
+                display_name,
+                category_id,
+                first_seen_utc_us,
+                last_seen_utc_us,
+                exclusion_policy,
+            ) = row.map_err(|error| database_error(&error, "read application snapshot"))?;
             Ok(ApplicationRecord {
                 application: Application::try_new(
                     ApplicationId::from_bytes(fixed_id(id, "application ID")?),
@@ -265,6 +280,15 @@ impl ApplicationRepository {
                 .map_err(|_| StorageError::InvalidStoredValue {
                     field: "application observation range",
                 })?,
+                excluded: match exclusion_policy {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(StorageError::InvalidStoredValue {
+                            field: "application exclusion policy",
+                        });
+                    }
+                },
             })
         })
         .collect()
@@ -439,7 +463,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use openmanic_domain::{Category, CategoryId, CategoryName, UtcMicros};
+    use openmanic_domain::{
+        Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName, UtcMicros,
+    };
 
     use super::read_snapshot;
     use crate::{SqliteStore, StoreOpenOptions};
@@ -512,6 +538,36 @@ mod tests {
             .expect("a new short read transaction should observe the writer commit");
         assert!(after.revision() > before.revision());
         assert_eq!(after.categories().len(), 2);
+    }
+
+    #[test]
+    fn snapshot_exposes_the_committed_application_exclusion_policy() {
+        let database = TemporaryDatabase::new();
+        let mut store =
+            SqliteStore::open(database.path(), &StoreOpenOptions::new([32; 16], 0, "test"))
+                .expect("the isolated store should open");
+        let application_id = ApplicationId::from_bytes([4; 16]);
+        let application = Application::try_new(
+            application_id,
+            ApplicationName::try_new("Browser").expect("fixture application name should be valid"),
+            None,
+            UtcMicros::new(0),
+            UtcMicros::new(0),
+        )
+        .expect("fixture application should be valid");
+        let writer = store.writer();
+        writer
+            .upsert_application(&application)
+            .expect("the fixture application should commit");
+        writer
+            .set_applications_excluded(&[application_id], true)
+            .expect("the exclusion policy should commit");
+        let snapshot = store
+            .open_read_session()
+            .expect("the reader should open")
+            .snapshot()
+            .expect("the reader should observe the committed policy");
+        assert!(snapshot.applications()[0].excluded());
     }
 
     fn category(byte: u8, name: &str) -> Category {

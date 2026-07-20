@@ -238,6 +238,7 @@ pub struct CatalogApplicationSnapshot {
     application_id: ApplicationId,
     display_name: String,
     category_id: Option<CategoryId>,
+    excluded: bool,
 }
 
 impl CatalogApplicationSnapshot {
@@ -257,6 +258,12 @@ impl CatalogApplicationSnapshot {
     #[must_use]
     pub const fn category_id(&self) -> Option<CategoryId> {
         self.category_id
+    }
+
+    /// Returns whether future foreground evidence for this application is excluded.
+    #[must_use]
+    pub const fn excluded(&self) -> bool {
+        self.excluded
     }
 }
 
@@ -297,12 +304,30 @@ impl CatalogSnapshot {
         applications: impl IntoIterator<Item = Application>,
         categories: impl IntoIterator<Item = Category>,
     ) -> Self {
+        Self::from_domain_with_exclusions(
+            revision,
+            applications
+                .into_iter()
+                .map(|application| (application, false)),
+            categories,
+        )
+    }
+
+    /// Builds a stable presentation snapshot including the persisted exclusion policy for each
+    /// application.
+    #[must_use]
+    pub fn from_domain_with_exclusions(
+        revision: DataRevision,
+        applications: impl IntoIterator<Item = (Application, bool)>,
+        categories: impl IntoIterator<Item = Category>,
+    ) -> Self {
         let mut applications = applications
             .into_iter()
-            .map(|application| CatalogApplicationSnapshot {
+            .map(|(application, excluded)| CatalogApplicationSnapshot {
                 application_id: application.id(),
                 display_name: application.name().as_str().to_owned(),
                 category_id: application.category_id(),
+                excluded,
             })
             .collect::<Vec<_>>();
         applications.sort_by(|left, right| {
@@ -504,6 +529,22 @@ mod tests {
             snapshot.applications()[0].category_id(),
             Some(category_id(2))
         );
+        assert!(!snapshot.applications()[0].excluded());
+    }
+
+    #[test]
+    fn catalog_snapshot_keeps_exclusion_policy_with_its_application() {
+        let snapshot = CatalogSnapshot::from_domain_with_exclusions(
+            crate::DataRevision::new(8),
+            [
+                (application(1, "Browser", None), true),
+                (application(3, "Editor", None), false),
+            ],
+            [],
+        );
+
+        assert!(snapshot.applications()[0].excluded());
+        assert!(!snapshot.applications()[1].excluded());
     }
 
     #[test]

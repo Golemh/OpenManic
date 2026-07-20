@@ -1576,7 +1576,11 @@ fn store_identity(root: &Path) -> [u8; 16] {
 mod tests {
     use std::sync::Arc;
 
-    use openmanic_application::{LaneCapacities, LaneReceive, WorkLane, bounded_runtime_lanes};
+    use openmanic_application::{
+        LaneCapacities, LaneReceive, TrackingCommand, TrackingEvidence, WorkLane,
+        bounded_runtime_lanes,
+    };
+    use openmanic_domain::{ApplicationId, UtcMicros};
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
@@ -1709,5 +1713,38 @@ mod tests {
                 .duration_us(),
             86_400_000_000
         );
+    }
+
+    #[test]
+    fn excluded_foreground_translation_preserves_command_metadata_and_redacts_application() {
+        let identifiers = CommandIdentifiers::default();
+        let command =
+            identifiers.command(TrackingCommand::Evidence(TrackingEvidence::Foreground {
+                sequence: 7,
+                observed_at_utc: UtcMicros::new(123_456),
+                application_id: ApplicationId::from_bytes([9; 16]),
+            }));
+        let metadata = (
+            command.schema_revision(),
+            command.command_id(),
+            command.ordering_key(),
+            command.expected_entity_revision(),
+            command.submitted_at_utc(),
+        );
+
+        let translated = super::foreground_command_with_exclusion(command, true);
+
+        assert_eq!(translated.schema_revision(), metadata.0);
+        assert_eq!(translated.command_id(), metadata.1);
+        assert_eq!(translated.ordering_key(), metadata.2);
+        assert_eq!(translated.expected_entity_revision(), metadata.3);
+        assert_eq!(translated.submitted_at_utc(), metadata.4);
+        assert!(matches!(
+            translated.payload(),
+            TrackingCommand::Evidence(TrackingEvidence::ExcludedForeground {
+                sequence: 7,
+                observed_at_utc,
+            }) if *observed_at_utc == UtcMicros::new(123_456)
+        ));
     }
 }
