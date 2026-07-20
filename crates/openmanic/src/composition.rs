@@ -60,19 +60,19 @@ use openmanic_storage_sqlite::{
 use openmanic_ui_egui::timeline::{TimelineRenderAction, TimelineRenderer};
 use openmanic_ui_egui::{
     ApplicationUsage, ApplicationUsageSnapshot, CalendarAction, CalendarBlockKind,
-    CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
-    JobDescriptor, JobPresentationState, JobsAction, JobsController, LayoutEditAction,
-    LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp, PresentableData, SettingsAction,
-    SettingsController, SettingsEffect, ShutdownController, ShutdownEffect, TodayController,
-    TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction,
-    UiController, UiModel, reflow_dashboard, render_distribution_snapshot, render_shutdown_failure,
-    render_usage_snapshot,
+    CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher,
+    DestructiveConfirmation, InboundMessage, JobDescriptor, JobPresentationState, JobsAction,
+    JobsController, JobsEffect, LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus,
+    OpenManicApp, PresentableData, SettingsAction, SettingsController, SettingsEffect,
+    ShutdownController, ShutdownEffect, TodayController, TodayTrackingRequest, TodayWidgetKind,
+    TodayWidgetResolution, TrackingControlAction, UiAction, UiController, UiModel,
+    reflow_dashboard, render_distribution_snapshot, render_shutdown_failure, render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
 use crate::cli::{CliError, parse_process_cli};
 use crate::{
-    data_root::{LocalDataRootValidator, RejectKnownNetworkShares},
+    data_root::{LocalDataRootValidator, LocatorError, RejectKnownNetworkShares, load_locator},
     diagnostics::export_diagnostics_bundle,
 };
 
@@ -103,6 +103,8 @@ pub enum CompositionError {
     Cli(CliError),
     /// Data-root bootstrap did not finish successfully.
     Bootstrap(BootstrapError),
+    /// The small per-user data-root locator could not be loaded safely.
+    Locator(LocatorError),
     /// A user directory choice is required before a store may open.
     DirectoryChoiceRequired,
     /// The local SQLite store could not open safely.
@@ -124,6 +126,7 @@ impl CompositionError {
         match self {
             Self::Cli(error) => error.safe_summary(),
             Self::Bootstrap(error) => error.code(),
+            Self::Locator(error) => error.code(),
             Self::DirectoryChoiceRequired => "Choose a local writable data directory to continue.",
             Self::Storage => "The local activity store could not be opened safely.",
             Self::Runtime => "The local activity runtime could not be started safely.",
@@ -273,6 +276,7 @@ impl FocusNotificationPort for InAppFocusNotifications {
 enum WriterControl {
     Checkpoint(SyncSender<bool>),
     Close(SyncSender<bool>),
+    PrepareRestore(SyncSender<bool>),
 }
 
 /// Bounded UI-side work which must retain authoritative acknowledgements in arrival order.
@@ -1003,6 +1007,7 @@ enum DataOperationWork {
     Import(CsvImportRequest),
     Backup { job_id: JobId, destination: PathBuf },
     Diagnostics { job_id: JobId, destination: PathBuf },
+    Restore { job_id: JobId, source: PathBuf },
 }
 
 /// Privacy-safe completion state made available to the host UI after a CSV operation finishes.
@@ -1020,6 +1025,12 @@ enum DataOperationResult {
         job_id: JobId,
     },
     DiagnosticsExported {
+        job_id: JobId,
+    },
+    Restored {
+        job_id: JobId,
+    },
+    RestoreFailed {
         job_id: JobId,
     },
     Failed {
@@ -1051,6 +1062,7 @@ struct RuntimeResources {
     ui_inbox: Arc<UiInbox>,
     writer_control: SyncSender<WriterControl>,
     writer_handle: Option<JoinHandle<()>>,
+    writer_closed_for_restore: Arc<AtomicBool>,
     data_operation_requests: SyncSender<DataOperationWork>,
     data_operation_stop: Option<mpsc::Sender<()>>,
     data_operation_handle: Option<JoinHandle<()>>,
@@ -1117,6 +1129,7 @@ impl RuntimeResources {
         let (calendar_projection_requests, calendar_projection_receiver) = latest_mailbox();
         let (calendar_snapshots, calendar_snapshot_receiver) = latest_mailbox();
         let (writer_control, control_receiver) = mpsc::sync_channel(2);
+        let writer_closed_for_restore = Arc::new(AtomicBool::new(false));
         let ui_inbox = Arc::new(UiInbox::new(UI_EVENT_CAPACITY));
         let accepting = Arc::new(AtomicBool::new(true));
         let identifiers = Arc::new(CommandIdentifiers::default());
@@ -1157,6 +1170,8 @@ impl RuntimeResources {
         let data_operation_handle = spawn_data_operation_worker(
             Arc::clone(&store),
             data_root,
+            writer_control.clone(),
+            Arc::clone(&writer_closed_for_restore),
             data_operation_receiver,
             data_operation_stop_receiver,
             Arc::clone(&data_operation_results),
@@ -1203,6 +1218,7 @@ impl RuntimeResources {
                 ui_inbox,
                 writer_control,
                 writer_handle: Some(writer_handle),
+                writer_closed_for_restore,
                 data_operation_requests,
                 data_operation_stop: Some(data_operation_stop),
                 data_operation_handle: Some(data_operation_handle),
@@ -1442,6 +1458,22 @@ impl RuntimeResources {
                 .is_ok()
     }
 
+    /// Starts an explicitly confirmed restore and stops ordinary submissions before the worker
+    /// closes the current writer.
+    fn try_submit_restore(&self, job_id: JobId, source: PathBuf) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let submitted = self
+            .data_operation_requests
+            .try_send(DataOperationWork::Restore { job_id, source })
+            .is_ok();
+        if submitted {
+            self.accepting.store(false, Ordering::Release);
+        }
+        submitted
+    }
+
     /// Removes the next completed local data operation for presentation by the host UI.
     fn take_data_operation_result(&self) -> Option<DataOperationResult> {
         self.data_operation_results
@@ -1455,6 +1487,9 @@ impl RuntimeResources {
     }
 
     fn checkpoint_writer(&self) -> bool {
+        if self.writer_closed_for_restore.load(Ordering::Acquire) {
+            return true;
+        }
         let (reply, receive) = mpsc::sync_channel(1);
         match self
             .writer_control
@@ -1469,6 +1504,12 @@ impl RuntimeResources {
 
     fn close_writer(&mut self) -> bool {
         let (reply, receive) = mpsc::sync_channel(1);
+        if self.writer_closed_for_restore.load(Ordering::Acquire) {
+            return self
+                .writer_handle
+                .take()
+                .is_none_or(|handle| handle.join().is_ok());
+        }
         if self
             .writer_control
             .try_send(WriterControl::Close(reply))
@@ -1797,13 +1838,25 @@ fn run_metadata_worker(
 fn spawn_data_operation_worker(
     store: Arc<Mutex<SqliteStore>>,
     data_root: PathBuf,
+    writer_control: SyncSender<WriterControl>,
+    writer_closed_for_restore: Arc<AtomicBool>,
     requests: Receiver<DataOperationWork>,
     stop: Receiver<()>,
     results: Arc<Mutex<VecDeque<DataOperationResult>>>,
 ) -> Result<JoinHandle<()>, CompositionError> {
     thread::Builder::new()
         .name("openmanic-data-operations".to_owned())
-        .spawn(move || run_data_operation_worker(store, data_root, requests, stop, results))
+        .spawn(move || {
+            run_data_operation_worker(
+                store,
+                data_root,
+                writer_control,
+                writer_closed_for_restore,
+                requests,
+                stop,
+                results,
+            );
+        })
         .map_err(|_| CompositionError::Runtime)
 }
 
@@ -1811,9 +1864,19 @@ fn spawn_data_operation_worker(
     clippy::needless_pass_by_value,
     reason = "the operation worker owns its bounded request receiver and stop receiver."
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the operation worker keeps every local file operation and its worker boundary auditable."
+)]
+#[expect(
+    clippy::excessive_nesting,
+    reason = "restore must retain the explicit writer-close and restore-success boundaries."
+)]
 fn run_data_operation_worker(
     store: Arc<Mutex<SqliteStore>>,
     data_root: PathBuf,
+    writer_control: SyncSender<WriterControl>,
+    writer_closed_for_restore: Arc<AtomicBool>,
     requests: Receiver<DataOperationWork>,
     stop: Receiver<()>,
     results: Arc<Mutex<VecDeque<DataOperationResult>>>,
@@ -1882,6 +1945,30 @@ fn run_data_operation_worker(
                 },
                 |_| DataOperationResult::DiagnosticsExported { job_id },
             ),
+            DataOperationWork::Restore { job_id, source } => {
+                let (reply, receive) = mpsc::sync_channel(1);
+                let writer_closed = writer_control
+                    .try_send(WriterControl::PrepareRestore(reply))
+                    .is_ok()
+                    && receive
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap_or(false);
+                if writer_closed {
+                    writer_closed_for_restore.store(true, Ordering::Release);
+                    if store
+                        .lock()
+                        .ok()
+                        .and_then(|mut store| store.restore_backup(&source).ok())
+                        .is_some()
+                    {
+                        DataOperationResult::Restored { job_id }
+                    } else {
+                        DataOperationResult::RestoreFailed { job_id }
+                    }
+                } else {
+                    DataOperationResult::RestoreFailed { job_id }
+                }
+            }
         };
         retain_data_operation_result(&results, result);
     }
@@ -1954,7 +2041,7 @@ fn run_writer_worker(
                 let _ = reply.send(persisted);
                 continue;
             }
-            Ok(WriterControl::Close(reply)) => {
+            Ok(WriterControl::Close(reply) | WriterControl::PrepareRestore(reply)) => {
                 drain_writer_lanes(
                     &lanes,
                     &mut services,
@@ -2981,6 +3068,7 @@ struct VerticalSliceApp {
     import_source: String,
     backup_destination: String,
     diagnostics_destination: String,
+    restore_source: String,
     export_includes_titles: bool,
     data_operation_message: Option<String>,
     jobs: JobsController,
@@ -3125,6 +3213,7 @@ impl VerticalSlice {
             import_source: String::new(),
             backup_destination: String::new(),
             diagnostics_destination: String::new(),
+            restore_source: String::new(),
             export_includes_titles: false,
             data_operation_message: None,
             jobs: JobsController::default(),
@@ -3183,10 +3272,15 @@ impl VerticalSliceApp {
         ui.image((texture.id(), eframe::egui::vec2(20.0, 20.0)));
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the UI ingress drain owns authoritative completion reconciliation before snapshots update."
+    )]
     fn drain_worker_ingress(&mut self) {
         self.runtime
             .ui_inbox
             .drain_into(self.app.controller_mut(), UI_INBOUND_CAPACITY / 2);
+        let mut restore_finished = None;
         while let Some(result) = self.runtime.take_data_operation_result() {
             let (job_id, name, message, state) = match result {
                 DataOperationResult::Exported { request, outcome } => (
@@ -3229,6 +3323,30 @@ impl VerticalSliceApp {
                     "Privacy-safe diagnostics bundle created.".to_owned(),
                     JobState::Succeeded,
                 ),
+                DataOperationResult::Restored { job_id } => {
+                    restore_finished = Some(true);
+                    (
+                        job_id,
+                        "Restore",
+                        "Backup restored. Restarting local services…".to_owned(),
+                        JobState::Succeeded,
+                    )
+                }
+                DataOperationResult::RestoreFailed { job_id } => {
+                    restore_finished = Some(false);
+                    (
+                        job_id,
+                        "Restore",
+                        "Backup could not be restored. Restarting the existing local services…"
+                            .to_owned(),
+                        JobState::Failed {
+                            error: ApplicationError::port_failure(
+                                ApplicationPort::Command,
+                                PortFailureReason::Failed,
+                            ),
+                        },
+                    )
+                }
                 DataOperationResult::Failed { job_id, operation } => (
                     job_id,
                     operation,
@@ -3247,6 +3365,9 @@ impl VerticalSliceApp {
             self.observe_data_job(job_id, name, &state);
             self.data_operation_message = Some(message);
         }
+        if let Some(restored) = restore_finished {
+            self.restart_runtime_after_restore(restored);
+        }
         if let MailboxReceive::Latest(snapshot) = self.snapshots.try_receive() {
             let _ = self
                 .app
@@ -3258,6 +3379,76 @@ impl VerticalSliceApp {
         }
     }
 
+    fn restart_runtime_after_restore(&mut self, restored: bool) {
+        let data_root = self.bootstrap.data_root().path().to_path_buf();
+        if !self.runtime.close_data_operation_worker()
+            || !self.runtime.close_writer()
+            || !self.stop_platform()
+        {
+            self.data_operation_message = Some(
+                "Recovery services could not restart. Quit OpenManic and reopen it before tracking."
+                    .to_owned(),
+            );
+            return;
+        }
+        let store_path = data_root.join("openmanic.sqlite3");
+        let store = SqliteStore::open(
+            &store_path,
+            &StoreOpenOptions::new(
+                store_identity(&data_root),
+                utc_now_micros(),
+                env!("CARGO_PKG_VERSION"),
+            ),
+        );
+        let Ok(store) = store else {
+            self.data_operation_message = Some(
+                "Recovery services could not reopen the local store. Quit OpenManic and reopen it before tracking."
+                    .to_owned(),
+            );
+            return;
+        };
+        let Ok((mut runtime, snapshots, calendar_snapshots)) =
+            RuntimeResources::start(store, data_root)
+        else {
+            self.data_operation_message = Some(
+                "Recovery services could not restart. Quit OpenManic and reopen it before tracking."
+                    .to_owned(),
+            );
+            return;
+        };
+        #[cfg(windows)]
+        if runtime.start_windows(&self.instance_owner).is_err() {
+            self.data_operation_message = Some(
+                "The backup result is preserved, but Windows tracking services could not restart. Quit OpenManic and reopen it before tracking."
+                    .to_owned(),
+            );
+            return;
+        }
+        self.runtime = runtime;
+        self.snapshots = snapshots;
+        self.calendar_snapshots = calendar_snapshots;
+        self.requested_range = None;
+        self.calendar_projection_sequence = 0;
+        self.settings_controller = self.runtime.settings_snapshot.lock().map_or_else(
+            |_| SettingsController::new(SettingsSnapshot::safe_default()),
+            |settings| SettingsController::new(settings.clone()),
+        );
+        if let Ok(settings) = self.runtime.settings_snapshot.lock() {
+            self.close_to_tray
+                .set_close_to_tray_enabled(settings.close_to_tray());
+        }
+        self.layout_editor = self.runtime.layout_snapshot.lock().map_or_else(
+            |_| LayoutEditor::new(LayoutDocument::safe_default()),
+            |layout| LayoutEditor::new(layout.document().clone()),
+        );
+        self.calendar_data = PresentableData::InitialLoading;
+        self.data_operation_message = Some(if restored {
+            "Backup restored and local services restarted.".to_owned()
+        } else {
+            "Restore failed; the existing local services restarted.".to_owned()
+        });
+    }
+
     fn observe_data_job(&mut self, job_id: JobId, name: &str, state: &JobState) {
         self.jobs.observe_job(
             JobDescriptor::new(job_id, name.to_owned(), "Local data operation".to_owned()),
@@ -3266,40 +3457,82 @@ impl VerticalSliceApp {
         );
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "job rows and destructive confirmation must remain adjacent to their local interaction state."
+    )]
     fn render_data_jobs(&mut self, ui: &mut eframe::egui::Ui) {
         let view = self.jobs.view_model();
-        if view.jobs().is_empty() {
-            return;
-        }
-        ui.add_space(8.0);
-        ui.label("Recent data operations");
-        let mut dismiss = None;
-        for job in view.jobs() {
-            let dismiss_clicked = ui
-                .horizontal(|ui| {
-                    ui.label(job.name());
-                    ui.small(match job.state() {
-                        JobPresentationState::Queued => "Queued",
-                        JobPresentationState::Running => "Running",
-                        JobPresentationState::Cancelling => "Cancelling",
-                        JobPresentationState::Succeeded => "Completed",
-                        JobPresentationState::Cancelled => "Cancelled",
-                        JobPresentationState::Failed { message } => message,
-                        JobPresentationState::Interrupted => "Interrupted",
-                    });
-                    ui.add_enabled(
-                        job.state().can_dismiss(),
-                        eframe::egui::Button::new("Dismiss"),
-                    )
-                    .clicked()
-                })
-                .inner;
-            if dismiss_clicked {
-                dismiss = Some(job.job_id());
+        if !view.jobs().is_empty() {
+            ui.add_space(8.0);
+            ui.label("Recent data operations");
+            let mut dismiss = None;
+            for job in view.jobs() {
+                let dismiss_clicked = ui
+                    .horizontal(|ui| {
+                        ui.label(job.name());
+                        ui.small(match job.state() {
+                            JobPresentationState::Queued => "Queued",
+                            JobPresentationState::Running => "Running",
+                            JobPresentationState::Cancelling => "Cancelling",
+                            JobPresentationState::Succeeded => "Completed",
+                            JobPresentationState::Cancelled => "Cancelled",
+                            JobPresentationState::Failed { message } => message,
+                            JobPresentationState::Interrupted => "Interrupted",
+                        });
+                        ui.add_enabled(
+                            job.state().can_dismiss(),
+                            eframe::egui::Button::new("Dismiss"),
+                        )
+                        .clicked()
+                    })
+                    .inner;
+                if dismiss_clicked {
+                    dismiss = Some(job.job_id());
+                }
+            }
+            if let Some(job_id) = dismiss {
+                let _ = self.jobs.apply(JobsAction::Dismiss { job_id });
             }
         }
-        if let Some(job_id) = dismiss {
-            let _ = self.jobs.apply(JobsAction::Dismiss { job_id });
+        let confirmation = view.destructive_confirmation().cloned();
+        if let Some(confirmation) = confirmation {
+            ui.group(|ui| {
+                ui.heading(confirmation.title());
+                ui.label(confirmation.scope());
+                ui.horizontal(|ui| {
+                    if ui.button(confirmation.confirm_label()).clicked()
+                        && matches!(
+                            self.jobs.apply(JobsAction::ConfirmDestructive {
+                                action_id: confirmation.action_id().to_owned(),
+                            }),
+                            Some(JobsEffect::DestructiveConfirmed { ref action_id })
+                                if action_id == "restore-backup"
+                        )
+                    {
+                        self.submit_restore();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        let _ = self.jobs.apply(JobsAction::CancelDestructiveConfirmation);
+                    }
+                });
+            });
+        }
+    }
+
+    fn submit_restore(&mut self) {
+        let job_id = next_data_operation_id();
+        let submitted = self
+            .runtime
+            .try_submit_restore(job_id, PathBuf::from(self.restore_source.trim()));
+        if submitted {
+            self.observe_data_job(job_id, "Restore", &JobState::Running);
+            self.data_operation_message =
+                Some("Restore queued; pausing local services…".to_owned());
+        } else {
+            self.data_operation_message = Some(
+                "Restore could not be queued. Try again after current work finishes.".to_owned(),
+            );
         }
     }
 
@@ -3884,6 +4117,28 @@ impl VerticalSliceApp {
             } else {
                 "Backup could not be queued. Try again after current work finishes.".to_owned()
             });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Restore verified backup from:");
+            ui.text_edit_singleline(&mut self.restore_source);
+        });
+        ui.label("Restore replaces all current local data. OpenManic pauses data operations while it restarts services.");
+        if ui
+            .add_enabled(
+                !self.restore_source.trim().is_empty(),
+                eframe::egui::Button::new("Restore backup…"),
+            )
+            .clicked()
+        {
+            let _ = self.jobs.apply(JobsAction::RequestDestructiveConfirmation(
+                DestructiveConfirmation::new(
+                    "restore-backup".to_owned(),
+                    "Restore this backup?".to_owned(),
+                    "All current local OpenManic data will be replaced by the selected backup."
+                        .to_owned(),
+                    "Restore backup".to_owned(),
+                ),
+            ));
         }
         ui.add_space(8.0);
         ui.separator();
@@ -5177,12 +5432,14 @@ pub fn run_process() -> Result<(), CompositionError> {
             }
         };
     let artifact_directory = artifact_directory()?;
+    let locator_path = bootstrap_locator_path()?;
+    let locator = load_locator(&locator_path).map_err(CompositionError::Locator)?;
     let validator = LocalDataRootValidator::new(RejectKnownNetworkShares);
     let environment_root = std::env::var_os("OPENMANIC_DATA_DIR").map(PathBuf::from);
     let disposition = bootstrap(
         &cli,
         environment_root,
-        None,
+        locator,
         &artifact_directory,
         &validator,
     )
@@ -5213,6 +5470,13 @@ fn artifact_directory() -> Result<PathBuf, CompositionError> {
     std::env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
+        .ok_or(CompositionError::Storage)
+}
+
+fn bootstrap_locator_path() -> Result<PathBuf, CompositionError> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .map(|directory| directory.join("OpenManic").join("bootstrap.locator"))
         .ok_or(CompositionError::Storage)
 }
 
