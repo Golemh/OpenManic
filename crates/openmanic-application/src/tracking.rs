@@ -426,9 +426,9 @@ where
     ) -> EventEnvelope<AppEvent> {
         if self.pending.is_some()
             || self.user_paused
-            || !self
+            || self
                 .checkpoint
-                .is_some_and(|checkpoint| checkpoint.application_id() == Some(application_id))
+                .is_none_or(|checkpoint| checkpoint.application_id() != Some(application_id))
         {
             return self.no_change_event(schema_revision, command_id, at);
         }

@@ -126,6 +126,11 @@ impl StorageWriter {
 
     /// Persists one accepted stabilized title span, deduplicating text and coalescing an adjacent
     /// identical span for the same application and tracker run.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if the referenced application or tracker run is absent, or the
+    /// serialized transaction cannot commit the title fact and matching data revision.
     pub fn persist_window_title(
         &mut self,
         tracker_run_id: TrackerRunId,
@@ -411,6 +416,11 @@ impl StorageWriter {
     ///
     /// A missing record is deliberately treated as disabled: collection cannot begin before the
     /// user has an authoritative privacy setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] when the settings record cannot be read or contains an invalid
+    /// persisted boolean value.
     pub fn window_title_collection_enabled(&mut self) -> Result<bool, StorageError> {
         let enabled: Option<i64> = self
             .writer
@@ -3093,7 +3103,7 @@ mod tests {
         ));
         match stabilizer.observe(application_id, time(accepted_at_utc), text, true, false) {
             TitleObservationResult::Accepted(title) => title,
-            TitleObservationResult::Ignored => panic!("fixture title should be stable"),
+            TitleObservationResult::Ignored => unreachable!("fixture title should be stable"),
         }
     }
 

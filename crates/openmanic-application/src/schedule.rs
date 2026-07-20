@@ -101,6 +101,10 @@ pub struct RecurringScheduleRuleChange {
 }
 
 /// A resolved UTC override for exactly one recurring occurrence.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each persisted DST-boundary choice is independently meaningful and must remain explicit."
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecurringOccurrenceOverride {
     /// The exact replacement interval.
@@ -423,7 +427,7 @@ where
         if edited.is_err() {
             return ScheduleMutation::rejected(command, MutationRejectionReason::Validation);
         }
-        self.replace_scoped_rule(command, schedule_id, expected_revision, snapshot, rule)
+        self.replace_scoped_rule(command, schedule_id, expected_revision, &snapshot, rule)
     }
 
     fn delete_occurrence(
@@ -439,19 +443,10 @@ where
         let schedule_id = ScheduleId::Series(series_id);
         let snapshot = match self.persistence.load_schedule(schedule_id) {
             Ok(Some(snapshot)) if snapshot.entity_revision() == expected_revision => snapshot,
-            Ok(Some(_)) => {
-                return ScheduleMutation::rejected(
-                    command,
-                    MutationRejectionReason::RevisionConflict,
-                );
-            }
-            Ok(None) => {
-                return ScheduleMutation::rejected(
-                    command,
-                    MutationRejectionReason::RevisionConflict,
-                );
-            }
-            Err(SchedulePersistenceError::Conflict | SchedulePersistenceError::RevisionConflict) => {
+            Ok(Some(_) | None)
+            | Err(
+                SchedulePersistenceError::Conflict | SchedulePersistenceError::RevisionConflict,
+            ) => {
                 return ScheduleMutation::rejected(
                     command,
                     MutationRejectionReason::RevisionConflict,
@@ -473,16 +468,13 @@ where
             ScheduleEditScope::ThisAndFuture => rule.delete_this_and_future(anchor_date),
             ScheduleEditScope::EveryOccurrence => unreachable!("handled before rule mutation"),
         };
-        let delete_series = match delete_series {
-            Ok(delete_series) => delete_series,
-            Err(_) => {
-                return ScheduleMutation::rejected(command, MutationRejectionReason::Validation);
-            }
+        let Ok(delete_series) = delete_series else {
+            return ScheduleMutation::rejected(command, MutationRejectionReason::Validation);
         };
         if delete_series {
             return self.delete_loaded_schedule(command, schedule_id, expected_revision);
         }
-        self.replace_scoped_rule(command, schedule_id, expected_revision, snapshot, rule)
+        self.replace_scoped_rule(command, schedule_id, expected_revision, &snapshot, rule)
     }
 
     fn replace_scoped_rule(
@@ -490,17 +482,16 @@ where
         command: &CommandEnvelope<ScheduleCommand>,
         schedule_id: ScheduleId,
         expected_revision: EntityRevision,
-        snapshot: ScheduleSnapshot,
+        snapshot: &ScheduleSnapshot,
         rule: ScheduleRule,
     ) -> ScheduleMutation {
-        let replacement = match ScheduleSnapshot::try_new(
+        let Ok(replacement) = ScheduleSnapshot::try_new(
             schedule_id,
             rule,
             snapshot.entity_revision(),
             snapshot.created_at_utc(),
-        ) {
-            Ok(replacement) => replacement,
-            Err(_) => return ScheduleMutation::rejected(command, MutationRejectionReason::Validation),
+        ) else {
+            return ScheduleMutation::rejected(command, MutationRejectionReason::Validation);
         };
         match self.persistence.replace_schedule(&replacement, expected_revision) {
             Ok(revision) => ScheduleMutation::confirmed(command, revision, replacement),

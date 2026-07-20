@@ -25,7 +25,7 @@ use crate::WindowsApplicationMetadataRequest;
 /// Extracts a decoded executable icon, returning an ordinary fallback when Windows cannot supply
 /// a usable icon. This function is intentionally called only from the metadata worker.
 #[must_use]
-pub fn extract_application_icon(request: WindowsApplicationMetadataRequest) -> ApplicationIconResult {
+pub fn extract_application_icon(request: &WindowsApplicationMetadataRequest) -> ApplicationIconResult {
     decode_executable_icon(request.executable_path()).map_or(
         ApplicationIconResult::Fallback {
             application_id: request.application_id(),

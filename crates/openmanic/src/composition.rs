@@ -1469,7 +1469,7 @@ fn run_metadata_worker(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
-        let result: ApplicationIconResult = openmanic_platform::extract_application_icon(request);
+        let result: ApplicationIconResult = openmanic_platform::extract_application_icon(&request);
         if let Ok(mut cache) = application_icons.lock() {
             let _ = result.apply_to(&mut cache);
         }
