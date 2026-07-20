@@ -17,6 +17,7 @@ use openmanic_domain::{ActivityState, HalfOpenInterval};
 use super::{
     PaintFill, PaintPrimitive, TimelineBand, TimelineDetail, TimelineDetailValue, TimelineGesture,
     TimelineGestureEvent, TimelineInteraction, TimelinePaintPlan, TimelineTransform, hit_test,
+    prepare_schedule_overlays,
 };
 use crate::{DataLimitation, PresentableData, TodayAction, TodayViewContext};
 
@@ -38,6 +39,7 @@ const HOVER_BACKGROUND: Color32 = Color32::from_rgb(27, 33, 45);
 const ERROR: Color32 = Color32::from_rgb(237, 113, 113);
 const WARNING: Color32 = Color32::from_rgb(236, 190, 93);
 const SUCCESS: Color32 = Color32::from_rgb(107, 201, 139);
+const SCHEDULE_BRACKET: Color32 = Color32::from_rgb(133, 201, 255);
 
 /// An action emitted by the timeline renderer for its owning controller to reduce.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -351,6 +353,7 @@ impl TimelineRenderer {
         paint_category_band(painter, plan.category(), band_rects.category);
         paint_activity_band(painter, plan.activity(), band_rects.activity);
         paint_application_band(painter, plan.application(), band_rects.application);
+        paint_schedule_overlays(painter, transform, band_rects, snapshot);
         paint_selection(painter, transform, band_rects, context.timeline_selection());
         paint_persistent_selection(painter, transform, band_rects, self.persistent_detail);
         paint_completeness(painter, canvas, snapshot.completeness());
@@ -370,6 +373,30 @@ impl TimelineRenderer {
                 output.actions.push(TimelineRenderAction::Today(action));
             }
         });
+    }
+}
+
+fn paint_schedule_overlays(
+    painter: &Painter,
+    transform: TimelineTransform,
+    band_rects: BandRects,
+    snapshot: &TimelineSnapshot,
+) {
+    for overlay in prepare_schedule_overlays(
+        transform,
+        snapshot
+            .schedule_occurrences()
+            .iter()
+            .map(|occurrence| (occurrence, occurrence.interval())),
+    ) {
+        let adjusted = overlay.occurrence().adjusted();
+        let pixels = overlay.bracket().range().pixels();
+        let top = band_rects.category.min.y + 2.0;
+        let bottom = band_rects.application.max.y - 2.0;
+        let stroke = Stroke::new(if adjusted { 2.0 } else { 1.0 }, SCHEDULE_BRACKET);
+        painter.line_segment([Pos2::new(pixels.start_x(), top), Pos2::new(pixels.end_x(), top)], stroke);
+        painter.line_segment([Pos2::new(pixels.start_x(), top), Pos2::new(pixels.start_x(), bottom)], stroke);
+        painter.line_segment([Pos2::new(pixels.end_x(), top), Pos2::new(pixels.end_x(), bottom)], stroke);
     }
 }
 

@@ -207,13 +207,13 @@ pub struct ScheduleOverlayGeometry<'a, T> {
 impl<'a, T> ScheduleOverlayGeometry<'a, T> {
     /// Returns the original caller-owned occurrence identity/value.
     #[must_use]
-    pub const fn occurrence(self) -> &'a T {
+    pub const fn occurrence(&self) -> &'a T {
         self.occurrence
     }
 
     /// Returns the clipped bracket geometry calculated by the shared transform.
     #[must_use]
-    pub const fn bracket(self) -> ScheduleBracketGeometry {
+    pub const fn bracket(&self) -> ScheduleBracketGeometry {
         self.bracket
     }
 }
