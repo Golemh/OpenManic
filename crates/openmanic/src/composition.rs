@@ -34,7 +34,7 @@ use openmanic_application::{
     TrackingPersistenceSubmit, TrackingService, WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
-    ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval,
+    ActivityState, Application, ApplicationId, ApplicationName, Category, HalfOpenInterval,
     FocusSessionId, FocusSessionState, OneTimeScheduleId, ScheduleEditScope, ScheduleRule,
     ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
@@ -123,6 +123,8 @@ struct TodaySnapshot {
     usage: ApplicationUsageSnapshot,
     distribution: openmanic_ui_egui::DistributionSnapshot,
     schedules: Vec<ScheduleSnapshot>,
+    applications: Vec<(Application, bool)>,
+    categories: Vec<Category>,
 }
 
 impl TodaySnapshot {
@@ -140,6 +142,14 @@ impl TodaySnapshot {
 
     fn schedules(&self) -> &[ScheduleSnapshot] {
         &self.schedules
+    }
+
+    fn applications(&self) -> &[(Application, bool)] {
+        &self.applications
+    }
+
+    fn categories(&self) -> &[Category] {
+        &self.categories
     }
 }
 
@@ -1546,6 +1556,16 @@ fn build_today_snapshot(
         .iter()
         .map(|record| record.snapshot().clone())
         .collect::<Vec<_>>();
+    let catalog_applications = read
+        .applications()
+        .iter()
+        .map(|record| (record.application().clone(), record.excluded()))
+        .collect::<Vec<_>>();
+    let categories = read
+        .categories()
+        .iter()
+        .map(|record| record.category().clone())
+        .collect::<Vec<_>>();
     let source = openmanic_application::TimelineProjectionSource::new(
         read.revision(),
         &activities,
@@ -1565,6 +1585,8 @@ fn build_today_snapshot(
             usage,
             distribution,
             schedules,
+            applications: catalog_applications,
+            categories,
         },
     ))
 }
@@ -2025,6 +2047,56 @@ impl VerticalSliceApp {
         render_distribution_snapshot(ui, snapshot.distribution());
     }
 
+    fn render_categories_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
+        if self.app.controller().model().route() != openmanic_ui_egui::Route::Categories {
+            return;
+        }
+        let data = self
+            .app
+            .controller()
+            .model()
+            .data()
+            .visible_value()
+            .cloned();
+        let Some(snapshot) = data else {
+            return;
+        };
+        ui.add_space(16.0);
+        ui.heading("Categories");
+        if snapshot.categories().is_empty() {
+            ui.label("No categories yet. Applications are currently Uncategorized.");
+        } else {
+            ui.label("Your categories");
+            ui.horizontal_wrapped(|ui| {
+                for category in snapshot.categories() {
+                    ui.label(category.name().as_str());
+                }
+            });
+        }
+        ui.add_space(8.0);
+        ui.heading("Applications");
+        for (application, excluded) in snapshot.applications() {
+            let category_name = application
+                .category_id()
+                .and_then(|category_id| {
+                    snapshot
+                        .categories()
+                        .iter()
+                        .find(|category| category.id() == category_id)
+                })
+                .map_or("Uncategorized", |category| category.name().as_str());
+            ui.horizontal(|ui| {
+                ui.label(application.name().as_str());
+                ui.label(format!("Category: {category_name}"));
+                if *excluded {
+                    ui.label("Excluded from future tracking");
+                }
+            });
+        }
+        ui.add_space(8.0);
+        ui.label("Category changes and exclusion controls are being connected next.");
+    }
+
     fn queue_tracking_control(&mut self, action: TrackingControlAction) {
         let request = self.runtime.identifiers.tracking_request(action);
         let _ = self
@@ -2483,6 +2555,7 @@ impl eframe::App for VerticalSliceApp {
         self.drain_worker_ingress();
         eframe::App::ui(&mut self.app, ui, frame);
         self.render_today_dashboard(ui);
+        self.render_categories_dashboard(ui);
         self.publish_day_projection();
         self.dispatch_ui_commands();
         let context = ui.ctx().clone();
