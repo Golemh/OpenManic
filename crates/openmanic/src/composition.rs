@@ -645,23 +645,23 @@ impl RuntimeResources {
         }
     }
 
-    fn try_submit_schedule(&self, command: CommandEnvelope<ScheduleCommand>) -> bool {
+    fn try_submit_schedule(&self, command: CommandEnvelope<ScheduleCommand>) -> Option<CommandId> {
         if !self.accepting.load(Ordering::Acquire) {
-            return false;
+            return None;
         }
         let command_id = command.command_id();
         if !self.ui_inbox.try_push(UiIngress::Pending(command_id)) {
-            return false;
+            return None;
         }
         if matches!(
             self.lanes
                 .try_submit(WorkLane::Normal, WriterWork::Schedule(command)),
             LaneSubmit::Enqueued
         ) {
-            return true;
+            return Some(command_id);
         }
         self.ui_inbox.remove_pending(command_id);
-        false
+        None
     }
 
     fn reject_nonessential_work(&self) {
@@ -1319,6 +1319,14 @@ const fn tracking_status_label(status: &MutationStatus) -> &'static str {
     }
 }
 
+const fn schedule_status_label(status: &MutationStatus) -> &'static str {
+    match status {
+        MutationStatus::Pending => "Saving schedule…",
+        MutationStatus::Confirmed { .. } => "Schedule saved.",
+        MutationStatus::Rejected { .. } => "Schedule was not saved. Check that it does not overlap another schedule.",
+    }
+}
+
 fn id_label(bytes: &[u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut label = String::with_capacity(bytes.len().saturating_mul(2));
@@ -1365,6 +1373,7 @@ struct VerticalSliceApp {
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
     schedule_draft: Option<ScheduleDraft>,
+    latest_schedule_command: Option<CommandId>,
     #[cfg(windows)]
     instance_owner: WindowsInstanceOwner,
 }
@@ -1437,6 +1446,7 @@ impl VerticalSlice {
             projection_sequence: 1,
             requested_range: None,
             schedule_draft: None,
+            latest_schedule_command: None,
             #[cfg(windows)]
             instance_owner: self.instance_owner,
         }
@@ -1534,14 +1544,26 @@ impl VerticalSliceApp {
             (action, draft.range, draft.label.clone())
         });
         if let Some((action, range, label)) = schedule_draft_action {
-            let dismiss = match action {
+            let submitted = match action {
                 ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label),
+                ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
+            };
+            if let Some(command_id) = submitted {
+                self.latest_schedule_command = Some(command_id);
+            }
+            let dismiss = match action {
+                ScheduleDraftAction::Save => submitted.is_some(),
                 ScheduleDraftAction::Cancel => true,
                 ScheduleDraftAction::None => false,
             };
             if dismiss {
                 self.schedule_draft = None;
             }
+        }
+        if let Some(command_id) = self.latest_schedule_command
+            && let Some(status) = self.app.controller().model().mutation_status(command_id)
+        {
+            ui.label(schedule_status_label(status));
         }
         ui.add_space(12.0);
         ui.heading("Application usage");
@@ -1558,11 +1580,11 @@ impl VerticalSliceApp {
             .queue_tracking(self.app.controller_mut(), request);
     }
 
-    fn queue_schedule_draft(&self, range: HalfOpenInterval, label: &str) -> bool {
+    fn queue_schedule_draft(&self, range: HalfOpenInterval, label: &str) -> Option<CommandId> {
         self.runtime
             .identifiers
             .schedule_create(range, label)
-            .is_some_and(|command| self.runtime.try_submit_schedule(command))
+            .and_then(|command| self.runtime.try_submit_schedule(command))
     }
 
     fn dispatch_ui_commands(&mut self) {
