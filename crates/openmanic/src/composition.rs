@@ -170,11 +170,17 @@ struct WriterServices {
 }
 
 /// Completion notifications are deliberately honest until the Windows notification adapter lands.
-struct UnavailableFocusNotifications;
+struct UnavailableFocusNotifications {
+    latest_error: Arc<Mutex<Option<FocusNotificationError>>>,
+}
 
 impl FocusNotificationPort for UnavailableFocusNotifications {
     fn notify_completed(&mut self, _: &FocusSnapshot) -> Result<(), FocusNotificationError> {
-        Err(FocusNotificationError::Unavailable)
+        let error = FocusNotificationError::Unavailable;
+        if let Ok(mut latest) = self.latest_error.lock() {
+            *latest = Some(error);
+        }
+        Err(error)
     }
 }
 
@@ -727,6 +733,7 @@ struct RuntimeResources {
     writer_handle: Option<JoinHandle<()>>,
     accepting: Arc<AtomicBool>,
     identifiers: Arc<CommandIdentifiers>,
+    focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
     supervisor: RuntimeSupervisor,
@@ -759,7 +766,9 @@ impl RuntimeResources {
         let ui_inbox = Arc::new(UiInbox::new(UI_EVENT_CAPACITY));
         let accepting = Arc::new(AtomicBool::new(true));
         let identifiers = Arc::new(CommandIdentifiers::default());
+        let focus_notification_error = Arc::new(Mutex::new(None));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
+        let worker_focus_notification_error = Arc::clone(&focus_notification_error);
         let writer_handle = thread::Builder::new()
             .name(ThreadRoot::new(RuntimeWorker::Writer).name().to_owned())
             .spawn(move || {
@@ -770,6 +779,7 @@ impl RuntimeResources {
                     projection_receiver,
                     snapshots,
                     worker_ui_inbox,
+                    worker_focus_notification_error,
                 );
             })
             .map_err(|_| CompositionError::Runtime)?;
@@ -783,6 +793,7 @@ impl RuntimeResources {
                 writer_handle: Some(writer_handle),
                 accepting,
                 identifiers,
+                focus_notification_error,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
                 supervisor: RuntimeSupervisor::new([
@@ -1060,9 +1071,10 @@ fn run_writer_worker(
     projection_requests: LatestMailboxReceiver<ProjectionRequest<TimelineContext>>,
     snapshots: LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: Arc<UiInbox>,
+    focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
 ) {
     let store = Arc::new(Mutex::new(store));
-    let mut services = writer_services(&store);
+    let mut services = writer_services(&store, focus_notification_error);
     let mut current_projection = None;
     let mut running = true;
 
@@ -1123,7 +1135,10 @@ fn run_writer_worker(
     }
 }
 
-fn writer_services(store: &Arc<Mutex<SqliteStore>>) -> WriterServices {
+fn writer_services(
+    store: &Arc<Mutex<SqliteStore>>,
+    focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
+) -> WriterServices {
     let tracking = TrackingService::new(
         tracker_run_id(),
         WriterPersistence {
@@ -1140,7 +1155,9 @@ fn writer_services(store: &Arc<Mutex<SqliteStore>>) -> WriterServices {
             store: Arc::clone(store),
             first_write: false,
         },
-        UnavailableFocusNotifications,
+        UnavailableFocusNotifications {
+            latest_error: focus_notification_error,
+        },
     );
     let _ = focus.reconcile_after_restart(UtcMicros::new(utc_now_micros()));
     WriterServices {
@@ -1884,6 +1901,16 @@ impl VerticalSliceApp {
                 && let Some(status) = self.app.controller().model().mutation_status(command_id)
             {
                 ui.label(focus_status_label(status));
+            }
+            if self
+                .runtime
+                .focus_notification_error
+                .lock()
+                .ok()
+                .and_then(|value| *value)
+                .is_some()
+            {
+                ui.label("Focus completed, but the notification was unavailable.");
             }
         });
     }
