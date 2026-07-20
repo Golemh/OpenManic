@@ -21,6 +21,7 @@ pub use errors::{ConnectionSetting, StorageError};
 pub use migration::LATEST_SCHEMA_VERSION;
 pub use options::StoreOpenOptions;
 pub use repository::{
-    ActivityRecord, ApplicationRecord, CategoryRecord, ReadSnapshot, SqliteReadSession,
+    ActivityRecord, ApplicationRecord, CategoryRecord, ReadSnapshot, ScheduleRecord,
+    SqliteReadSession,
 };
 pub use writer::{RecoveryOutcome, SqliteStore, StorageWriter, TrackerRunRegistration};

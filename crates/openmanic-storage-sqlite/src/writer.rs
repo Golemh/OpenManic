@@ -938,7 +938,7 @@ fn load_schedule_series_rules(
         .collect()
 }
 
-fn load_schedule_series_rule(
+pub(crate) fn load_schedule_series_rule(
     transaction: &Transaction<'_>,
     series_id: i64,
 ) -> Result<openmanic_domain::ScheduleRule, StorageError> {
@@ -957,8 +957,9 @@ fn load_schedule_segments(
     let mut segment_statement = transaction
         .prepare(
             "SELECT effective_start_date, effective_end_date, weekday_mask,
-                    start_second_of_day, end_second_of_day, time_zone_id, label
+                    start_second_of_day, end_second_of_day, time_zone_id, label, category.public_id
                FROM schedule_rule_segment
+          LEFT JOIN category ON category.id = schedule_rule_segment.category_id
               WHERE series_id = ?1
               ORDER BY effective_start_date",
         )
@@ -973,6 +974,7 @@ fn load_schedule_segments(
                 row.get::<_, i64>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
+                row.get::<_, Option<Vec<u8>>>(7)?,
             ))
         })
         .map_err(|error| database_error(&error, "read stored schedule segments"))?
@@ -981,7 +983,7 @@ fn load_schedule_segments(
     let segments = raw_segments
         .into_iter()
         .map(
-            |(start, end, weekday_mask, start_second, end_second, zone, label)| {
+            |(start, end, weekday_mask, start_second, end_second, zone, label, category_id)| {
                 ScheduleSegment::try_new(
                     start,
                     end,
@@ -996,7 +998,14 @@ fn load_schedule_segments(
                     })?,
                     zone,
                     label,
-                    None,
+                    category_id
+                        .map(|value| {
+                            value.try_into().map_err(|_| StorageError::InvalidStoredValue {
+                                field: "schedule segment category ID",
+                            })
+                        })
+                        .transpose()?
+                        .map(CategoryId::from_bytes),
                 )
                 .map_err(|_| StorageError::InvalidStoredValue {
                     field: "stored schedule rule segment",
@@ -2187,7 +2196,11 @@ mod tests {
             store
                 .open_read_session()
                 .and_then(|mut reader| reader.snapshot())
-                .map(|snapshot| snapshot.revision()),
+                .map(|read| {
+                    assert_eq!(read.schedules().len(), 1);
+                    assert_eq!(read.schedules()[0].snapshot(), &snapshot);
+                    read.revision()
+                }),
             Ok(revision(2))
         );
     }
@@ -2558,6 +2571,12 @@ mod tests {
             exception,
             (20_005, 1, 300, 600, "America/Toronto".to_owned(), 4, 1, 2)
         );
+        let read = store
+            .open_read_session()
+            .and_then(|mut reader| reader.snapshot())
+            .expect("correlated schedule read should succeed");
+        assert_eq!(read.schedules().len(), 1);
+        assert_eq!(read.schedules()[0].snapshot(), &snapshot);
     }
 
     fn stored_schedule_segment(

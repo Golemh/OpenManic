@@ -2,15 +2,16 @@
 
 use std::path::Path;
 
-use openmanic_application::DataRevision;
+use openmanic_application::{DataRevision, EntityRevision, ScheduleId, ScheduleSnapshot};
 use openmanic_domain::{
     ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
     ApplicationName, Category, CategoryId, CategoryName, HalfOpenInterval, PowerTransitionEvidence,
-    TrackerRunId, UtcMicros,
+    OneTimeScheduleId, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 use rusqlite::Transaction;
 
 use crate::{SqliteReader, StorageError};
+use crate::writer::load_schedule_series_rule;
 
 /// One immutable activity interval returned by a storage snapshot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,6 +82,20 @@ pub struct CategoryRecord {
     category: Category,
 }
 
+/// One immutable schedule fact returned by a storage snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleRecord {
+    snapshot: ScheduleSnapshot,
+}
+
+impl ScheduleRecord {
+    /// Returns the immutable schedule, including its stable ID and optimistic revision.
+    #[must_use]
+    pub const fn snapshot(&self) -> &ScheduleSnapshot {
+        &self.snapshot
+    }
+}
+
 impl CategoryRecord {
     /// Returns the current domain category value.
     #[must_use]
@@ -96,6 +111,7 @@ pub struct ReadSnapshot {
     activities: Vec<ActivityRecord>,
     applications: Vec<ApplicationRecord>,
     categories: Vec<CategoryRecord>,
+    schedules: Vec<ScheduleRecord>,
 }
 
 impl ReadSnapshot {
@@ -121,6 +137,12 @@ impl ReadSnapshot {
     #[must_use]
     pub fn categories(&self) -> &[CategoryRecord] {
         &self.categories
+    }
+
+    /// Returns all personal schedules ordered by stable identity within their schedule form.
+    #[must_use]
+    pub fn schedules(&self) -> &[ScheduleRecord] {
+        &self.schedules
     }
 }
 
@@ -327,6 +349,75 @@ impl CategoryRepository {
     }
 }
 
+pub(crate) struct ScheduleRepository;
+
+impl ScheduleRepository {
+    fn read(transaction: &Transaction<'_>) -> Result<Vec<ScheduleRecord>, StorageError> {
+        let mut schedules = Self::read_one_time(transaction)?;
+        schedules.extend(Self::read_series(transaction)?);
+        Ok(schedules)
+    }
+
+    fn read_one_time(transaction: &Transaction<'_>) -> Result<Vec<ScheduleRecord>, StorageError> {
+        let mut statement = transaction
+            .prepare(
+                "SELECT one_time_schedule.public_id, one_time_schedule.label, category.public_id,
+                        one_time_schedule.start_utc_us, one_time_schedule.end_utc_us,
+                        one_time_schedule.created_zone_id, one_time_schedule.created_utc_us,
+                        one_time_schedule.revision
+                   FROM one_time_schedule
+              LEFT JOIN category ON category.id = one_time_schedule.category_id
+               ORDER BY one_time_schedule.public_id",
+            )
+            .map_err(|error| database_error(&error, "prepare one-time schedule snapshot"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?, row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?, row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?, row.get::<_, i64>(7)?,
+                ))
+            })
+            .map_err(|error| database_error(&error, "read one-time schedule snapshot"))?;
+        rows.map(|row| {
+            let (id, label, category_id, start, end, zone, created, revision) =
+                row.map_err(|error| database_error(&error, "read one-time schedule snapshot"))?;
+            let interval = HalfOpenInterval::try_new(UtcMicros::new(start), UtcMicros::new(end))
+                .map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule interval" })?;
+            let rule = ScheduleRule::one_time(
+                label,
+                category_id.map(|value| fixed_id(value, "schedule category ID")).transpose()?.map(CategoryId::from_bytes),
+                interval,
+                zone,
+            ).map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule rule" })?;
+            Ok(ScheduleRecord { snapshot: ScheduleSnapshot::try_new(
+                ScheduleId::OneTime(OneTimeScheduleId::from_bytes(fixed_id(id, "one-time schedule ID")?)),
+                rule,
+                EntityRevision::new(u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule revision" })?),
+                UtcMicros::new(created),
+            ).map_err(|_| StorageError::InvalidStoredValue { field: "one-time schedule snapshot" })? })
+        }).collect()
+    }
+
+    fn read_series(transaction: &Transaction<'_>) -> Result<Vec<ScheduleRecord>, StorageError> {
+        let mut statement = transaction
+            .prepare("SELECT id, public_id, created_utc_us, revision FROM schedule_series ORDER BY public_id")
+            .map_err(|error| database_error(&error, "prepare schedule-series snapshot"))?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?)))
+            .map_err(|error| database_error(&error, "read schedule-series snapshot"))?;
+        rows.map(|row| {
+            let (row_id, id, created, revision) = row.map_err(|error| database_error(&error, "read schedule-series snapshot"))?;
+            Ok(ScheduleRecord { snapshot: ScheduleSnapshot::try_new(
+                ScheduleId::Series(ScheduleSeriesId::from_bytes(fixed_id(id, "schedule series ID")?)),
+                load_schedule_series_rule(transaction, row_id)?,
+                EntityRevision::new(u64::try_from(revision).map_err(|_| StorageError::InvalidStoredValue { field: "schedule series revision" })?),
+                UtcMicros::new(created),
+            ).map_err(|_| StorageError::InvalidStoredValue { field: "schedule series snapshot" })? })
+        }).collect()
+    }
+}
+
 pub(crate) fn read_snapshot(transaction: &Transaction<'_>) -> Result<ReadSnapshot, StorageError> {
     let revision = transaction
         .query_row(
@@ -340,6 +431,7 @@ pub(crate) fn read_snapshot(transaction: &Transaction<'_>) -> Result<ReadSnapsho
         activities: ActivityRepository::read(transaction)?,
         applications: ApplicationRepository::read(transaction)?,
         categories: CategoryRepository::read(transaction)?,
+        schedules: ScheduleRepository::read(transaction)?,
     })
 }
 
