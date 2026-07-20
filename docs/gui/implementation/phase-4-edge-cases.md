@@ -25,6 +25,13 @@ conversion path. It must still make distinct source types and immutable loading,
 states visible. OM-412 owns schedule editing parity; Calendar schedule blocks do not create a
 second editor in OM-411.
 
+## Calendar schedule cache warm-up
+
+Calendar schedule editing reuses the accepted Timeline schedule snapshots and command construction.
+Until the shared schedule cache has been populated by Today, a Calendar-first visit can display
+schedule blocks but cannot yet open their edit/delete controls. The route must surface this as a
+recoverable loading limitation rather than inventing a separate schedule cache or editor.
+
 ## Saved-view document coverage
 
 The existing versioned `SavedViewDocument` validates and falls back deterministically, but its

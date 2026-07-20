@@ -19,14 +19,14 @@ use std::{
 
 use openmanic_application::{
     AppEvent, ApplicationError, ApplicationIconCache, ApplicationIconCacheLimits,
-    ApplicationIconLookup, ApplicationIconResult, ApplicationPort, CalendarDayContext,
-    CalendarDayProjector, CalendarDaySnapshot, CalendarProjectionSource, CalendarSourceFocus,
-    CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService, CommandEnvelope,
-    CommandId, CommandReceipt, DataRevision, EntityRevision, EventEnvelope, FocusCommand,
-    FocusKind, FocusNotificationError, FocusNotificationPort, FocusPersistence,
-    FocusPersistenceError, FocusService, FocusSnapshot, LaneCapacities, LaneReceive, LaneSubmit,
-    LatestMailbox, LatestMailboxReceiver, MailboxReceive, MutationOutcome, OrderingKey,
-    PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
+    ApplicationIconLookup, ApplicationIconResult, ApplicationPort, CalendarBlockId,
+    CalendarDayContext, CalendarDayProjector, CalendarDaySnapshot, CalendarProjectionSource,
+    CalendarSourceFocus, CatalogCommand, CatalogPersistence, CatalogPersistenceError,
+    CatalogService, CommandEnvelope, CommandId, CommandReceipt, DataRevision, EntityRevision,
+    EventEnvelope, FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort,
+    FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot, LaneCapacities,
+    LaneReceive, LaneSubmit, LatestMailbox, LatestMailboxReceiver, MailboxReceive, MutationOutcome,
+    OrderingKey, PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
     ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
@@ -56,9 +56,11 @@ use openmanic_storage_sqlite::{
 };
 use openmanic_ui_egui::timeline::{TimelineRenderAction, TimelineRenderer};
 use openmanic_ui_egui::{
-    ApplicationUsage, ApplicationUsageSnapshot, CommandDispatcher, InboundMessage, MutationStatus,
-    OpenManicApp, TodayController, TodayTrackingRequest, TrackingControlAction, UiAction,
-    UiController, UiModel, render_distribution_snapshot, render_usage_snapshot,
+    ApplicationUsage, ApplicationUsageSnapshot, CalendarAction, CalendarBlockKind,
+    CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher, InboundMessage,
+    MutationStatus, OpenManicApp, PresentableData, TodayController, TodayTrackingRequest,
+    TrackingControlAction, UiAction, UiController, UiModel, render_distribution_snapshot,
+    render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
@@ -965,6 +967,7 @@ fn persistence_failure(reason: PortFailureReason) -> TrackingPersistenceSubmit {
 struct RuntimeResources {
     lanes: Arc<RuntimeLanes<WriterWork>>,
     projection_requests: LatestMailbox<ProjectionRequest<TimelineContext>>,
+    calendar_projection_requests: LatestMailbox<ProjectionRequest<CalendarDayContext>>,
     ui_inbox: Arc<UiInbox>,
     writer_control: SyncSender<WriterControl>,
     writer_handle: Option<JoinHandle<()>>,
@@ -1005,8 +1008,14 @@ impl RuntimeResources {
     )]
     fn start(
         store: SqliteStore,
-    ) -> Result<(Self, LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>), CompositionError>
-    {
+    ) -> Result<
+        (
+            Self,
+            LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
+            LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
+        ),
+        CompositionError,
+    > {
         let capacities = LaneCapacities::try_new(
             WRITER_CRITICAL_CAPACITY,
             WRITER_NORMAL_CAPACITY,
@@ -1017,6 +1026,8 @@ impl RuntimeResources {
         let lanes = Arc::new(lanes);
         let (projection_requests, projection_receiver) = latest_mailbox();
         let (snapshots, snapshot_receiver) = latest_mailbox();
+        let (calendar_projection_requests, calendar_projection_receiver) = latest_mailbox();
+        let (calendar_snapshots, calendar_snapshot_receiver) = latest_mailbox();
         let (writer_control, control_receiver) = mpsc::sync_channel(2);
         let ui_inbox = Arc::new(UiInbox::new(UI_EVENT_CAPACITY));
         let accepting = Arc::new(AtomicBool::new(true));
@@ -1038,6 +1049,8 @@ impl RuntimeResources {
                     control_receiver,
                     projection_receiver,
                     snapshots,
+                    calendar_projection_receiver,
+                    calendar_snapshots,
                     worker_ui_inbox,
                     worker_focus_notification_error,
                     worker_focus_completion_pending,
@@ -1051,6 +1064,7 @@ impl RuntimeResources {
             Self {
                 lanes,
                 projection_requests,
+                calendar_projection_requests,
                 ui_inbox,
                 writer_control,
                 writer_handle: Some(writer_handle),
@@ -1096,6 +1110,7 @@ impl RuntimeResources {
                 activation_handle: None,
             },
             snapshot_receiver,
+            calendar_snapshot_receiver,
         ))
     }
 
@@ -1538,6 +1553,8 @@ fn run_writer_worker(
     control: Receiver<WriterControl>,
     projection_requests: LatestMailboxReceiver<ProjectionRequest<TimelineContext>>,
     snapshots: LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
+    calendar_projection_requests: LatestMailboxReceiver<ProjectionRequest<CalendarDayContext>>,
+    calendar_snapshots: LatestMailbox<SnapshotEnvelope<CalendarDaySnapshot>>,
     ui_inbox: Arc<UiInbox>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
     focus_completion_pending: Arc<AtomicBool>,
@@ -1553,6 +1570,7 @@ fn run_writer_worker(
     );
     reconcile_focus_snapshot(&mut services, &focus_snapshot);
     let mut current_projection = None;
+    let mut current_calendar_projection = None;
     let mut last_focus_reconciliation = Instant::now();
     let mut running = true;
 
@@ -1561,6 +1579,12 @@ fn run_writer_worker(
             current_projection = Some(request);
             if let Some(request) = current_projection.as_ref() {
                 publish_today_snapshot(&store, request, &snapshots);
+            }
+        }
+        while let MailboxReceive::Latest(request) = calendar_projection_requests.try_receive() {
+            current_calendar_projection = Some(request);
+            if let Some(request) = current_calendar_projection.as_ref() {
+                publish_calendar_snapshot(&store, request, &calendar_snapshots);
             }
         }
 
@@ -1600,15 +1624,20 @@ fn run_writer_worker(
         }
 
         match lanes.try_receive() {
-            LaneReceive::Work { work, .. } => process_writer_work(
-                work,
-                &mut services,
-                &store,
-                &mut current_projection,
-                &snapshots,
-                &ui_inbox,
-                &focus_snapshot,
-            ),
+            LaneReceive::Work { work, .. } => {
+                process_writer_work(
+                    work,
+                    &mut services,
+                    &store,
+                    &mut current_projection,
+                    &snapshots,
+                    &ui_inbox,
+                    &focus_snapshot,
+                );
+                if let Some(request) = current_calendar_projection.as_ref() {
+                    publish_calendar_snapshot(&store, request, &calendar_snapshots);
+                }
+            }
             LaneReceive::Empty => thread::park_timeout(WORKER_IDLE_INTERVAL),
             LaneReceive::Closed => running = false,
         }
@@ -2440,6 +2469,7 @@ pub struct VerticalSlice {
     bootstrap: BootstrapState,
     ui: UiController<TrackingCommand, TodaySnapshot>,
     snapshots: LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
+    calendar_snapshots: LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
     runtime: RuntimeResources,
     shutdown: ShutdownCoordinator,
     #[cfg(windows)]
@@ -2450,9 +2480,13 @@ struct VerticalSliceApp {
     bootstrap: BootstrapState,
     app: OpenManicApp<TrackingCommand, TodaySnapshot>,
     snapshots: LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
+    calendar_snapshots: LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
     runtime: RuntimeResources,
     shutdown: ShutdownCoordinator,
     today: TodayController,
+    calendar: CalendarController,
+    calendar_data: PresentableData<CalendarDaySnapshot>,
+    calendar_projection_sequence: u64,
     timeline: TimelineRenderer,
     close_to_tray: WindowsTrayController,
     projection_sequence: u64,
@@ -2512,7 +2546,7 @@ impl VerticalSlice {
             UI_OUTBOUND_CAPACITY,
         )
         .map_err(|_| CompositionError::Runtime)?;
-        let (mut runtime, snapshots) = RuntimeResources::start(store)?;
+        let (mut runtime, snapshots, calendar_snapshots) = RuntimeResources::start(store)?;
         #[cfg(windows)]
         runtime.start_windows(&instance_owner)?;
         let Some(initial_range) = day_range(0) else {
@@ -2521,10 +2555,14 @@ impl VerticalSlice {
         let request = projection_request(1, initial_range);
         ui.begin_projection(&request);
         let _ = runtime.projection_requests.publish(request);
+        let _ = runtime
+            .calendar_projection_requests
+            .publish(calendar_projection_request(1, initial_range));
         Ok(Self {
             bootstrap,
             ui,
             snapshots,
+            calendar_snapshots,
             runtime,
             shutdown: ShutdownCoordinator::new(),
             #[cfg(windows)]
@@ -2550,9 +2588,13 @@ impl VerticalSlice {
             bootstrap: self.bootstrap,
             app: OpenManicApp::new(self.ui),
             snapshots: self.snapshots,
+            calendar_snapshots: self.calendar_snapshots,
             runtime: self.runtime,
             shutdown: self.shutdown,
             today: TodayController::new(),
+            calendar: CalendarController::default(),
+            calendar_data: PresentableData::InitialLoading,
+            calendar_projection_sequence: 0,
             timeline: TimelineRenderer::new(),
             close_to_tray: WindowsTrayController::new(),
             projection_sequence: 1,
@@ -2620,6 +2662,9 @@ impl VerticalSliceApp {
                 .controller_mut()
                 .try_enqueue_inbound(InboundMessage::Snapshot(snapshot));
         }
+        if let MailboxReceive::Latest(snapshot) = self.calendar_snapshots.try_receive() {
+            self.calendar_data = PresentableData::Ready(snapshot.shared_value());
+        }
     }
 
     fn publish_projection(&mut self, range: HalfOpenInterval) {
@@ -2644,6 +2689,166 @@ impl VerticalSliceApp {
             return;
         };
         self.publish_projection(range);
+    }
+
+    fn publish_calendar_projection(&mut self, day_offset: i32) {
+        let Some(day_range) = day_range(day_offset) else {
+            return;
+        };
+        self.calendar_projection_sequence = self.calendar_projection_sequence.saturating_add(1);
+        let sequence = self.calendar_projection_sequence;
+        let request = calendar_projection_request(sequence, day_range);
+        self.calendar_data = PresentableData::InitialLoading;
+        let _ = self.runtime.calendar_projection_requests.publish(request);
+    }
+
+    fn render_calendar_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
+        if self.app.controller().model().route() != openmanic_ui_egui::Route::Calendar {
+            return;
+        }
+        ui.add_space(16.0);
+        ui.heading("Calendar");
+        ui.horizontal(|ui| {
+            if ui.button("Previous day").clicked() {
+                self.apply_calendar_action(CalendarAction::PreviousDay);
+            }
+            if ui
+                .add_enabled(
+                    self.calendar
+                        .view_model(&self.calendar_data)
+                        .next_day_enabled(),
+                    eframe::egui::Button::new("Next day"),
+                )
+                .clicked()
+            {
+                self.apply_calendar_action(CalendarAction::NextDay);
+            }
+            if ui.button("Today").clicked() {
+                self.apply_calendar_action(CalendarAction::ReturnToToday);
+            }
+        });
+        let model = self.calendar.view_model(&self.calendar_data);
+        match model.state() {
+            CalendarDataState::Loading => {
+                ui.label("Loading Calendar…");
+            }
+            CalendarDataState::Empty(_) => {
+                ui.label("No Calendar blocks for this day.");
+            }
+            CalendarDataState::Error(error) => {
+                ui.label(error.message());
+            }
+            CalendarDataState::Ready { notice } => {
+                if let Some(notice) = notice {
+                    ui.label(notice);
+                }
+            }
+        };
+        for presented in model.blocks() {
+            ui.horizontal(|ui| {
+                let block = presented.block();
+                if ui
+                    .selectable_label(
+                        presented.selected(),
+                        format!(
+                            "{:?}: {}–{} UTC",
+                            presented.kind(),
+                            block.visual_range().start().get(),
+                            block.visual_range().end().get()
+                        ),
+                    )
+                    .clicked()
+                {
+                    self.apply_calendar_action(CalendarAction::SelectBlock { id: block.id() });
+                }
+                if presented.kind() == CalendarBlockKind::Schedule {
+                    self.render_calendar_schedule_controls(ui, block.id());
+                }
+            });
+        }
+        if let Some(details) = model.selected_details() {
+            ui.label(format!(
+                "Selected: {:?}, {}–{} UTC",
+                details.kind(),
+                details.canonical_range().start().get(),
+                details.canonical_range().end().get()
+            ));
+        }
+        self.render_schedule_editor(ui);
+        self.render_schedule_delete_confirmation(ui);
+        self.render_schedule_status(ui);
+    }
+
+    fn apply_calendar_action(&mut self, action: CalendarAction) {
+        let snapshot = self.calendar_data.visible_value();
+        if let Some(effect) = self.calendar.apply(action, snapshot.map(AsRef::as_ref)) {
+            match effect {
+                CalendarEffect::RequestDay { day_offset } => {
+                    self.publish_calendar_projection(day_offset)
+                }
+                CalendarEffect::NavigateToTimeline(_) => self
+                    .app
+                    .controller_mut()
+                    .reduce_local(UiAction::Navigate(openmanic_ui_egui::Route::Today)),
+            }
+        }
+    }
+
+    fn render_calendar_schedule_controls(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        block_id: CalendarBlockId,
+    ) {
+        let CalendarBlockId::Schedule(occurrence_id) = block_id else {
+            return;
+        };
+        let Some(today) = self.app.controller().model().data().visible_value() else {
+            return;
+        };
+        let (schedule_id, anchor_date) = match occurrence_id {
+            ScheduleOccurrenceId::OneTime(id) => (id, None),
+            ScheduleOccurrenceId::Recurring {
+                schedule_id,
+                anchor_date,
+            } => (schedule_id, Some(anchor_date)),
+        };
+        let Some(schedule) = today
+            .schedules()
+            .iter()
+            .find(|snapshot| snapshot.id() == schedule_id)
+            .cloned()
+        else {
+            return;
+        };
+        if ui.button("Edit…").clicked() {
+            self.schedule_draft = match (schedule.id(), anchor_date) {
+                (ScheduleId::Series(series_id), Some(anchor_date)) => self
+                    .calendar_data
+                    .visible_value()
+                    .and_then(|calendar| {
+                        calendar
+                            .schedule_blocks()
+                            .iter()
+                            .find(|block| block.id() == block_id)
+                    })
+                    .and_then(|block| {
+                        ScheduleDraft::from_recurring(
+                            schedule.clone(),
+                            series_id,
+                            anchor_date,
+                            block.canonical_range(),
+                        )
+                    }),
+                _ => ScheduleDraft::from_existing(schedule.clone()),
+            };
+        }
+        if ui.button("Delete…").clicked() {
+            self.schedule_delete_request = Some(ScheduleDeleteRequest {
+                snapshot: schedule,
+                anchor_date,
+                scope: ScheduleEditScope::OnlyThisDate,
+            });
+        }
     }
 
     fn render_today_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
@@ -3731,6 +3936,7 @@ impl eframe::App for VerticalSliceApp {
         eframe::App::ui(&mut self.app, ui, frame);
         self.render_today_dashboard(ui);
         self.render_categories_dashboard(ui);
+        self.render_calendar_dashboard(ui);
         self.publish_day_projection();
         self.dispatch_ui_commands();
         let context = ui.ctx().clone();
@@ -3836,6 +4042,20 @@ fn projection_request(
         context_key,
         DataRevision::new(0),
         TimelineContext::new(context_key, range),
+    )
+}
+
+fn calendar_projection_request(
+    sequence: u64,
+    range: HalfOpenInterval,
+) -> ProjectionRequest<CalendarDayContext> {
+    let context_key = ProjectionContextKey::new(sequence);
+    ProjectionRequest::new(
+        openmanic_application::RequestId::new(sequence),
+        ProjectionSlot::new(2),
+        context_key,
+        DataRevision::new(0),
+        CalendarDayContext::new(context_key, range),
     )
 }
 
