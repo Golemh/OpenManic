@@ -32,7 +32,7 @@ use openmanic_application::{
     RuntimeSupervisor, RuntimeWorker, ScheduleCommand, ScheduleId, ScheduleOccurrenceId,
     SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
     SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep, SnapshotEnvelope, ThreadRoot,
-    SettingsSnapshot,
+    SettingsPersistence, SettingsSnapshot,
     TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
     TimelineSnapshot, TimelineSourceActivity, TitleObservationResult, TitleStabilizer,
     TrackingCommand, TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
@@ -192,6 +192,10 @@ enum WriterWork {
         theme_mode: u8,
         observed_at_utc: UtcMicros,
     },
+    Settings {
+        snapshot: SettingsSnapshot,
+        expected_revision: Option<EntityRevision>,
+    },
     WindowTitle(WindowTitleObservation),
 }
 
@@ -205,6 +209,7 @@ impl WriterWork {
             | Self::Focus(_)
             | Self::Layout { .. }
             | Self::Theme { .. }
+            | Self::Settings { .. }
             | Self::WindowTitle(_) => {
                 unreachable!("typed commands use their own application service")
             }
@@ -346,11 +351,14 @@ struct RuntimeEvidenceSink {
     lanes: Arc<RuntimeLanes<WriterWork>>,
     identifiers: Arc<CommandIdentifiers>,
     accepting: Arc<AtomicBool>,
+    tracking_permitted: Arc<AtomicBool>,
 }
 
 impl TrackingEvidenceSink for RuntimeEvidenceSink {
     fn try_publish(&self, evidence: TrackingEvidence) -> EvidencePublishResult {
-        if !self.accepting.load(Ordering::Acquire) {
+        if !self.accepting.load(Ordering::Acquire)
+            || !self.tracking_permitted.load(Ordering::Acquire)
+        {
             return EvidencePublishResult::Closed;
         }
         let command = self
@@ -997,6 +1005,7 @@ struct RuntimeResources {
     layout_snapshot: Arc<Mutex<LayoutSnapshot>>,
     theme_mode: Arc<Mutex<u8>>,
     settings_snapshot: Arc<Mutex<SettingsSnapshot>>,
+    tracking_permitted: Arc<AtomicBool>,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
     supervisor: RuntimeSupervisor,
@@ -1074,12 +1083,19 @@ impl RuntimeResources {
         let initial_theme_mode = initial_settings.theme_mode().code();
         let theme_mode = Arc::new(Mutex::new(initial_theme_mode));
         let settings_snapshot = Arc::new(Mutex::new(initial_settings));
+        let tracking_permitted = Arc::new(AtomicBool::new(
+            settings_snapshot.lock().is_ok_and(|settings| {
+                settings.consent_revision() > 0 && settings.start_tracking_automatically()
+            }),
+        ));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
         let worker_focus_completion_pending = Arc::clone(&focus_completion_pending);
         let worker_focus_snapshot = Arc::clone(&focus_snapshot);
         let worker_layout_snapshot = Arc::clone(&layout_snapshot);
         let worker_theme_mode = Arc::clone(&theme_mode);
+        let worker_settings_snapshot = Arc::clone(&settings_snapshot);
+        let worker_tracking_permitted = Arc::clone(&tracking_permitted);
         let writer_handle = thread::Builder::new()
             .name(ThreadRoot::new(RuntimeWorker::Writer).name().to_owned())
             .spawn(move || {
@@ -1098,6 +1114,8 @@ impl RuntimeResources {
                     worker_focus_snapshot,
                     worker_layout_snapshot,
                     worker_theme_mode,
+                    worker_settings_snapshot,
+                    worker_tracking_permitted,
                 );
             })
             .map_err(|_| CompositionError::Runtime)?;
@@ -1120,6 +1138,7 @@ impl RuntimeResources {
                 layout_snapshot,
                 theme_mode,
                 settings_snapshot,
+                tracking_permitted,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
                 supervisor: RuntimeSupervisor::new([
@@ -1164,6 +1183,7 @@ impl RuntimeResources {
             lanes: self.lanes.clone(),
             identifiers: Arc::clone(&self.identifiers),
             accepting: Arc::clone(&self.accepting),
+            tracking_permitted: Arc::clone(&self.tracking_permitted),
         }
     }
 
@@ -1277,6 +1297,24 @@ impl RuntimeResources {
                     WriterWork::Theme {
                         theme_mode,
                         observed_at_utc,
+                    },
+                ),
+                LaneSubmit::Enqueued
+            )
+    }
+
+    fn try_submit_settings(
+        &self,
+        snapshot: SettingsSnapshot,
+        expected_revision: Option<EntityRevision>,
+    ) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && matches!(
+                self.lanes.try_submit(
+                    WorkLane::Normal,
+                    WriterWork::Settings {
+                        snapshot,
+                        expected_revision,
                     },
                 ),
                 LaneSubmit::Enqueued
@@ -1645,6 +1683,8 @@ fn run_writer_worker(
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
     layout_snapshot: Arc<Mutex<LayoutSnapshot>>,
     theme_mode: Arc<Mutex<u8>>,
+    settings_snapshot: Arc<Mutex<SettingsSnapshot>>,
+    tracking_permitted: Arc<AtomicBool>,
 ) {
     let store = Arc::new(Mutex::new(store));
     let mut services = writer_services(
@@ -1695,6 +1735,8 @@ fn run_writer_worker(
                     &focus_snapshot,
                     &layout_snapshot,
                     &theme_mode,
+                    &settings_snapshot,
+                    &tracking_permitted,
                 );
                 let event = services.tracking.handle(system_checkpoint());
                 let persisted = event.committed_data_revision().is_some()
@@ -1722,6 +1764,8 @@ fn run_writer_worker(
                     &focus_snapshot,
                     &layout_snapshot,
                     &theme_mode,
+                    &settings_snapshot,
+                    &tracking_permitted,
                 );
                 if let Some(request) = current_calendar_projection.as_ref() {
                     publish_calendar_snapshot(&store, request, &calendar_snapshots);
@@ -1792,6 +1836,8 @@ fn drain_writer_lanes(
     focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
     layout_snapshot: &Arc<Mutex<LayoutSnapshot>>,
     theme_mode: &Arc<Mutex<u8>>,
+    settings_snapshot: &Arc<Mutex<SettingsSnapshot>>,
+    tracking_permitted: &Arc<AtomicBool>,
 ) {
     while let LaneReceive::Work { work, .. } = lanes.try_receive() {
         process_writer_work(
@@ -1804,6 +1850,8 @@ fn drain_writer_lanes(
             focus_snapshot,
             layout_snapshot,
             theme_mode,
+            settings_snapshot,
+            tracking_permitted,
         );
     }
 }
@@ -1826,7 +1874,31 @@ fn process_writer_work(
     focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
     layout_snapshot: &Arc<Mutex<LayoutSnapshot>>,
     theme_mode: &Arc<Mutex<u8>>,
+    settings_snapshot: &Arc<Mutex<SettingsSnapshot>>,
+    tracking_permitted: &Arc<AtomicBool>,
 ) {
+    if let WriterWork::Settings {
+        snapshot,
+        expected_revision,
+    } = work
+    {
+        if let Ok(mut writer_store) = store.lock()
+            && SettingsPersistence::replace_settings(
+                writer_store.writer(),
+                &snapshot,
+                expected_revision,
+            )
+            .is_ok()
+            && let Ok(mut current) = settings_snapshot.lock()
+        {
+            tracking_permitted.store(
+                snapshot.consent_revision() > 0 && snapshot.start_tracking_automatically(),
+                Ordering::Release,
+            );
+            *current = snapshot;
+        }
+        return;
+    }
     if let WriterWork::Layout {
         document,
         expected_revision,
@@ -2655,6 +2727,7 @@ struct VerticalSliceApp {
     calendar_projection_sequence: u64,
     timeline: TimelineRenderer,
     close_to_tray: WindowsTrayController,
+    onboarding_submission_pending: bool,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
     create_schedule_mode: bool,
@@ -2785,6 +2858,7 @@ impl VerticalSlice {
             calendar_projection_sequence: 0,
             timeline: TimelineRenderer::new(),
             close_to_tray,
+            onboarding_submission_pending: false,
             projection_sequence: 1,
             requested_range: None,
             create_schedule_mode: false,
@@ -3331,6 +3405,50 @@ impl VerticalSliceApp {
                 }
             }
         });
+    }
+
+    fn render_onboarding(&mut self, ui: &mut eframe::egui::Ui) {
+        let settings = self
+            .runtime
+            .settings_snapshot
+            .lock()
+            .ok()
+            .map(|settings| settings.clone())
+            .unwrap_or_else(SettingsSnapshot::safe_default);
+        if settings.consent_revision() > 0 {
+            return;
+        }
+        ui.add_space(16.0);
+        ui.heading("Welcome to OpenManic");
+        ui.label("Your activity data stays on this device. No account or network setup is required.");
+        ui.label("OpenManic records the foreground application after you continue. Window titles remain off by default.");
+        ui.label("You can pause tracking or change privacy, startup, and data settings at any time.");
+        if self.onboarding_submission_pending {
+            ui.label("Saving your local tracking choice...");
+            return;
+        }
+        if ui.button("Accept defaults and start tracking").clicked() {
+            let accepted = SettingsSnapshot::new(
+                1,
+                settings.start_tracking_automatically(),
+                settings.start_at_login(),
+                settings.close_to_tray(),
+                settings.idle_threshold_seconds(),
+                settings.idle_policy_code(),
+                settings.collect_window_titles(),
+                settings.time_zone_mode(),
+                settings.manual_time_zone_id().map(str::to_owned),
+                settings.theme_mode(),
+                settings.density_code(),
+                settings.notifications_enabled(),
+                settings.focus_sounds_enabled(),
+                settings.tray_explanation_acknowledged(),
+                settings.revision(),
+            );
+            if self.runtime.try_submit_settings(accepted, None) {
+                self.onboarding_submission_pending = true;
+            }
+        }
     }
 
     fn reconcile_persisted_appearance(&mut self, context: &eframe::egui::Context) {
@@ -4466,6 +4584,7 @@ impl eframe::App for VerticalSliceApp {
                 .reduce_local(UiAction::Navigate(route_before_shell));
         }
         self.render_today_dashboard(ui);
+        self.render_onboarding(ui);
         self.render_categories_dashboard(ui);
         self.render_calendar_dashboard(ui);
         self.render_settings_dashboard(ui);
