@@ -213,6 +213,46 @@ pub enum ApplicationIconLookup<'a> {
     Fallback,
 }
 
+/// One completed background icon lookup, safe to hand to a renderer-side cache.
+///
+/// The result deliberately contains no executable path, package identity, native handle, or
+/// platform error. A missing icon is an ordinary deterministic-fallback outcome rather than an
+/// error the UI must interpret.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationIconResult {
+    /// Background work decoded one icon that may be inserted into the bounded cache.
+    Decoded {
+        /// Stable key for this decoded icon content.
+        key: ApplicationIconKey,
+        /// Valid, tightly packed RGBA pixels.
+        icon: ApplicationIcon,
+    },
+    /// No usable icon was available; render the deterministic fallback.
+    Fallback {
+        /// Application whose icon request completed without a usable decoded image.
+        application_id: ApplicationId,
+    },
+}
+
+impl ApplicationIconResult {
+    /// Returns the application whose background metadata request completed.
+    #[must_use]
+    pub const fn application_id(&self) -> ApplicationId {
+        match self {
+            Self::Decoded { key, .. } => key.application_id(),
+            Self::Fallback { application_id } => *application_id,
+        }
+    }
+
+    /// Inserts a decoded icon into the bounded cache, or leaves fallback state unchanged.
+    pub fn apply_to(self, cache: &mut ApplicationIconCache) -> Option<ApplicationIconCacheInsert> {
+        match self {
+            Self::Decoded { key, icon } => Some(cache.insert(key, icon)),
+            Self::Fallback { .. } => None,
+        }
+    }
+}
+
 /// A bounded, rebuildable least-recently-used cache populated only by background metadata work.
 #[derive(Debug)]
 pub struct ApplicationIconCache {
@@ -318,7 +358,7 @@ mod tests {
     use super::{
         ApplicationIcon, ApplicationIconCache, ApplicationIconCacheInsert,
         ApplicationIconCacheLimits, ApplicationIconDigest, ApplicationIconKey,
-        ApplicationIconLookup,
+        ApplicationIconLookup, ApplicationIconResult,
     };
 
     fn key(application_byte: u8, digest_byte: u8) -> ApplicationIconKey {
@@ -380,5 +420,24 @@ mod tests {
         ));
         assert_eq!(cache.diagnostics().oversized_rejections(), 1);
         assert!(ApplicationIcon::try_new(1, 1, vec![0; 3]).is_err());
+    }
+
+    #[test]
+    fn completed_background_result_exposes_only_safe_cache_data() {
+        let key = key(1, 2);
+        let mut cache = ApplicationIconCache::new(
+            ApplicationIconCacheLimits::try_new(1, 4).expect("fixture limits are valid"),
+        );
+        let decoded = ApplicationIconResult::Decoded { key, icon: icon(3) };
+        assert_eq!(decoded.application_id(), key.application_id());
+        assert_eq!(
+            decoded.apply_to(&mut cache),
+            Some(ApplicationIconCacheInsert::Cached { evicted_entries: 0 })
+        );
+        let fallback = ApplicationIconResult::Fallback {
+            application_id: key.application_id(),
+        };
+        assert_eq!(fallback.application_id(), key.application_id());
+        assert_eq!(fallback.apply_to(&mut cache), None);
     }
 }

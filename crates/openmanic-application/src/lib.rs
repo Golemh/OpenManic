@@ -29,6 +29,7 @@ pub use application_metadata::{
     ApplicationIcon, ApplicationIconCache, ApplicationIconCacheDiagnostics,
     ApplicationIconCacheInsert, ApplicationIconCacheLimitError, ApplicationIconCacheLimits,
     ApplicationIconDigest, ApplicationIconError, ApplicationIconKey, ApplicationIconLookup,
+    ApplicationIconResult,
 };
 pub use catalog::{
     CatalogApplicationSnapshot, CatalogAssignmentFilter, CatalogCategorySnapshot, CatalogCommand,
