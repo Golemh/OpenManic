@@ -23,8 +23,9 @@ use openmanic_application::{
     LatestMailboxReceiver, MailboxReceive, OrderingKey, PortFailureReason, ProjectionContextKey,
     ProjectionRequest, ProjectionSlot, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
     RuntimeWorker, SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
-    EntityRevision, MutationOutcome, ScheduleCommand, ScheduleId, SchedulePersistence,
-    SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
+    EntityRevision, FocusCommand, FocusNotificationError, FocusNotificationPort, FocusPersistence,
+    FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome, ScheduleCommand,
+    ScheduleId, SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
     TrackingEvidence, TrackingPersistenceIntent, TrackingPersistencePort,
@@ -32,7 +33,7 @@ use openmanic_application::{
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval,
-    OneTimeScheduleId, ScheduleRule, TrackerRunId, UtcMicros,
+    FocusSessionId, OneTimeScheduleId, ScheduleRule, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -145,6 +146,7 @@ enum WriterWork {
     System(CommandEnvelope<TrackingCommand>),
     Ui(CommandEnvelope<TrackingCommand>),
     Schedule(CommandEnvelope<ScheduleCommand>),
+    Focus(CommandEnvelope<FocusCommand>),
 }
 
 impl WriterWork {
@@ -152,7 +154,9 @@ impl WriterWork {
         match self {
             Self::System(command) | Self::CatalogForeground { command, .. } => (command, false),
             Self::Ui(command) => (command, true),
-            Self::Schedule(_) => unreachable!("schedule commands use the schedule service"),
+            Self::Schedule(_) | Self::Focus(_) => {
+                unreachable!("typed commands use their own application service")
+            }
         }
     }
 }
@@ -161,7 +165,17 @@ impl WriterWork {
 struct WriterServices {
     tracking: TrackingService<WriterPersistence>,
     schedules: ScheduleService<WriterPersistence>,
+    focus: FocusService<WriterPersistence, UnavailableFocusNotifications>,
     ui_event_sequence: u64,
+}
+
+/// Completion notifications are deliberately honest until the Windows notification adapter lands.
+struct UnavailableFocusNotifications;
+
+impl FocusNotificationPort for UnavailableFocusNotifications {
+    fn notify_completed(&mut self, _: &FocusSnapshot) -> Result<(), FocusNotificationError> {
+        Err(FocusNotificationError::Unavailable)
+    }
 }
 
 /// Exclusive-worker control which is deliberately separate from ordinary ingress.
@@ -352,6 +366,50 @@ impl CommandIdentifiers {
         ))
     }
 
+    fn focus_draft(&self) -> Option<(FocusSessionId, CommandEnvelope<FocusCommand>)> {
+        const FOCUS_DURATION_US: i64 = 25 * 60 * 1_000_000;
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        let mut id_bytes = [0_u8; 16];
+        id_bytes[..8].copy_from_slice(&submitted_at_utc.get().to_be_bytes());
+        id_bytes[8..].copy_from_slice(&command_id.get().to_be_bytes());
+        let session_id = FocusSessionId::from_bytes(id_bytes);
+        let snapshot = FocusSnapshot::try_new(
+            session_id,
+            FocusKind::Focus,
+            Some("Focus session".to_owned()),
+            FOCUS_DURATION_US,
+            None,
+            EntityRevision::new(0),
+        )
+        .ok()?;
+        Some((
+            session_id,
+            CommandEnvelope::new(
+                SchemaRevision::new(1),
+                command_id,
+                ordering_key,
+                None,
+                submitted_at_utc,
+                FocusCommand::CreateDraft(snapshot),
+            ),
+        ))
+    }
+
+    fn focus_start(&self, session_id: FocusSessionId) -> CommandEnvelope<FocusCommand> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            None,
+            submitted_at_utc,
+            FocusCommand::Start {
+                session_id,
+                started_at: submitted_at_utc,
+            },
+        )
+    }
+
     fn next_metadata(&self) -> (CommandId, OrderingKey, UtcMicros) {
         let value = self.next.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         (
@@ -521,6 +579,45 @@ impl SchedulePersistence for WriterPersistence {
     }
 }
 
+impl FocusPersistence for WriterPersistence {
+    fn load_focus(
+        &mut self,
+        session_id: FocusSessionId,
+    ) -> Result<Option<FocusSnapshot>, FocusPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(FocusPersistenceError::Failed);
+        };
+        store.writer().load_focus(session_id)
+    }
+
+    fn load_active_focus(&mut self) -> Result<Option<FocusSnapshot>, FocusPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(FocusPersistenceError::Failed);
+        };
+        store.writer().load_active_focus()
+    }
+
+    fn create_focus(
+        &mut self,
+        snapshot: &FocusSnapshot,
+    ) -> Result<DataRevision, FocusPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(FocusPersistenceError::Failed);
+        };
+        store.writer().create_focus(snapshot)
+    }
+
+    fn replace_focus(
+        &mut self,
+        snapshot: &FocusSnapshot,
+    ) -> Result<(DataRevision, EntityRevision), FocusPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(FocusPersistenceError::Failed);
+        };
+        store.writer().replace_focus(snapshot)
+    }
+}
+
 fn register_tracker_run_and_persist(
     store: &mut SqliteStore,
     registration: &TrackerRunRegistration,
@@ -656,6 +753,25 @@ impl RuntimeResources {
         if matches!(
             self.lanes
                 .try_submit(WorkLane::Normal, WriterWork::Schedule(command)),
+            LaneSubmit::Enqueued
+        ) {
+            return Some(command_id);
+        }
+        self.ui_inbox.remove_pending(command_id);
+        None
+    }
+
+    fn try_submit_focus(&self, command: CommandEnvelope<FocusCommand>) -> Option<CommandId> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return None;
+        }
+        let command_id = command.command_id();
+        if !self.ui_inbox.try_push(UiIngress::Pending(command_id)) {
+            return None;
+        }
+        if matches!(
+            self.lanes
+                .try_submit(WorkLane::Normal, WriterWork::Focus(command)),
             LaneSubmit::Enqueued
         ) {
             return Some(command_id);
@@ -875,9 +991,15 @@ fn run_writer_worker(
         first_write: false,
     };
     let schedules = ScheduleService::new(schedule_persistence);
+    let focus_persistence = WriterPersistence {
+        store: Arc::clone(&store),
+        first_write: false,
+    };
+    let focus = FocusService::new(focus_persistence, UnavailableFocusNotifications);
     let mut services = WriterServices {
         tracking,
         schedules,
+        focus,
         ui_event_sequence: 0,
     };
     let mut current_projection = None;
@@ -968,6 +1090,17 @@ fn process_writer_work(
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
 ) {
+    if let WriterWork::Focus(command) = work {
+        process_focus_command(
+            &command,
+            services,
+            store,
+            current_projection,
+            snapshots,
+            ui_inbox,
+        );
+        return;
+    }
     if let WriterWork::Schedule(command) = work {
         process_schedule_command(
             &command,
@@ -1083,6 +1216,36 @@ fn process_schedule_command(
     ui_inbox: &UiInbox,
 ) {
     let mutation = services.schedules.handle(command);
+    let outcome = mutation.outcome().clone();
+    let committed_revision = match &outcome {
+        MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
+        MutationOutcome::Rejected(_) => None,
+    };
+    let event = EventEnvelope::new(
+        command.schema_revision(),
+        next_ui_event_sequence(&mut services.ui_event_sequence),
+        Some(command.command_id()),
+        committed_revision,
+        command.submitted_at_utc(),
+        AppEvent::Mutation(outcome),
+    );
+    let _ = ui_inbox.try_push(UiIngress::Event(event));
+    if committed_revision.is_some()
+        && let Some(request) = current_projection.as_ref()
+    {
+        publish_today_snapshot(store, request, snapshots);
+    }
+}
+
+fn process_focus_command(
+    command: &CommandEnvelope<FocusCommand>,
+    services: &mut WriterServices,
+    store: &Arc<Mutex<SqliteStore>>,
+    current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
+    snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
+    ui_inbox: &UiInbox,
+) {
+    let mutation = services.focus.handle(command);
     let outcome = mutation.outcome().clone();
     let committed_revision = match &outcome {
         MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
@@ -1327,6 +1490,14 @@ const fn schedule_status_label(status: &MutationStatus) -> &'static str {
     }
 }
 
+const fn focus_status_label(status: &MutationStatus) -> &'static str {
+    match status {
+        MutationStatus::Pending => "Focus request pending…",
+        MutationStatus::Confirmed { .. } => "Focus request saved.",
+        MutationStatus::Rejected { .. } => "Focus request was not accepted.",
+    }
+}
+
 fn id_label(bytes: &[u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut label = String::with_capacity(bytes.len().saturating_mul(2));
@@ -1375,6 +1546,8 @@ struct VerticalSliceApp {
     create_schedule_mode: bool,
     schedule_draft: Option<ScheduleDraft>,
     latest_schedule_command: Option<CommandId>,
+    latest_focus_command: Option<CommandId>,
+    latest_focus_session: Option<FocusSessionId>,
     #[cfg(windows)]
     instance_owner: WindowsInstanceOwner,
 }
@@ -1449,6 +1622,8 @@ impl VerticalSlice {
             create_schedule_mode: false,
             schedule_draft: None,
             latest_schedule_command: None,
+            latest_focus_command: None,
+            latest_focus_session: None,
             #[cfg(windows)]
             instance_owner: self.instance_owner,
         }
@@ -1511,6 +1686,7 @@ impl VerticalSliceApp {
                 ui.label(tracking_status_label(acknowledgement.status()));
             }
         });
+        self.render_focus_controls(ui);
         let data = self
             .app
             .controller()
@@ -1561,6 +1737,31 @@ impl VerticalSliceApp {
         let _ = self
             .today
             .queue_tracking(self.app.controller_mut(), request);
+    }
+
+    fn render_focus_controls(&mut self, ui: &mut eframe::egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Prepare 25-minute focus").clicked()
+                && let Some((session_id, command)) = self.runtime.identifiers.focus_draft()
+                && let Some(command_id) = self.runtime.try_submit_focus(command)
+            {
+                self.latest_focus_session = Some(session_id);
+                self.latest_focus_command = Some(command_id);
+            }
+            if let Some(session_id) = self.latest_focus_session
+                && ui.button("Start focus").clicked()
+                && let Some(command_id) = self
+                    .runtime
+                    .try_submit_focus(self.runtime.identifiers.focus_start(session_id))
+            {
+                self.latest_focus_command = Some(command_id);
+            }
+            if let Some(command_id) = self.latest_focus_command
+                && let Some(status) = self.app.controller().model().mutation_status(command_id)
+            {
+                ui.label(focus_status_label(status));
+            }
+        });
     }
 
     fn render_schedule_editor(&mut self, ui: &mut eframe::egui::Ui) {
