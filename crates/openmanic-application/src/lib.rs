@@ -17,6 +17,7 @@ mod ports;
 mod projection;
 mod runtime;
 mod schedule;
+mod schedule_projection;
 mod schedule_time;
 mod timeline_projection;
 mod tracking;
@@ -65,6 +66,9 @@ pub use runtime::{
 pub use schedule::{
     ScheduleCommand, ScheduleId, ScheduleMutation, SchedulePersistence, SchedulePersistenceError,
     ScheduleService, ScheduleSnapshot, ScheduleSnapshotError,
+};
+pub use schedule_projection::{
+    ScheduleOccurrence, ScheduleOccurrenceId, project_schedule_occurrences,
 };
 pub use schedule_time::{
     ResolvedScheduleBoundary, ResolvedScheduleOccurrence, SCHEDULE_CIVIL_EPOCH,
