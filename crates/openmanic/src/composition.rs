@@ -2930,7 +2930,9 @@ fn tracker_run_id() -> TrackerRunId {
 }
 
 fn next_data_operation_id() -> JobId {
-    JobId::new(DATA_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed))
+    let time = u64::try_from(utc_now_micros()).unwrap_or_default();
+    let sequence = DATA_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    JobId::new(time ^ sequence.rotate_left(48))
 }
 
 fn import_batch_id(job_id: JobId) -> ImportBatchId {
