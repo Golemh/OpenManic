@@ -62,6 +62,15 @@ impl ResolvedDataRoot {
     pub const fn source(&self) -> DataRootSource {
         self.source
     }
+
+    /// Records a successfully moved root as selected by the persisted bootstrap locator.
+    #[must_use]
+    pub fn moved(root: PathBuf) -> Self {
+        Self {
+            path: root,
+            source: DataRootSource::BootstrapLocator,
+        }
+    }
 }
 
 /// Inputs considered in the documented resolution order.

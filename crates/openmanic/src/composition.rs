@@ -6,7 +6,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -72,7 +72,10 @@ use openmanic_ui_egui::{
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
 use crate::cli::{CliError, parse_process_cli};
 use crate::{
-    data_root::{LocalDataRootValidator, LocatorError, RejectKnownNetworkShares, load_locator},
+    data_root::{
+        BootstrapLocator, DataRootValidator, LocalDataRootValidator, LocatorError,
+        RejectKnownNetworkShares, load_locator, persist_locator,
+    },
     diagnostics::export_diagnostics_bundle,
 };
 
@@ -1005,9 +1008,25 @@ fn persistence_failure(reason: PortFailureReason) -> TrackingPersistenceSubmit {
 enum DataOperationWork {
     Export(CsvExportRequest),
     Import(CsvImportRequest),
-    Backup { job_id: JobId, destination: PathBuf },
-    Diagnostics { job_id: JobId, destination: PathBuf },
-    Restore { job_id: JobId, source: PathBuf },
+    Backup {
+        job_id: JobId,
+        destination: PathBuf,
+    },
+    Diagnostics {
+        job_id: JobId,
+        destination: PathBuf,
+    },
+    Restore {
+        job_id: JobId,
+        source: PathBuf,
+    },
+    MoveDataRoot {
+        job_id: JobId,
+        source: PathBuf,
+        destination: PathBuf,
+        locator_path: PathBuf,
+        store_identity: [u8; 16],
+    },
 }
 
 /// Privacy-safe completion state made available to the host UI after a CSV operation finishes.
@@ -1031,6 +1050,13 @@ enum DataOperationResult {
         job_id: JobId,
     },
     RestoreFailed {
+        job_id: JobId,
+    },
+    DataRootMoved {
+        job_id: JobId,
+        destination: PathBuf,
+    },
+    DataRootMoveFailed {
         job_id: JobId,
     },
     Failed {
@@ -1467,6 +1493,34 @@ impl RuntimeResources {
         let submitted = self
             .data_operation_requests
             .try_send(DataOperationWork::Restore { job_id, source })
+            .is_ok();
+        if submitted {
+            self.accepting.store(false, Ordering::Release);
+        }
+        submitted
+    }
+
+    /// Starts an explicitly confirmed data-root move and pauses normal submissions.
+    fn try_submit_data_root_move(
+        &self,
+        job_id: JobId,
+        source: PathBuf,
+        destination: PathBuf,
+        locator_path: PathBuf,
+        store_identity: [u8; 16],
+    ) -> bool {
+        if !self.accepting.load(Ordering::Acquire) {
+            return false;
+        }
+        let submitted = self
+            .data_operation_requests
+            .try_send(DataOperationWork::MoveDataRoot {
+                job_id,
+                source,
+                destination,
+                locator_path,
+                store_identity,
+            })
             .is_ok();
         if submitted {
             self.accepting.store(false, Ordering::Release);
@@ -1969,9 +2023,123 @@ fn run_data_operation_worker(
                     DataOperationResult::RestoreFailed { job_id }
                 }
             }
+            DataOperationWork::MoveDataRoot {
+                job_id,
+                source,
+                destination,
+                locator_path,
+                store_identity,
+            } => {
+                let (reply, receive) = mpsc::sync_channel(1);
+                let writer_closed = writer_control
+                    .try_send(WriterControl::PrepareRestore(reply))
+                    .is_ok()
+                    && receive
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap_or(false);
+                let moved = writer_closed
+                    && move_data_root_with_online_backup(
+                        &store,
+                        &source,
+                        &destination,
+                        &locator_path,
+                        store_identity,
+                    );
+                if writer_closed {
+                    writer_closed_for_restore.store(true, Ordering::Release);
+                }
+                if moved {
+                    DataOperationResult::DataRootMoved {
+                        job_id,
+                        destination,
+                    }
+                } else {
+                    DataOperationResult::DataRootMoveFailed { job_id }
+                }
+            }
         };
         retain_data_operation_result(&results, result);
     }
+}
+
+fn move_data_root_with_online_backup(
+    store: &Arc<Mutex<SqliteStore>>,
+    source: &Path,
+    destination: &Path,
+    locator_path: &Path,
+    store_identity: [u8; 16],
+) -> bool {
+    if source == destination
+        || !source.is_dir()
+        || (destination.exists()
+            && fs::read_dir(destination)
+                .ok()
+                .and_then(|mut entries| entries.next())
+                .is_some())
+    {
+        return false;
+    }
+    if fs::create_dir_all(destination).is_err()
+        || LocalDataRootValidator::new(RejectKnownNetworkShares)
+            .validate(destination)
+            .is_err()
+    {
+        return false;
+    }
+    let database = destination.join("openmanic.sqlite3");
+    if store
+        .lock()
+        .ok()
+        .and_then(|mut store| store.create_backup(&database).ok())
+        .is_none()
+        || !copy_data_root_support_files(source, destination)
+    {
+        return false;
+    }
+    if SqliteStore::open(
+        &database,
+        &StoreOpenOptions::new(store_identity, utc_now_micros(), env!("CARGO_PKG_VERSION")),
+    )
+    .is_err()
+    {
+        return false;
+    }
+    persist_locator(
+        locator_path,
+        &BootstrapLocator::new(destination.to_path_buf(), None),
+    )
+    .is_ok()
+}
+
+fn copy_data_root_support_files(source: &Path, destination: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(source) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let source_path = entry.path();
+        let name = entry.file_name();
+        if name == ".openmanic-data-root.lock"
+            || name == "openmanic.sqlite3"
+            || name == "openmanic.sqlite3-wal"
+            || name == "openmanic.sqlite3-shm"
+        {
+            continue;
+        }
+        let destination_path = destination.join(name);
+        let Ok(metadata) = entry.metadata() else {
+            return false;
+        };
+        if metadata.is_dir() {
+            if fs::create_dir(&destination_path).is_err()
+                || !copy_data_root_support_files(&source_path, &destination_path)
+            {
+                return false;
+            }
+        } else if fs::copy(&source_path, &destination_path).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 #[expect(
@@ -3032,6 +3200,7 @@ fn import_batch_id(job_id: JobId) -> ImportBatchId {
 /// Owns the composed vertical-slice resources until coordinated explicit quit completes.
 pub struct VerticalSlice {
     bootstrap: BootstrapState,
+    store_identity: [u8; 16],
     ui: UiController<TrackingCommand, TodaySnapshot>,
     snapshots: LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
     calendar_snapshots: LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
@@ -3047,6 +3216,7 @@ pub struct VerticalSlice {
 )]
 struct VerticalSliceApp {
     bootstrap: BootstrapState,
+    store_identity: [u8; 16],
     app: OpenManicApp<TrackingCommand, TodaySnapshot>,
     snapshots: LatestMailboxReceiver<SnapshotEnvelope<TodaySnapshot>>,
     calendar_snapshots: LatestMailboxReceiver<SnapshotEnvelope<CalendarDaySnapshot>>,
@@ -3069,6 +3239,7 @@ struct VerticalSliceApp {
     backup_destination: String,
     diagnostics_destination: String,
     restore_source: String,
+    data_root_destination: String,
     export_includes_titles: bool,
     data_operation_message: Option<String>,
     jobs: JobsController,
@@ -3114,13 +3285,10 @@ impl VerticalSlice {
         #[cfg(windows)] instance_owner: WindowsInstanceOwner,
     ) -> Result<Self, CompositionError> {
         let store_path = bootstrap.data_root().path().join("openmanic.sqlite3");
+        let store_identity = store_identity(bootstrap.data_root().path());
         let store = SqliteStore::open(
             &store_path,
-            &StoreOpenOptions::new(
-                store_identity(bootstrap.data_root().path()),
-                utc_now_micros(),
-                env!("CARGO_PKG_VERSION"),
-            ),
+            &StoreOpenOptions::new(store_identity, utc_now_micros(), env!("CARGO_PKG_VERSION")),
         )
         .map_err(|_| CompositionError::Storage)?;
         let mut ui = UiController::try_new(
@@ -3144,6 +3312,7 @@ impl VerticalSlice {
             .publish(calendar_projection_request(1, initial_range));
         Ok(Self {
             bootstrap,
+            store_identity,
             ui,
             snapshots,
             calendar_snapshots,
@@ -3192,6 +3361,7 @@ impl VerticalSlice {
         }
         VerticalSliceApp {
             bootstrap: self.bootstrap,
+            store_identity: self.store_identity,
             app: OpenManicApp::new_with_theme(self.ui, theme_key.clone()),
             snapshots: self.snapshots,
             calendar_snapshots: self.calendar_snapshots,
@@ -3214,6 +3384,7 @@ impl VerticalSlice {
             backup_destination: String::new(),
             diagnostics_destination: String::new(),
             restore_source: String::new(),
+            data_root_destination: String::new(),
             export_includes_titles: false,
             data_operation_message: None,
             jobs: JobsController::default(),
@@ -3281,6 +3452,8 @@ impl VerticalSliceApp {
             .ui_inbox
             .drain_into(self.app.controller_mut(), UI_INBOUND_CAPACITY / 2);
         let mut restore_finished = None;
+        let mut data_root_move_finished = None;
+        let mut data_root_move_failed = false;
         while let Some(result) = self.runtime.take_data_operation_result() {
             let (job_id, name, message, state) = match result {
                 DataOperationResult::Exported { request, outcome } => (
@@ -3347,6 +3520,34 @@ impl VerticalSliceApp {
                         },
                     )
                 }
+                DataOperationResult::DataRootMoved {
+                    job_id,
+                    destination,
+                } => {
+                    data_root_move_finished = Some(destination);
+                    (
+                        job_id,
+                        "Data location move",
+                        "Data copied and verified. Restarting local services at the new location..."
+                            .to_owned(),
+                        JobState::Succeeded,
+                    )
+                }
+                DataOperationResult::DataRootMoveFailed { job_id } => {
+                    data_root_move_failed = true;
+                    (
+                        job_id,
+                        "Data location move",
+                        "Data location could not be moved. Restarting existing local services..."
+                            .to_owned(),
+                        JobState::Failed {
+                            error: ApplicationError::port_failure(
+                                ApplicationPort::Command,
+                                PortFailureReason::Failed,
+                            ),
+                        },
+                    )
+                }
                 DataOperationResult::Failed { job_id, operation } => (
                     job_id,
                     operation,
@@ -3367,6 +3568,11 @@ impl VerticalSliceApp {
         }
         if let Some(restored) = restore_finished {
             self.restart_runtime_after_restore(restored);
+        }
+        if let Some(destination) = data_root_move_finished {
+            self.restart_runtime_after_data_root_move(destination);
+        } else if data_root_move_failed {
+            self.restart_runtime_after_restore(false);
         }
         if let MailboxReceive::Latest(snapshot) = self.snapshots.try_receive() {
             let _ = self
@@ -3395,7 +3601,7 @@ impl VerticalSliceApp {
         let store = SqliteStore::open(
             &store_path,
             &StoreOpenOptions::new(
-                store_identity(&data_root),
+                self.store_identity,
                 utc_now_micros(),
                 env!("CARGO_PKG_VERSION"),
             ),
@@ -3447,6 +3653,19 @@ impl VerticalSliceApp {
         } else {
             "Restore failed; the existing local services restarted.".to_owned()
         });
+    }
+
+    fn restart_runtime_after_data_root_move(&mut self, destination: PathBuf) {
+        if self.bootstrap.switch_to_moved_root(destination).is_err() {
+            self.data_operation_message = Some(
+                "Data moved but the new location could not be activated. Quit OpenManic and reopen it before tracking."
+                    .to_owned(),
+            );
+            return;
+        }
+        self.restart_runtime_after_restore(true);
+        self.data_operation_message =
+            Some("Data location moved and local services restarted.".to_owned());
     }
 
     fn observe_data_job(&mut self, job_id: JobId, name: &str, state: &JobState) {
@@ -3501,16 +3720,22 @@ impl VerticalSliceApp {
                 ui.heading(confirmation.title());
                 ui.label(confirmation.scope());
                 ui.horizontal(|ui| {
-                    if ui.button(confirmation.confirm_label()).clicked()
-                        && matches!(
-                            self.jobs.apply(JobsAction::ConfirmDestructive {
-                                action_id: confirmation.action_id().to_owned(),
-                            }),
-                            Some(JobsEffect::DestructiveConfirmed { ref action_id })
-                                if action_id == "restore-backup"
-                        )
-                    {
-                        self.submit_restore();
+                    if ui.button(confirmation.confirm_label()).clicked() {
+                        match self.jobs.apply(JobsAction::ConfirmDestructive {
+                            action_id: confirmation.action_id().to_owned(),
+                        }) {
+                            Some(JobsEffect::DestructiveConfirmed { action_id })
+                                if action_id == "restore-backup" =>
+                            {
+                                self.submit_restore();
+                            }
+                            Some(JobsEffect::DestructiveConfirmed { action_id })
+                                if action_id == "move-data-root" =>
+                            {
+                                self.submit_data_root_move();
+                            }
+                            _ => {}
+                        }
                     }
                     if ui.button("Cancel").clicked() {
                         let _ = self.jobs.apply(JobsAction::CancelDestructiveConfirmation);
@@ -3532,6 +3757,34 @@ impl VerticalSliceApp {
         } else {
             self.data_operation_message = Some(
                 "Restore could not be queued. Try again after current work finishes.".to_owned(),
+            );
+        }
+    }
+
+    fn submit_data_root_move(&mut self) {
+        let Ok(locator_path) = bootstrap_locator_path() else {
+            self.data_operation_message = Some(
+                "Data location could not be moved because the per-user locator is unavailable."
+                    .to_owned(),
+            );
+            return;
+        };
+        let job_id = next_data_operation_id();
+        let submitted = self.runtime.try_submit_data_root_move(
+            job_id,
+            self.bootstrap.data_root().path().to_path_buf(),
+            PathBuf::from(self.data_root_destination.trim()),
+            locator_path,
+            self.store_identity,
+        );
+        if submitted {
+            self.observe_data_job(job_id, "Data location move", &JobState::Running);
+            self.data_operation_message =
+                Some("Data move queued; pausing local services...".to_owned());
+        } else {
+            self.data_operation_message = Some(
+                "Data location could not be queued. Try again after current work finishes."
+                    .to_owned(),
             );
         }
     }
@@ -4137,6 +4390,28 @@ impl VerticalSliceApp {
                     "All current local OpenManic data will be replaced by the selected backup."
                         .to_owned(),
                     "Restore backup".to_owned(),
+                ),
+            ));
+        }
+        ui.horizontal(|ui| {
+            ui.label("Move local data to:");
+            ui.text_edit_singleline(&mut self.data_root_destination);
+        });
+        ui.label("The new directory must be empty. The original data remains available after a verified move.");
+        if ui
+            .add_enabled(
+                !self.data_root_destination.trim().is_empty(),
+                eframe::egui::Button::new("Move data location..."),
+            )
+            .clicked()
+        {
+            let _ = self.jobs.apply(JobsAction::RequestDestructiveConfirmation(
+                DestructiveConfirmation::new(
+                    "move-data-root".to_owned(),
+                    "Move local data?".to_owned(),
+                    "OpenManic will pause local services, verify the new copy, and retain the original data directory."
+                        .to_owned(),
+                    "Move data location".to_owned(),
                 ),
             ));
         }

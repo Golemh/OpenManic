@@ -126,6 +126,22 @@ impl BootstrapState {
     pub fn data_root_lock(&self) -> &DataRootLock {
         &self.data_root_lock
     }
+
+    /// Replaces the held source-root lock after destination locking and diagnostics both succeed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a privacy-safe bootstrap failure when the destination cannot become the active
+    /// local root.
+    pub fn switch_to_moved_root(&mut self, root: PathBuf) -> Result<(), BootstrapError> {
+        let lock = DataRootLock::acquire(&root).map_err(|_| BootstrapError::DataRootLocked)?;
+        let diagnostics =
+            MinimalDiagnostics::new(&root).map_err(|_| BootstrapError::DiagnosticsUnavailable)?;
+        self.data_root = ResolvedDataRoot::moved(root);
+        self.data_root_lock = lock;
+        self.diagnostics = diagnostics;
+        Ok(())
+    }
 }
 
 /// Failure during the limited pre-worker bootstrap sequence.
