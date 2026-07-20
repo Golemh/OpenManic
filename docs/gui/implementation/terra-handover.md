@@ -34,9 +34,20 @@ The resolver/catalog blocker is now wired: a changed live HWND is resolved on th
 
 Phase 2's implementation gate is accepted on the completed integration and `CARGO_TARGET_DIR=target-msvc cargo +stable-x86_64-pc-windows-msvc xtask quality`, which covers formatting, workspace checks, strict Clippy, tests, rustdoc, and documentation checks. The independent read-only review and the full Windows lifecycle checklist are deferred to the UI/UX-complete stabilization gate; the latter remains explicitly unobserved.
 
-## After Phase 2
+## Phase 3 handover
 
-Proceed with the ordered Phase 3+ work packages in `docs/gui/spec/implementation-plan.md`. Preserve the ledger's one-writer/disjoint-path rule and create new task worktrees from the current integration tip.
+Phase 3 is complete at `58a016f` (`feat(focus): [OM-321] notify through tray`). The completed slice includes privacy-gated stabilized Windows title spans; category, icon, and exclusion flows; the durable focus lifecycle with visible and native tray completion delivery; and the authoritative schedule service, projections, Timeline editor, scoped recurrence editing/deletion, and explicit overlap reconciliation.
+
+Verification at this tip passed with the MSVC toolchain:
+
+- `cargo +stable-x86_64-pc-windows-msvc test --workspace`
+- `cargo +stable-x86_64-pc-windows-msvc clippy --workspace --all-targets -- -D warnings`
+
+The real-machine Windows lifecycle checklist remains deferred to the UI/UX-complete stabilization gate as the implementation plan permits. Title collection defaults to disabled until a persisted setting explicitly enables it; user-facing persisted notification and sound preferences are owned by OM-641, not Phase 3.
+
+## Next phase
+
+Proceed with Phase 4 in the canonical order: OM-400 through OM-402 for Overview, and OM-410 through OM-412 for Calendar. Start from this branch tip and preserve the ledger's one-writer/disjoint-path rule.
 
 ## Workspace hygiene
 
