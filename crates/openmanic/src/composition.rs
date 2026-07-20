@@ -325,12 +325,16 @@ impl CommandIdentifiers {
         TodayTrackingRequest::new(action, command_id, ordering_key, submitted_at_utc)
     }
 
-    fn schedule_create(&self, range: HalfOpenInterval) -> Option<CommandEnvelope<ScheduleCommand>> {
+    fn schedule_create(
+        &self,
+        range: HalfOpenInterval,
+        label: &str,
+    ) -> Option<CommandEnvelope<ScheduleCommand>> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         let mut id_bytes = [0_u8; 16];
         id_bytes[..8].copy_from_slice(&submitted_at_utc.get().to_be_bytes());
         id_bytes[8..].copy_from_slice(&command_id.get().to_be_bytes());
-        let rule = ScheduleRule::one_time("New schedule", None, range, "Etc/UTC").ok()?;
+        let rule = ScheduleRule::one_time(label, None, range, "Etc/UTC").ok()?;
         let snapshot = ScheduleSnapshot::try_new(
             ScheduleId::OneTime(OneTimeScheduleId::from_bytes(id_bytes)),
             rule,
@@ -1360,7 +1364,7 @@ struct VerticalSliceApp {
     close_to_tray: WindowsTrayController,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
-    schedule_draft_range: Option<HalfOpenInterval>,
+    schedule_draft: Option<ScheduleDraft>,
     #[cfg(windows)]
     instance_owner: WindowsInstanceOwner,
 }
@@ -1432,7 +1436,7 @@ impl VerticalSlice {
             close_to_tray: WindowsTrayController::new(),
             projection_sequence: 1,
             requested_range: None,
-            schedule_draft_range: None,
+            schedule_draft: None,
             #[cfg(windows)]
             instance_owner: self.instance_owner,
         }
@@ -1521,17 +1525,22 @@ impl VerticalSliceApp {
                 }
                 TimelineRenderAction::ViewRangeChanged { range } => self.publish_projection(range),
                 TimelineRenderAction::ScheduleRequested { range } => {
-                    self.schedule_draft_range = Some(range);
+                    self.schedule_draft = Some(ScheduleDraft::new(range));
                 }
             }
         }
-        if let Some(range) = self.schedule_draft_range {
-            match render_schedule_draft(ui, range) {
-                ScheduleDraftAction::Save => {
-                    self.schedule_draft_range = (!self.queue_schedule_draft(range)).then_some(range);
-                }
-                ScheduleDraftAction::Cancel => self.schedule_draft_range = None,
-                ScheduleDraftAction::None => {}
+        let schedule_draft_action = self.schedule_draft.as_mut().map(|draft| {
+            let action = render_schedule_draft(ui, draft);
+            (action, draft.range, draft.label.clone())
+        });
+        if let Some((action, range, label)) = schedule_draft_action {
+            let dismiss = match action {
+                ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label),
+                ScheduleDraftAction::Cancel => true,
+                ScheduleDraftAction::None => false,
+            };
+            if dismiss {
+                self.schedule_draft = None;
             }
         }
         ui.add_space(12.0);
@@ -1549,10 +1558,10 @@ impl VerticalSliceApp {
             .queue_tracking(self.app.controller_mut(), request);
     }
 
-    fn queue_schedule_draft(&self, range: HalfOpenInterval) -> bool {
+    fn queue_schedule_draft(&self, range: HalfOpenInterval, label: &str) -> bool {
         self.runtime
             .identifiers
-            .schedule_create(range)
+            .schedule_create(range, label)
             .is_some_and(|command| self.runtime.try_submit_schedule(command))
     }
 
@@ -1635,19 +1644,41 @@ enum ScheduleDraftAction {
     Cancel,
 }
 
+#[derive(Debug)]
+struct ScheduleDraft {
+    range: HalfOpenInterval,
+    label: String,
+}
+
+impl ScheduleDraft {
+    fn new(range: HalfOpenInterval) -> Self {
+        Self {
+            range,
+            label: "New schedule".to_owned(),
+        }
+    }
+}
+
 fn render_schedule_draft(
     ui: &mut eframe::egui::Ui,
-    range: HalfOpenInterval,
+    draft: &mut ScheduleDraft,
 ) -> ScheduleDraftAction {
     ui.group(|ui| {
         ui.strong("New schedule");
         ui.label(format!(
             "Provisional range: {} to {} UTC",
-            range.start().get(),
-            range.end().get()
+            draft.range.start().get(),
+            draft.range.end().get()
         ));
-        ui.label("This creates a one-time schedule. Editing labels and recurrence follows next.");
-        if ui.button("Save schedule").clicked() {
+        ui.horizontal(|ui| {
+            ui.label("Name");
+            ui.text_edit_singleline(&mut draft.label);
+        });
+        ui.label("This creates a one-time schedule. Recurrence and editing existing schedules follow next.");
+        if ui
+            .add_enabled(!draft.label.trim().is_empty(), eframe::egui::Button::new("Save schedule"))
+            .clicked()
+        {
             ScheduleDraftAction::Save
         } else if ui.button("Cancel").clicked() {
             ScheduleDraftAction::Cancel
