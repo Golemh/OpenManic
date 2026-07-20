@@ -7,12 +7,14 @@
 #![forbid(unsafe_code)]
 
 mod application_metadata;
+mod calendar_projection;
 mod catalog;
 mod commands;
 mod errors;
 mod events;
 mod focus;
 mod ids;
+mod overview;
 mod ports;
 mod projection;
 mod runtime;
