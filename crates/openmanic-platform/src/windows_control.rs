@@ -9,6 +9,9 @@
 use std::sync::Arc;
 
 #[cfg(windows)]
+use std::sync::mpsc::SyncSender;
+
+#[cfg(windows)]
 use std::{error::Error, fmt};
 
 #[cfg(windows)]
@@ -31,6 +34,31 @@ use crate::{DeliveryCapability, FieldSupport, FocusScope};
 
 /// Number of raw foreground observations the callback can retain before declaring loss.
 pub const WINDOWS_FOREGROUND_INGRESS_CAPACITY: usize = 128;
+
+/// One bounded request for background Windows application metadata work.
+#[cfg(windows)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WindowsApplicationMetadataRequest {
+    application_id: openmanic_application::ApplicationId,
+    executable_path: String,
+}
+
+#[cfg(windows)]
+impl WindowsApplicationMetadataRequest {
+    /// Creates a request using the already-resolved executable path; no raw handle escapes.
+    #[must_use]
+    pub fn new(application_id: openmanic_application::ApplicationId, executable_path: String) -> Self {
+        Self { application_id, executable_path }
+    }
+
+    /// Returns the stable catalog application identifier.
+    #[must_use]
+    pub const fn application_id(&self) -> openmanic_application::ApplicationId { self.application_id }
+
+    /// Returns the worker-only executable path.
+    #[must_use]
+    pub fn executable_path(&self) -> &str { &self.executable_path }
+}
 
 /// Summary of one nonblocking control-loop drain.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -83,6 +111,8 @@ pub struct WindowsControlAdapter {
     last_live_window: Option<RawWindowHandle>,
     #[cfg(windows)]
     identity_resolver: WindowsIdentityResolver,
+    #[cfg(windows)]
+    metadata_requests: Option<SyncSender<WindowsApplicationMetadataRequest>>,
 }
 
 impl Default for WindowsControlAdapter {
@@ -96,6 +126,14 @@ impl WindowsControlAdapter {
     #[must_use]
     pub fn new() -> Self {
         Self::with_ingress_capacity(WINDOWS_FOREGROUND_INGRESS_CAPACITY)
+    }
+
+    /// Adds a bounded, nonblocking route for worker-only metadata requests.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn with_metadata_requests(mut self, sender: SyncSender<WindowsApplicationMetadataRequest>) -> Self {
+        self.metadata_requests = Some(sender);
+        self
     }
 
     /// Drains retained callback observations and publishes only honest normalized evidence.
@@ -170,6 +208,8 @@ impl WindowsControlAdapter {
             last_live_window: None,
             #[cfg(windows)]
             identity_resolver: WindowsIdentityResolver::default(),
+            #[cfg(windows)]
+            metadata_requests: None,
         }
     }
 
@@ -255,9 +295,13 @@ impl WindowsControlAdapter {
                 if self.normalizer.reconciliation_required() {
                     self.normalizer.acknowledge_reconciliation();
                 }
+                let application_id = stable_application_id(application.identity());
+                if let (Some(sender), Some(path)) = (&self.metadata_requests, application.display_path()) {
+                    let _ = sender.try_send(WindowsApplicationMetadataRequest::new(application_id, path.to_owned()));
+                }
                 self.announce_foreground(
                     event,
-                    stable_application_id(application.identity()),
+                    application_id,
                     sink,
                     drain,
                 );

@@ -33,7 +33,9 @@ pub use windows_control::{
     WINDOWS_FOREGROUND_INGRESS_CAPACITY, WindowsControlAdapter, WindowsControlDrain,
 };
 #[cfg(windows)]
-pub use windows_control::{WindowsControlError, WindowsControlWindow};
+pub use windows_control::{
+    WindowsApplicationMetadataRequest, WindowsControlError, WindowsControlWindow,
+};
 pub use windows_single_instance::{
     ActivationCommandDecode, LocalActivationCommand, WINDOWS_ACTIVATION_MESSAGE_LIMIT,
 };
