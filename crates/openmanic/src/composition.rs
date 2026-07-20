@@ -14,7 +14,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread::{self, JoinHandle},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use openmanic_application::{
@@ -24,7 +24,8 @@ use openmanic_application::{
     ProjectionRequest, ProjectionSlot, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
     RuntimeWorker, SchemaRevision, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
     EntityRevision, FocusCommand, FocusNotificationError, FocusNotificationPort, FocusPersistence,
-    FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome, ScheduleCommand,
+    FocusKind, FocusPersistenceError, FocusService, FocusSnapshot, MutationOutcome,
+    ScheduleCommand,
     ScheduleId, SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TrackingCommand,
@@ -33,7 +34,8 @@ use openmanic_application::{
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, HalfOpenInterval,
-    FocusSessionId, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+    FocusSessionId, FocusSessionState, OneTimeScheduleId, ScheduleRule, ScheduleSeriesId,
+    TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -735,6 +737,7 @@ struct RuntimeResources {
     accepting: Arc<AtomicBool>,
     identifiers: Arc<CommandIdentifiers>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
+    focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
     supervisor: RuntimeSupervisor,
@@ -768,8 +771,10 @@ impl RuntimeResources {
         let accepting = Arc::new(AtomicBool::new(true));
         let identifiers = Arc::new(CommandIdentifiers::default());
         let focus_notification_error = Arc::new(Mutex::new(None));
+        let focus_snapshot = Arc::new(Mutex::new(None));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
+        let worker_focus_snapshot = Arc::clone(&focus_snapshot);
         let writer_handle = thread::Builder::new()
             .name(ThreadRoot::new(RuntimeWorker::Writer).name().to_owned())
             .spawn(move || {
@@ -781,6 +786,7 @@ impl RuntimeResources {
                     snapshots,
                     worker_ui_inbox,
                     worker_focus_notification_error,
+                    worker_focus_snapshot,
                 );
             })
             .map_err(|_| CompositionError::Runtime)?;
@@ -795,6 +801,7 @@ impl RuntimeResources {
                 accepting,
                 identifiers,
                 focus_notification_error,
+                focus_snapshot,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
                 supervisor: RuntimeSupervisor::new([
@@ -1073,10 +1080,13 @@ fn run_writer_worker(
     snapshots: LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: Arc<UiInbox>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
+    focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     let store = Arc::new(Mutex::new(store));
     let mut services = writer_services(&store, focus_notification_error);
+    reconcile_focus_snapshot(&mut services, &focus_snapshot);
     let mut current_projection = None;
+    let mut last_focus_reconciliation = Instant::now();
     let mut running = true;
 
     while running {
@@ -1106,6 +1116,7 @@ fn run_writer_worker(
                     &mut current_projection,
                     &snapshots,
                     &ui_inbox,
+                    &focus_snapshot,
                 );
                 let event = services.tracking.handle(system_checkpoint());
                 let persisted = event.committed_data_revision().is_some()
@@ -1129,9 +1140,14 @@ fn run_writer_worker(
                 &mut current_projection,
                 &snapshots,
                 &ui_inbox,
+                &focus_snapshot,
             ),
             LaneReceive::Empty => thread::park_timeout(WORKER_IDLE_INTERVAL),
             LaneReceive::Closed => running = false,
+        }
+        if last_focus_reconciliation.elapsed() >= Duration::from_secs(1) {
+            reconcile_focus_snapshot(&mut services, &focus_snapshot);
+            last_focus_reconciliation = Instant::now();
         }
     }
 }
@@ -1151,7 +1167,7 @@ fn writer_services(
         store: Arc::clone(store),
         first_write: false,
     });
-    let mut focus = FocusService::new(
+    let focus = FocusService::new(
         WriterPersistence {
             store: Arc::clone(store),
             first_write: false,
@@ -1160,7 +1176,6 @@ fn writer_services(
             latest_error: focus_notification_error,
         },
     );
-    let _ = focus.reconcile_after_restart(UtcMicros::new(utc_now_micros()));
     WriterServices {
         tracking,
         schedules,
@@ -1176,6 +1191,7 @@ fn drain_writer_lanes(
     current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
+    focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     while let LaneReceive::Work { work, .. } = lanes.try_receive() {
         process_writer_work(
@@ -1185,6 +1201,7 @@ fn drain_writer_lanes(
             current_projection,
             snapshots,
             ui_inbox,
+            focus_snapshot,
         );
     }
 }
@@ -1196,6 +1213,7 @@ fn process_writer_work(
     current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
+    focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     if let WriterWork::Focus(command) = work {
         process_focus_command(
@@ -1205,6 +1223,7 @@ fn process_writer_work(
             current_projection,
             snapshots,
             ui_inbox,
+            focus_snapshot,
         );
         return;
     }
@@ -1351,8 +1370,14 @@ fn process_focus_command(
     current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
     snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
     ui_inbox: &UiInbox,
+    focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     let mutation = services.focus.handle(command);
+    if let Some(snapshot) = mutation.snapshot()
+        && let Ok(mut latest) = focus_snapshot.lock()
+    {
+        *latest = Some(snapshot.clone());
+    }
     let outcome = mutation.outcome().clone();
     let committed_revision = match &outcome {
         MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
@@ -1371,6 +1396,19 @@ fn process_focus_command(
         && let Some(request) = current_projection.as_ref()
     {
         publish_today_snapshot(store, request, snapshots);
+    }
+}
+
+fn reconcile_focus_snapshot(
+    services: &mut WriterServices,
+    focus_snapshot: &Arc<Mutex<Option<FocusSnapshot>>>,
+) {
+    if let Ok(snapshot) = services
+        .focus
+        .reconcile_after_restart(UtcMicros::new(utc_now_micros()))
+        && let Ok(mut latest) = focus_snapshot.lock()
+    {
+        *latest = snapshot;
     }
 }
 
@@ -1667,6 +1705,28 @@ const fn focus_status_label(status: &MutationStatus) -> &'static str {
     }
 }
 
+fn focus_remaining_us(state: FocusSessionState, now: UtcMicros) -> Option<i64> {
+    match state {
+        FocusSessionState::Running { deadline, .. } => {
+            Some(deadline.get().saturating_sub(now.get()).max(0))
+        }
+        FocusSessionState::Paused { remaining_us, .. } => Some(remaining_us),
+        FocusSessionState::Ready
+        | FocusSessionState::Planned { .. }
+        | FocusSessionState::Completed { .. }
+        | FocusSessionState::Cancelled { .. } => None,
+    }
+}
+
+fn focus_remaining_label(remaining_us: i64) -> String {
+    let seconds = remaining_us.saturating_add(999_999) / 1_000_000;
+    format!(
+        "{minutes:02}:{seconds:02} remaining",
+        minutes = seconds / 60,
+        seconds = seconds % 60
+    )
+}
+
 fn id_label(bytes: &[u8; 16]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut label = String::with_capacity(bytes.len().saturating_mul(2));
@@ -1909,24 +1969,95 @@ impl VerticalSliceApp {
     }
 
     fn render_focus_controls(&mut self, ui: &mut eframe::egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("Prepare 25-minute focus").clicked()
+        let snapshot = self
+            .runtime
+            .focus_snapshot
+            .lock()
+            .ok()
+            .and_then(|latest| latest.clone());
+        if let Some(snapshot) = snapshot.as_ref() {
+            self.latest_focus_session = Some(snapshot.session_id());
+        }
+
+        ui.vertical(|ui| {
+            match snapshot.as_ref().map(|snapshot| snapshot.session().state()) {
+                Some(FocusSessionState::Ready | FocusSessionState::Planned { .. }) => {
+                    ui.label("Focus is ready to start.");
+                    if let Some(snapshot) = snapshot.as_ref()
+                        && ui.button("Start focus").clicked()
+                        && let Some(command_id) = self.runtime.try_submit_focus(
+                            self.runtime.identifiers.focus_start(snapshot.session_id()),
+                        )
+                    {
+                        self.latest_focus_command = Some(command_id);
+                    }
+                }
+                Some(state @ FocusSessionState::Running { .. }) => {
+                    if let Some(remaining_us) =
+                        focus_remaining_us(state, UtcMicros::new(utc_now_micros()))
+                    {
+                        ui.label(format!("Focus: {}", focus_remaining_label(remaining_us)));
+                        ui.ctx().request_repaint_after(Duration::from_secs(1));
+                    }
+                    if let Some(snapshot) = snapshot.as_ref() {
+                        self.render_focus_lifecycle_controls(
+                            ui,
+                            snapshot.session_id(),
+                            &[
+                                ("Pause", FocusLifecycleAction::Pause),
+                                ("Complete", FocusLifecycleAction::Complete),
+                                ("Cancel", FocusLifecycleAction::Cancel),
+                            ],
+                        );
+                    }
+                }
+                Some(state @ FocusSessionState::Paused { .. }) => {
+                    if let Some(remaining_us) =
+                        focus_remaining_us(state, UtcMicros::new(utc_now_micros()))
+                    {
+                        ui.label(format!(
+                            "Focus paused: {}",
+                            focus_remaining_label(remaining_us)
+                        ));
+                    }
+                    if let Some(snapshot) = snapshot.as_ref() {
+                        self.render_focus_lifecycle_controls(
+                            ui,
+                            snapshot.session_id(),
+                            &[
+                                ("Resume", FocusLifecycleAction::Resume),
+                                ("Complete", FocusLifecycleAction::Complete),
+                                ("Cancel", FocusLifecycleAction::Cancel),
+                            ],
+                        );
+                    }
+                }
+                Some(FocusSessionState::Completed { .. }) => {
+                    ui.label("Focus completed.");
+                }
+                Some(FocusSessionState::Cancelled { .. }) => {
+                    ui.label("Focus cancelled.");
+                }
+                None => {
+                    ui.label("No focus session is prepared.");
+                }
+            }
+            let may_prepare = !matches!(
+                snapshot.as_ref().map(|snapshot| snapshot.session().state()),
+                Some(
+                    FocusSessionState::Ready
+                        | FocusSessionState::Planned { .. }
+                        | FocusSessionState::Running { .. }
+                        | FocusSessionState::Paused { .. }
+                )
+            );
+            if may_prepare
+                && ui.button("Prepare 25-minute focus").clicked()
                 && let Some((session_id, command)) = self.runtime.identifiers.focus_draft()
                 && let Some(command_id) = self.runtime.try_submit_focus(command)
             {
                 self.latest_focus_session = Some(session_id);
                 self.latest_focus_command = Some(command_id);
-            }
-            if let Some(session_id) = self.latest_focus_session
-                && ui.button("Start focus").clicked()
-                && let Some(command_id) = self
-                    .runtime
-                    .try_submit_focus(self.runtime.identifiers.focus_start(session_id))
-            {
-                self.latest_focus_command = Some(command_id);
-            }
-            if let Some(session_id) = self.latest_focus_session {
-                self.render_focus_lifecycle_controls(ui, session_id);
             }
             if let Some(command_id) = self.latest_focus_command
                 && let Some(status) = self.app.controller().model().mutation_status(command_id)
@@ -1957,17 +2088,15 @@ impl VerticalSliceApp {
         &mut self,
         ui: &mut eframe::egui::Ui,
         session_id: FocusSessionId,
+        controls: &[(&str, FocusLifecycleAction)],
     ) {
-        for (label, action) in [
-            ("Pause", FocusLifecycleAction::Pause),
-            ("Resume", FocusLifecycleAction::Resume),
-            ("Complete", FocusLifecycleAction::Complete),
-            ("Cancel", FocusLifecycleAction::Cancel),
-        ] {
-            if ui.button(label).clicked() {
-                self.submit_focus_lifecycle(session_id, action);
+        ui.horizontal(|ui| {
+            for &(label, action) in controls {
+                if ui.button(label).clicked() {
+                    self.submit_focus_lifecycle(session_id, action);
+                }
             }
-        }
+        });
     }
 
     fn render_schedule_editor(&mut self, ui: &mut eframe::egui::Ui) {
@@ -2318,12 +2447,13 @@ mod tests {
         LaneCapacities, LaneReceive, TrackingCommand, TrackingEvidence, WorkLane,
         bounded_runtime_lanes,
     };
-    use openmanic_domain::{ApplicationId, HalfOpenInterval, UtcMicros};
+    use openmanic_domain::{ApplicationId, FocusSessionState, HalfOpenInterval, UtcMicros};
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
         CommandIdentifiers, PlatformActionRouter, UiInbox, UiIngress, day_range,
-        recurring_schedule_rule, store_identity, ScheduleDraftValidationError,
+        focus_remaining_label, focus_remaining_us, recurring_schedule_rule, store_identity,
+        ScheduleDraftValidationError,
     };
 
     #[test]
@@ -2451,6 +2581,37 @@ mod tests {
                 .expect("the current UTC day has a positive range")
                 .duration_us(),
             86_400_000_000
+        );
+    }
+
+    #[test]
+    fn focus_remaining_uses_the_authoritative_deadline_or_frozen_duration() {
+        let running = FocusSessionState::Running {
+            started_at: UtcMicros::new(100),
+            deadline: UtcMicros::new(1_500_100),
+        };
+        assert_eq!(
+            focus_remaining_us(running, UtcMicros::new(500_100)),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            focus_remaining_us(running, UtcMicros::new(1_600_100)),
+            Some(0)
+        );
+        assert_eq!(
+            focus_remaining_us(
+                FocusSessionState::Paused {
+                    started_at: UtcMicros::new(100),
+                    remaining_us: 61_000_001,
+                },
+                UtcMicros::new(999_999_999),
+            ),
+            Some(61_000_001)
+        );
+        assert_eq!(focus_remaining_label(61_000_001), "01:02 remaining");
+        assert_eq!(
+            focus_remaining_us(FocusSessionState::Ready, UtcMicros::new(0)),
+            None
         );
     }
 
