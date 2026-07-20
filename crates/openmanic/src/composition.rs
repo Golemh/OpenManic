@@ -2242,11 +2242,12 @@ mod tests {
         LaneCapacities, LaneReceive, TrackingCommand, TrackingEvidence, WorkLane,
         bounded_runtime_lanes,
     };
-    use openmanic_domain::{ApplicationId, UtcMicros};
+    use openmanic_domain::{ApplicationId, HalfOpenInterval, UtcMicros};
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
-        CommandIdentifiers, PlatformActionRouter, UiInbox, UiIngress, day_range, store_identity,
+        CommandIdentifiers, PlatformActionRouter, UiInbox, UiIngress, day_range,
+        recurring_schedule_rule, store_identity,
     };
 
     #[test]
@@ -2375,6 +2376,22 @@ mod tests {
                 .duration_us(),
             86_400_000_000
         );
+    }
+
+    #[test]
+    fn recurring_editor_conversion_retains_overnight_duration_and_rejects_empty_days() {
+        let range = HalfOpenInterval::try_new(
+            UtcMicros::new(23 * 3_600_000_000),
+            UtcMicros::new(25 * 3_600_000_000),
+        )
+        .expect("positive overnight fixture");
+        let rule = recurring_schedule_rule("Night review", range, 0b0100_0001)
+            .expect("valid recurring conversion");
+        let segment = rule.segments().pop().expect("one recurring segment");
+        assert_eq!(segment.weekday_mask(), 0b0100_0001);
+        assert_eq!(segment.start_second_of_day(), 23 * 3_600);
+        assert_eq!(segment.end_second_of_day(), 3_600);
+        assert!(recurring_schedule_rule("No days", range, 0).is_none());
     }
 
     #[test]
