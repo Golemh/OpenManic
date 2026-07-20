@@ -1547,32 +1547,7 @@ impl VerticalSliceApp {
                 }
             }
         }
-        let schedule_draft_action = self.schedule_draft.as_mut().map(|draft| {
-            let action = render_schedule_draft(ui, draft);
-            (action, draft.range, draft.label.clone())
-        });
-        if let Some((action, range, label)) = schedule_draft_action {
-            let submitted = match action {
-                ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label),
-                ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
-            };
-            if let Some(command_id) = submitted {
-                self.latest_schedule_command = Some(command_id);
-            }
-            let dismiss = match action {
-                ScheduleDraftAction::Save => submitted.is_some(),
-                ScheduleDraftAction::Cancel => true,
-                ScheduleDraftAction::None => false,
-            };
-            if dismiss {
-                self.schedule_draft = None;
-            }
-        }
-        if let Some(command_id) = self.latest_schedule_command
-            && let Some(status) = self.app.controller().model().mutation_status(command_id)
-        {
-            ui.label(schedule_status_label(status));
-        }
+        self.render_schedule_editor(ui);
         ui.add_space(12.0);
         ui.heading("Application usage");
         render_usage_snapshot(ui, snapshot.usage());
@@ -1586,6 +1561,38 @@ impl VerticalSliceApp {
         let _ = self
             .today
             .queue_tracking(self.app.controller_mut(), request);
+    }
+
+    fn render_schedule_editor(&mut self, ui: &mut eframe::egui::Ui) {
+        let schedule_draft_action = self.schedule_draft.as_mut().map(|draft| {
+            let action = render_schedule_draft(ui, draft);
+            (action, draft.range, draft.label.clone())
+        });
+        let Some((action, range, label)) = schedule_draft_action else {
+            self.render_schedule_status(ui);
+            return;
+        };
+        let submitted = match action {
+            ScheduleDraftAction::Save => self.queue_schedule_draft(range, &label),
+            ScheduleDraftAction::Cancel | ScheduleDraftAction::None => None,
+        };
+        if let Some(command_id) = submitted {
+            self.latest_schedule_command = Some(command_id);
+        }
+        if matches!(action, ScheduleDraftAction::Cancel)
+            || matches!(action, ScheduleDraftAction::Save) && submitted.is_some()
+        {
+            self.schedule_draft = None;
+        }
+        self.render_schedule_status(ui);
+    }
+
+    fn render_schedule_status(&self, ui: &mut eframe::egui::Ui) {
+        if let Some(command_id) = self.latest_schedule_command
+            && let Some(status) = self.app.controller().model().mutation_status(command_id)
+        {
+            ui.label(schedule_status_label(status));
+        }
     }
 
     fn queue_schedule_draft(&self, range: HalfOpenInterval, label: &str) -> Option<CommandId> {
