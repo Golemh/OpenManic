@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+mod application_metadata;
 mod catalog;
 mod commands;
 mod errors;
@@ -22,6 +23,11 @@ mod tracking;
 
 // Platform adapters consume only this crate's facade. Re-export the domain values
 // already present in normalized tracking evidence so that boundary remains intact.
+pub use application_metadata::{
+    ApplicationIcon, ApplicationIconCache, ApplicationIconCacheDiagnostics,
+    ApplicationIconCacheInsert, ApplicationIconCacheLimitError, ApplicationIconCacheLimits,
+    ApplicationIconDigest, ApplicationIconError, ApplicationIconKey, ApplicationIconLookup,
+};
 pub use catalog::{
     CatalogApplicationSnapshot, CatalogAssignmentFilter, CatalogCategorySnapshot, CatalogCommand,
     CatalogCommandError, CatalogFilter, CatalogPersistence, CatalogPersistenceError,
