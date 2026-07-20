@@ -1827,16 +1827,7 @@ impl VerticalSliceApp {
                 self.latest_focus_command = Some(command_id);
             }
             if let Some(session_id) = self.latest_focus_session {
-                for (label, action) in [
-                    ("Pause", FocusLifecycleAction::Pause),
-                    ("Resume", FocusLifecycleAction::Resume),
-                    ("Complete", FocusLifecycleAction::Complete),
-                    ("Cancel", FocusLifecycleAction::Cancel),
-                ] {
-                    if ui.button(label).clicked() {
-                        self.submit_focus_lifecycle(session_id, action);
-                    }
-                }
+                self.render_focus_lifecycle_controls(ui, session_id);
             }
             if let Some(command_id) = self.latest_focus_command
                 && let Some(status) = self.app.controller().model().mutation_status(command_id)
@@ -1850,6 +1841,23 @@ impl VerticalSliceApp {
         let command = self.runtime.identifiers.focus_lifecycle(session_id, action);
         if let Some(command_id) = self.runtime.try_submit_focus(command) {
             self.latest_focus_command = Some(command_id);
+        }
+    }
+
+    fn render_focus_lifecycle_controls(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        session_id: FocusSessionId,
+    ) {
+        for (label, action) in [
+            ("Pause", FocusLifecycleAction::Pause),
+            ("Resume", FocusLifecycleAction::Resume),
+            ("Complete", FocusLifecycleAction::Complete),
+            ("Cancel", FocusLifecycleAction::Cancel),
+        ] {
+            if ui.button(label).clicked() {
+                self.submit_focus_lifecycle(session_id, action);
+            }
         }
     }
 
