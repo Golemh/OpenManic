@@ -22,8 +22,8 @@ mod schedule;
 mod schedule_projection;
 mod schedule_time;
 mod timeline_projection;
-mod tracking;
 mod title_stabilizer;
+mod tracking;
 
 // Platform adapters consume only this crate's facade. Re-export the domain values
 // already present in normalized tracking evidence so that boundary remains intact.
@@ -32,6 +32,11 @@ pub use application_metadata::{
     ApplicationIconCacheInsert, ApplicationIconCacheLimitError, ApplicationIconCacheLimits,
     ApplicationIconDigest, ApplicationIconError, ApplicationIconKey, ApplicationIconLookup,
     ApplicationIconResult,
+};
+pub use calendar_projection::{
+    ActivityTimelineNavigation, CalendarBlock, CalendarBlockId, CalendarBlockSource,
+    CalendarContinuation, CalendarDayContext, CalendarDayProjector, CalendarDaySnapshot,
+    CalendarProjectionError, CalendarProjectionSource, CalendarSourceFocus,
 };
 pub use catalog::{
     CatalogApplicationSnapshot, CatalogAssignmentFilter, CatalogCategorySnapshot, CatalogCommand,
@@ -77,9 +82,8 @@ pub use schedule_projection::{
 pub use schedule_time::{
     ResolvedScheduleBoundary, ResolvedScheduleOccurrence, SCHEDULE_CIVIL_EPOCH,
     ScheduleBoundaryResolution, ScheduleTimeError, expand_repeating_schedule,
-    expand_repeating_schedule_in_interval,
-    repeating_schedule_rules_conflict, resolve_schedule_boundary,
-    schedule_rule_conflicts_with_intervals,
+    expand_repeating_schedule_in_interval, repeating_schedule_rules_conflict,
+    resolve_schedule_boundary, schedule_rule_conflicts_with_intervals,
 };
 pub use timeline_projection::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,
@@ -87,13 +91,13 @@ pub use timeline_projection::{
     TimelineProjectionError, TimelineProjectionSource, TimelineProjector, TimelineRawFragment,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TimelineTotals,
 };
-pub use tracking::{
-    TRACKING_CHECKPOINT_INTERVAL_US, TrackingCheckpoint, TrackingCheckpointError,
-    TrackingPersistenceIntent, TrackingPersistenceIntentError, TrackingService,
-};
 pub use title_stabilizer::{
     AcceptedWindowTitle, MAX_WINDOW_TITLE_BYTES, TITLE_STABILITY_US, TitleObservationResult,
     TitleStabilizer,
+};
+pub use tracking::{
+    TRACKING_CHECKPOINT_INTERVAL_US, TrackingCheckpoint, TrackingCheckpointError,
+    TrackingPersistenceIntent, TrackingPersistenceIntentError, TrackingService,
 };
 
 #[cfg(test)]
