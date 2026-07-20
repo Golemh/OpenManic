@@ -19,6 +19,7 @@ use std::{
 
 use openmanic_application::{
     AppEvent, ApplicationError, ApplicationPort, CommandEnvelope, CommandId, CommandReceipt,
+    CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService,
     DataRevision, EventEnvelope, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
     LatestMailboxReceiver, MailboxReceive, OrderingKey, PortFailureReason, ProjectionContextKey,
     ProjectionRequest, ProjectionSlot, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
@@ -34,7 +35,8 @@ use openmanic_application::{
     TrackingPersistenceSubmit, TrackingService, WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
-    ActivityState, Application, ApplicationId, ApplicationName, Category, HalfOpenInterval,
+    ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId,
+    CategoryName, HalfOpenInterval,
     FocusSessionId, FocusSessionState, OneTimeScheduleId, ScheduleEditScope, ScheduleRule,
     ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
@@ -47,7 +49,7 @@ use openmanic_platform::{
     EvidencePublishResult, TrackingEvidenceSink, WindowsPlatformAction, WindowsTrayController,
 };
 use openmanic_storage_sqlite::{
-    RecoveryOutcome, SqliteStore, StoreOpenOptions, TrackerRunRegistration,
+    RecoveryOutcome, SqliteStore, StorageWriter, StoreOpenOptions, TrackerRunRegistration,
 };
 use openmanic_ui_egui::timeline::{TimelineRenderAction, TimelineRenderer};
 use openmanic_ui_egui::{
@@ -163,6 +165,7 @@ enum WriterWork {
     },
     System(CommandEnvelope<TrackingCommand>),
     Ui(CommandEnvelope<TrackingCommand>),
+    Catalog(CommandEnvelope<CatalogCommand>),
     Schedule(CommandEnvelope<ScheduleCommand>),
     Focus(CommandEnvelope<FocusCommand>),
 }
@@ -172,7 +175,7 @@ impl WriterWork {
         match self {
             Self::System(command) | Self::CatalogForeground { command, .. } => (command, false),
             Self::Ui(command) => (command, true),
-            Self::Schedule(_) | Self::Focus(_) => {
+            Self::Catalog(_) | Self::Schedule(_) | Self::Focus(_) => {
                 unreachable!("typed commands use their own application service")
             }
         }
@@ -182,6 +185,7 @@ impl WriterWork {
 /// The stateful application services which are exclusively owned by the writer worker.
 struct WriterServices {
     tracking: TrackingService<WriterPersistence>,
+    catalog: CatalogService<WriterPersistence>,
     schedules: ScheduleService<WriterPersistence>,
     focus: FocusService<WriterPersistence, UnavailableFocusNotifications>,
     ui_event_sequence: u64,
@@ -364,6 +368,37 @@ impl CommandIdentifiers {
             submitted_at_utc,
             payload,
         )
+    }
+
+    fn catalog_command(&self, payload: CatalogCommand) -> CommandEnvelope<CatalogCommand> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            None,
+            submitted_at_utc,
+            payload,
+        )
+    }
+
+    fn catalog_create_category(&self, name: &str) -> Option<CommandEnvelope<CatalogCommand>> {
+        let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
+        let category_name = CategoryName::try_new(name).ok()?;
+        let mut id_bytes = [0_u8; 16];
+        id_bytes[..8].copy_from_slice(&submitted_at_utc.get().to_be_bytes());
+        id_bytes[8..].copy_from_slice(&command_id.get().to_be_bytes());
+        Some(CommandEnvelope::new(
+            SchemaRevision::new(1),
+            command_id,
+            ordering_key,
+            None,
+            submitted_at_utc,
+            CatalogCommand::CreateCategory {
+                category: Category::new(CategoryId::from_bytes(id_bytes), category_name),
+                observed_at_utc: submitted_at_utc,
+            },
+        ))
     }
 
     fn tracking_request(&self, action: TrackingControlAction) -> TodayTrackingRequest {
@@ -689,6 +724,80 @@ impl TrackingPersistencePort for WriterPersistence {
     }
 }
 
+impl CatalogPersistence for WriterPersistence {
+    fn create_category(
+        &mut self,
+        category: &Category,
+        observed_at_utc: UtcMicros,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(CatalogPersistenceError::Failed);
+        };
+        <StorageWriter as CatalogPersistence>::create_category(
+            store.writer(),
+            category,
+            observed_at_utc,
+        )
+    }
+
+    fn rename_category(
+        &mut self,
+        category_id: CategoryId,
+        name: &CategoryName,
+        observed_at_utc: UtcMicros,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(CatalogPersistenceError::Failed);
+        };
+        <StorageWriter as CatalogPersistence>::rename_category(
+            store.writer(),
+            category_id,
+            name,
+            observed_at_utc,
+        )
+    }
+
+    fn delete_category(
+        &mut self,
+        category_id: CategoryId,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(CatalogPersistenceError::Failed);
+        };
+        <StorageWriter as CatalogPersistence>::delete_category(store.writer(), category_id)
+    }
+
+    fn assign_applications(
+        &mut self,
+        application_ids: &[ApplicationId],
+        category_id: Option<CategoryId>,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(CatalogPersistenceError::Failed);
+        };
+        <StorageWriter as CatalogPersistence>::assign_applications(
+            store.writer(),
+            application_ids,
+            category_id,
+        )
+    }
+
+    fn set_applications_excluded(
+        &mut self,
+        application_ids: &[ApplicationId],
+        excluded: bool,
+    ) -> Result<DataRevision, CatalogPersistenceError> {
+        let Ok(mut store) = self.store.lock() else {
+            return Err(CatalogPersistenceError::Failed);
+        };
+        <StorageWriter as CatalogPersistence>::set_applications_excluded(
+            store.writer(),
+            application_ids,
+            excluded,
+        )
+    }
+}
+
 impl SchedulePersistence for WriterPersistence {
     fn load_schedule(
         &mut self,
@@ -917,6 +1026,25 @@ impl RuntimeResources {
         if matches!(
             self.lanes
                 .try_submit(WorkLane::Normal, WriterWork::Schedule(command)),
+            LaneSubmit::Enqueued
+        ) {
+            return Some(command_id);
+        }
+        self.ui_inbox.remove_pending(command_id);
+        None
+    }
+
+    fn try_submit_catalog(&self, command: CommandEnvelope<CatalogCommand>) -> Option<CommandId> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return None;
+        }
+        let command_id = command.command_id();
+        if !self.ui_inbox.try_push(UiIngress::Pending(command_id)) {
+            return None;
+        }
+        if matches!(
+            self.lanes
+                .try_submit(WorkLane::Normal, WriterWork::Catalog(command)),
             LaneSubmit::Enqueued
         ) {
             return Some(command_id);
@@ -1230,6 +1358,10 @@ fn writer_services(
         store: Arc::clone(store),
         first_write: false,
     });
+    let catalog = CatalogService::new(WriterPersistence {
+        store: Arc::clone(store),
+        first_write: false,
+    });
     let focus = FocusService::new(
         WriterPersistence {
             store: Arc::clone(store),
@@ -1241,6 +1373,7 @@ fn writer_services(
     );
     WriterServices {
         tracking,
+        catalog,
         schedules,
         focus,
         ui_event_sequence: 0,
@@ -1292,6 +1425,17 @@ fn process_writer_work(
     }
     if let WriterWork::Schedule(command) = work {
         process_schedule_command(
+            &command,
+            services,
+            store,
+            current_projection,
+            snapshots,
+            ui_inbox,
+        );
+        return;
+    }
+    if let WriterWork::Catalog(command) = work {
+        process_catalog_command(
             &command,
             services,
             store,
@@ -1406,6 +1550,35 @@ fn process_schedule_command(
 ) {
     let mutation = services.schedules.handle(command);
     let outcome = mutation.outcome().clone();
+    let committed_revision = match &outcome {
+        MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
+        MutationOutcome::Rejected(_) => None,
+    };
+    let event = EventEnvelope::new(
+        command.schema_revision(),
+        next_ui_event_sequence(&mut services.ui_event_sequence),
+        Some(command.command_id()),
+        committed_revision,
+        command.submitted_at_utc(),
+        AppEvent::Mutation(outcome),
+    );
+    let _ = ui_inbox.try_push(UiIngress::Event(event));
+    if committed_revision.is_some()
+        && let Some(request) = current_projection.as_ref()
+    {
+        publish_today_snapshot(store, request, snapshots);
+    }
+}
+
+fn process_catalog_command(
+    command: &CommandEnvelope<CatalogCommand>,
+    services: &mut WriterServices,
+    store: &Arc<Mutex<SqliteStore>>,
+    current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
+    snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
+    ui_inbox: &UiInbox,
+) {
+    let outcome = services.catalog.handle(command);
     let committed_revision = match &outcome {
         MutationOutcome::Confirmed(confirmation) => Some(confirmation.committed_data_revision()),
         MutationOutcome::Rejected(_) => None,
@@ -1773,6 +1946,14 @@ const fn schedule_status_label(status: &MutationStatus) -> &'static str {
     }
 }
 
+const fn catalog_status_label(status: &MutationStatus) -> &'static str {
+    match status {
+        MutationStatus::Pending => "Saving category change…",
+        MutationStatus::Confirmed { .. } => "Category change saved.",
+        MutationStatus::Rejected { .. } => "Category change was not saved.",
+    }
+}
+
 const fn focus_status_label(status: &MutationStatus) -> &'static str {
     match status {
         MutationStatus::Pending => "Focus request pending…",
@@ -1852,6 +2033,8 @@ struct VerticalSliceApp {
     schedule_draft: Option<ScheduleDraft>,
     schedule_delete_request: Option<ScheduleDeleteRequest>,
     latest_schedule_command: Option<CommandId>,
+    latest_catalog_command: Option<CommandId>,
+    new_category_name: String,
     latest_focus_command: Option<CommandId>,
     latest_focus_session: Option<FocusSessionId>,
     #[cfg(windows)]
@@ -1936,6 +2119,8 @@ impl VerticalSlice {
             schedule_draft: None,
             schedule_delete_request: None,
             latest_schedule_command: None,
+            latest_catalog_command: None,
+            new_category_name: String::new(),
             latest_focus_command: None,
             latest_focus_session: None,
             #[cfg(windows)]
@@ -2063,6 +2248,25 @@ impl VerticalSliceApp {
         };
         ui.add_space(16.0);
         ui.heading("Categories");
+        ui.horizontal(|ui| {
+            ui.label("New category");
+            ui.text_edit_singleline(&mut self.new_category_name);
+            if ui
+                .add_enabled(
+                    !self.new_category_name.trim().is_empty(),
+                    eframe::egui::Button::new("Create category"),
+                )
+                .clicked()
+                && let Some(command) = self
+                    .runtime
+                    .identifiers
+                    .catalog_create_category(&self.new_category_name)
+                && let Some(command_id) = self.runtime.try_submit_catalog(command)
+            {
+                self.latest_catalog_command = Some(command_id);
+                self.new_category_name.clear();
+            }
+        });
         if snapshot.categories().is_empty() {
             ui.label("No categories yet. Applications are currently Uncategorized.");
         } else {
@@ -2091,10 +2295,31 @@ impl VerticalSliceApp {
                 if *excluded {
                     ui.label("Excluded from future tracking");
                 }
+                let action_label = if *excluded {
+                    "Include future tracking"
+                } else {
+                    "Exclude future tracking"
+                };
+                if ui.button(action_label).clicked()
+                    && let Ok(payload) = CatalogCommand::try_set_applications_excluded(
+                        [application.id()],
+                        !*excluded,
+                    )
+                    && let Some(command_id) = self
+                        .runtime
+                        .try_submit_catalog(self.runtime.identifiers.catalog_command(payload))
+                {
+                    self.latest_catalog_command = Some(command_id);
+                }
             });
         }
+        if let Some(command_id) = self.latest_catalog_command
+            && let Some(status) = self.app.controller().model().mutation_status(command_id)
+        {
+            ui.label(catalog_status_label(status));
+        }
         ui.add_space(8.0);
-        ui.label("Category changes and exclusion controls are being connected next.");
+        ui.label("Category creation and assignment controls are being connected next.");
     }
 
     fn queue_tracking_control(&mut self, action: TrackingControlAction) {
@@ -2683,8 +2908,9 @@ mod tests {
     use std::sync::Arc;
 
     use openmanic_application::{
-        EntityRevision, LaneCapacities, LaneReceive, ScheduleCommand, ScheduleId,
-        ScheduleSnapshot, TrackingCommand, TrackingEvidence, WorkLane, bounded_runtime_lanes,
+        CatalogCommand, EntityRevision, LaneCapacities, LaneReceive, ScheduleCommand,
+        ScheduleId, ScheduleSnapshot, TrackingCommand, TrackingEvidence, WorkLane,
+        bounded_runtime_lanes,
     };
     use openmanic_domain::{
         ApplicationId, FocusSessionState, HalfOpenInterval, ScheduleEditScope, ScheduleRule,
@@ -2894,6 +3120,22 @@ mod tests {
                 scope: ScheduleEditScope::ThisAndFuture,
             } if *actual_series_id == series_id
         ));
+    }
+
+    #[test]
+    fn category_creation_command_uses_a_validated_name_and_correlated_timestamp() {
+        let identifiers = CommandIdentifiers::default();
+        let command = identifiers
+            .catalog_create_category("Deep work")
+            .expect("valid category name produces a command");
+        assert!(matches!(
+            command.payload(),
+            CatalogCommand::CreateCategory {
+                category,
+                observed_at_utc,
+            } if category.name().as_str() == "Deep work" && *observed_at_utc == command.submitted_at_utc()
+        ));
+        assert!(identifiers.catalog_create_category("   ").is_none());
     }
 
     #[test]
