@@ -22,21 +22,23 @@ use openmanic_application::{
     ApplicationIconLookup, ApplicationIconResult, ApplicationPort, CalendarBlockId,
     CalendarDayContext, CalendarDayProjector, CalendarDaySnapshot, CalendarProjectionSource,
     CalendarSourceFocus, CatalogCommand, CatalogPersistence, CatalogPersistenceError,
-    CatalogService, CommandEnvelope, CommandId, CommandReceipt, DataRevision, EntityRevision,
-    EventEnvelope, FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort,
-    FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot, LaneCapacities,
-    LaneReceive, LaneSubmit, LatestMailbox, LatestMailboxReceiver, LayoutPersistence,
-    LayoutSnapshot, MailboxReceive, MutationOutcome, OrderingKey, PortFailureReason,
-    ProjectionContextKey, ProjectionRequest, ProjectionSlot, RecurringOccurrenceOverride,
-    RecurringScheduleEdit, RecurringScheduleRuleChange, RuntimeLaneReceiver, RuntimeLanes,
-    RuntimeSupervisor, RuntimeWorker, ScheduleCommand, ScheduleId, ScheduleOccurrenceId,
-    SchedulePersistence, SchedulePersistenceError, ScheduleService, ScheduleSnapshot,
-    SchemaRevision, SettingsPersistence, SettingsSnapshot, ShutdownCoordinator, ShutdownPhase,
-    ShutdownStep, SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext,
-    TimelineProjector, TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity,
-    TitleObservationResult, TitleStabilizer, TrackingCommand, TrackingEvidence,
-    TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
-    WorkLane, bounded_runtime_lanes, latest_mailbox,
+    CatalogService, CommandEnvelope, CommandId, CommandReceipt, CsvExportRequest, CsvImportRequest,
+    DataOperationDestination, DataOperationOutcome, DataRevision, EntityRevision, EventEnvelope,
+    FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort, FocusPersistence,
+    FocusPersistenceError, FocusService, FocusSnapshot, ImportBatchId, ImportDestinationScope,
+    ImportScopeOutcome, JobId, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
+    LatestMailboxReceiver, LayoutPersistence, LayoutSnapshot, MailboxReceive, MutationOutcome,
+    OrderingKey, PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
+    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
+    RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
+    ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
+    ScheduleService, ScheduleSnapshot, SchemaRevision, SettingsPersistence, SettingsSnapshot,
+    ShutdownCoordinator, ShutdownPhase, ShutdownStep, SnapshotEnvelope, ThreadRoot,
+    TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
+    TimelineSnapshot, TimelineSourceActivity, TitleDisclosure, TitleObservationResult,
+    TitleStabilizer, TrackingCommand, TrackingEvidence, TrackingPersistenceIntent,
+    TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService, WorkLane,
+    bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
     ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
@@ -76,6 +78,8 @@ const UI_EVENT_CAPACITY: usize = 64;
 const WRITER_CRITICAL_CAPACITY: usize = 64;
 const WRITER_NORMAL_CAPACITY: usize = 64;
 const WRITER_OPTIONAL_CAPACITY: usize = 16;
+const DATA_OPERATION_REQUEST_CAPACITY: usize = 8;
+const DATA_OPERATION_RESULT_CAPACITY: usize = 32;
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const WORKER_IDLE_INTERVAL: Duration = Duration::from_millis(10);
 const PLATFORM_PUMP_INTERVAL: Duration = Duration::from_millis(50);
@@ -988,14 +992,57 @@ fn persistence_failure(reason: PortFailureReason) -> TrackingPersistenceSubmit {
     ))
 }
 
+/// One bounded local file operation owned by the dedicated data-operation worker.
+#[derive(Debug)]
+enum DataOperationWork {
+    Export(CsvExportRequest),
+    Import(CsvImportRequest),
+}
+
+/// Privacy-safe completion state made available to the host UI after a CSV operation finishes.
+#[derive(Clone, Debug)]
+enum DataOperationResult {
+    Exported {
+        request: CsvExportRequest,
+        outcome: DataOperationOutcome,
+    },
+    Imported {
+        request: CsvImportRequest,
+        outcome: ImportScopeOutcome,
+    },
+    Failed {
+        job_id: openmanic_application::JobId,
+        operation: &'static str,
+    },
+}
+
+fn retain_data_operation_result(
+    results: &Arc<Mutex<VecDeque<DataOperationResult>>>,
+    result: DataOperationResult,
+) {
+    let Ok(mut retained) = results.lock() else {
+        return;
+    };
+    if retained.len() == DATA_OPERATION_RESULT_CAPACITY {
+        let _ = retained.pop_front();
+    }
+    retained.push_back(result);
+}
+
 /// All process-owned workers and their bounded ingress boundaries.
 struct RuntimeResources {
+    // Retains the shared store until both workers have completed coordinated shutdown.
+    _store: Arc<Mutex<SqliteStore>>,
     lanes: Arc<RuntimeLanes<WriterWork>>,
     projection_requests: LatestMailbox<ProjectionRequest<TimelineContext>>,
     calendar_projection_requests: LatestMailbox<ProjectionRequest<CalendarDayContext>>,
     ui_inbox: Arc<UiInbox>,
     writer_control: SyncSender<WriterControl>,
     writer_handle: Option<JoinHandle<()>>,
+    data_operation_requests: SyncSender<DataOperationWork>,
+    data_operation_stop: Option<mpsc::Sender<()>>,
+    data_operation_handle: Option<JoinHandle<()>>,
+    data_operation_results: Arc<Mutex<VecDeque<DataOperationResult>>>,
     accepting: Arc<AtomicBool>,
     identifiers: Arc<CommandIdentifiers>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
@@ -1087,6 +1134,17 @@ impl RuntimeResources {
         let tracking_permitted = Arc::new(AtomicBool::new(settings_snapshot.lock().is_ok_and(
             |settings| settings.consent_revision() > 0 && settings.start_tracking_automatically(),
         )));
+        let store = Arc::new(Mutex::new(store));
+        let (data_operation_requests, data_operation_receiver) =
+            mpsc::sync_channel(DATA_OPERATION_REQUEST_CAPACITY);
+        let (data_operation_stop, data_operation_stop_receiver) = mpsc::channel();
+        let data_operation_results = Arc::new(Mutex::new(VecDeque::new()));
+        let data_operation_handle = spawn_data_operation_worker(
+            Arc::clone(&store),
+            data_operation_receiver,
+            data_operation_stop_receiver,
+            Arc::clone(&data_operation_results),
+        )?;
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
         let worker_focus_completion_pending = Arc::clone(&focus_completion_pending);
@@ -1095,11 +1153,12 @@ impl RuntimeResources {
         let worker_theme_mode = Arc::clone(&theme_mode);
         let worker_settings_snapshot = Arc::clone(&settings_snapshot);
         let worker_tracking_permitted = Arc::clone(&tracking_permitted);
+        let worker_store = Arc::clone(&store);
         let writer_handle = thread::Builder::new()
             .name(ThreadRoot::new(RuntimeWorker::Writer).name().to_owned())
             .spawn(move || {
                 run_writer_worker(
-                    store,
+                    worker_store,
                     lane_receiver,
                     control_receiver,
                     projection_receiver,
@@ -1121,12 +1180,17 @@ impl RuntimeResources {
 
         Ok((
             Self {
+                _store: store,
                 lanes,
                 projection_requests,
                 calendar_projection_requests,
                 ui_inbox,
                 writer_control,
                 writer_handle: Some(writer_handle),
+                data_operation_requests,
+                data_operation_stop: Some(data_operation_stop),
+                data_operation_handle: Some(data_operation_handle),
+                data_operation_results,
                 accepting,
                 identifiers,
                 focus_notification_error,
@@ -1320,6 +1384,32 @@ impl RuntimeResources {
             )
     }
 
+    /// Submits one explicitly confirmed CSV export without blocking an egui frame.
+    fn try_submit_csv_export(&self, request: CsvExportRequest) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && self
+                .data_operation_requests
+                .try_send(DataOperationWork::Export(request))
+                .is_ok()
+    }
+
+    /// Submits one explicitly initiated CSV import without blocking an egui frame.
+    fn try_submit_csv_import(&self, request: CsvImportRequest) -> bool {
+        self.accepting.load(Ordering::Acquire)
+            && self
+                .data_operation_requests
+                .try_send(DataOperationWork::Import(request))
+                .is_ok()
+    }
+
+    /// Removes the next completed local data operation for presentation by the host UI.
+    fn take_data_operation_result(&self) -> Option<DataOperationResult> {
+        self.data_operation_results
+            .lock()
+            .ok()
+            .and_then(|mut results| results.pop_front())
+    }
+
     fn reject_nonessential_work(&self) {
         self.accepting.store(false, Ordering::Release);
     }
@@ -1350,6 +1440,15 @@ impl RuntimeResources {
             return false;
         }
         self.writer_handle
+            .take()
+            .is_none_or(|handle| handle.join().is_ok())
+    }
+
+    fn close_data_operation_worker(&mut self) -> bool {
+        if let Some(stop) = self.data_operation_stop.take() {
+            let _ = stop.send(());
+        }
+        self.data_operation_handle
             .take()
             .is_none_or(|handle| handle.join().is_ok())
     }
@@ -1655,6 +1754,73 @@ fn run_metadata_worker(
     }
 }
 
+fn spawn_data_operation_worker(
+    store: Arc<Mutex<SqliteStore>>,
+    requests: Receiver<DataOperationWork>,
+    stop: Receiver<()>,
+    results: Arc<Mutex<VecDeque<DataOperationResult>>>,
+) -> Result<JoinHandle<()>, CompositionError> {
+    thread::Builder::new()
+        .name("openmanic-data-operations".to_owned())
+        .spawn(move || run_data_operation_worker(store, requests, stop, results))
+        .map_err(|_| CompositionError::Runtime)
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the operation worker owns its bounded request receiver and stop receiver."
+)]
+fn run_data_operation_worker(
+    store: Arc<Mutex<SqliteStore>>,
+    requests: Receiver<DataOperationWork>,
+    stop: Receiver<()>,
+    results: Arc<Mutex<VecDeque<DataOperationResult>>>,
+) {
+    loop {
+        if matches!(stop.try_recv(), Ok(()) | Err(TryRecvError::Disconnected)) {
+            return;
+        }
+        let work = match requests.recv_timeout(WORKER_IDLE_INTERVAL) {
+            Ok(work) => work,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        let completed_at_utc = UtcMicros::new(utc_now_micros());
+        let result = match work {
+            DataOperationWork::Export(request) => {
+                let job_id = request.job_id();
+                let export = store.lock().ok().and_then(|store| {
+                    store
+                        .open_read_session()
+                        .ok()
+                        .and_then(|mut reader| reader.export_csv(&request, completed_at_utc).ok())
+                });
+                export.map_or_else(
+                    || DataOperationResult::Failed {
+                        job_id,
+                        operation: "CSV export",
+                    },
+                    |outcome| DataOperationResult::Exported { request, outcome },
+                )
+            }
+            DataOperationWork::Import(request) => {
+                let job_id = request.job_id();
+                let import = store.lock().ok().and_then(|mut store| {
+                    store.writer().import_csv(&request, completed_at_utc).ok()
+                });
+                import.map_or_else(
+                    || DataOperationResult::Failed {
+                        job_id,
+                        operation: "CSV import",
+                    },
+                    |outcome| DataOperationResult::Imported { request, outcome },
+                )
+            }
+        };
+        retain_data_operation_result(&results, result);
+    }
+}
+
 #[expect(
     clippy::needless_pass_by_value,
     reason = "the named worker exclusively owns all receivers and publishers for its lifetime"
@@ -1668,7 +1834,7 @@ fn run_metadata_worker(
     reason = "the worker loop keeps each receiver's ordering and snapshot publication behavior auditable"
 )]
 fn run_writer_worker(
-    store: SqliteStore,
+    store: Arc<Mutex<SqliteStore>>,
     lanes: RuntimeLaneReceiver<WriterWork>,
     control: Receiver<WriterControl>,
     projection_requests: LatestMailboxReceiver<ProjectionRequest<TimelineContext>>,
@@ -1685,7 +1851,6 @@ fn run_writer_worker(
     settings_snapshot: Arc<Mutex<SettingsSnapshot>>,
     tracking_permitted: Arc<AtomicBool>,
 ) {
-    let store = Arc::new(Mutex::new(store));
     let mut services = writer_services(
         &store,
         focus_notification_error,
@@ -2685,6 +2850,7 @@ fn id_label(bytes: &[u8; 16]) -> String {
 }
 
 static TRACKER_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static DATA_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn tracker_run_id() -> TrackerRunId {
     let time = utc_now_micros().to_be_bytes();
@@ -2695,6 +2861,17 @@ fn tracker_run_id() -> TrackerRunId {
     bytes[..8].copy_from_slice(&time);
     bytes[8..].copy_from_slice(&sequence);
     TrackerRunId::from_bytes(bytes)
+}
+
+fn next_data_operation_id() -> JobId {
+    JobId::new(DATA_OPERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed))
+}
+
+fn import_batch_id(job_id: JobId) -> ImportBatchId {
+    let mut bytes = [0_u8; 16];
+    bytes[..8].copy_from_slice(&utc_now_micros().to_be_bytes());
+    bytes[8..].copy_from_slice(&job_id.get().to_be_bytes());
+    ImportBatchId::from_bytes(bytes)
 }
 
 /// Owns the composed vertical-slice resources until coordinated explicit quit completes.
@@ -2709,6 +2886,10 @@ pub struct VerticalSlice {
     instance_owner: WindowsInstanceOwner,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the native host retains independent settings and transient interaction toggles."
+)]
 struct VerticalSliceApp {
     bootstrap: BootstrapState,
     app: OpenManicApp<TrackingCommand, TodaySnapshot>,
@@ -2728,6 +2909,10 @@ struct VerticalSliceApp {
     close_to_tray: WindowsTrayController,
     settings_controller: SettingsController,
     onboarding_submission_pending: bool,
+    export_destination: String,
+    import_source: String,
+    export_includes_titles: bool,
+    data_operation_message: Option<String>,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
     create_schedule_mode: bool,
@@ -2864,6 +3049,10 @@ impl VerticalSlice {
             close_to_tray,
             settings_controller,
             onboarding_submission_pending: false,
+            export_destination: String::new(),
+            import_source: String::new(),
+            export_includes_titles: false,
+            data_operation_message: None,
             projection_sequence: 1,
             requested_range: None,
             create_schedule_mode: false,
@@ -2923,6 +3112,34 @@ impl VerticalSliceApp {
         self.runtime
             .ui_inbox
             .drain_into(self.app.controller_mut(), UI_INBOUND_CAPACITY / 2);
+        while let Some(result) = self.runtime.take_data_operation_result() {
+            self.data_operation_message = Some(match result {
+                DataOperationResult::Exported { request, outcome } => format!(
+                    "Exported {} rows (window titles {}).",
+                    outcome.row_count(),
+                    if request.title_disclosure() == TitleDisclosure::IncludeAfterConfirmation {
+                        "included"
+                    } else {
+                        "excluded"
+                    }
+                ),
+                DataOperationResult::Imported { request, outcome } => {
+                    let _ = request.destination_scope();
+                    format!(
+                        "Imported {} of {} validated rows; {} rejected.",
+                        outcome.committed(),
+                        outcome.parsed(),
+                        outcome.rejected()
+                    )
+                }
+                DataOperationResult::Failed { job_id, operation } => {
+                    format!(
+                        "{operation} job {} did not complete. Try again.",
+                        job_id.get()
+                    )
+                }
+            });
+        }
         if let MailboxReceive::Latest(snapshot) = self.snapshots.try_receive() {
             let _ = self
                 .app
@@ -3378,6 +3595,7 @@ impl VerticalSliceApp {
 
     #[expect(
         clippy::excessive_nesting,
+        clippy::too_many_lines,
         reason = "the small built-in appearance picker keeps persistence submission beside selection"
     )]
     fn render_settings_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
@@ -3420,6 +3638,71 @@ impl VerticalSliceApp {
                 }
             }
         });
+        ui.add_space(12.0);
+        ui.separator();
+        ui.heading("Data");
+        ui.label("Export and import operate only on files you select on this device.");
+        ui.horizontal(|ui| {
+            ui.label("Export CSV to:");
+            ui.text_edit_singleline(&mut self.export_destination);
+        });
+        ui.checkbox(
+            &mut self.export_includes_titles,
+            "I understand this export includes collected window titles",
+        );
+        if ui
+            .add_enabled(
+                !self.export_destination.trim().is_empty(),
+                eframe::egui::Button::new("Export current day"),
+            )
+            .clicked()
+            && let Some(range) = day_range(0)
+        {
+            let disclosure = if self.export_includes_titles {
+                TitleDisclosure::IncludeAfterConfirmation
+            } else {
+                TitleDisclosure::Exclude
+            };
+            let request = CsvExportRequest::new(
+                next_data_operation_id(),
+                range,
+                DataOperationDestination::new(PathBuf::from(self.export_destination.trim())),
+                disclosure,
+            );
+            self.data_operation_message = Some(if self.runtime.try_submit_csv_export(request) {
+                "Export queued. You can continue using OpenManic while it runs.".to_owned()
+            } else {
+                "Export could not be queued. Try again after current work finishes.".to_owned()
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label("Import CSV from:");
+            ui.text_edit_singleline(&mut self.import_source);
+        });
+        ui.label("Import merges validated records into this local store; it does not replace it.");
+        if ui
+            .add_enabled(
+                !self.import_source.trim().is_empty(),
+                eframe::egui::Button::new("Import CSV"),
+            )
+            .clicked()
+        {
+            let job_id = next_data_operation_id();
+            let request = CsvImportRequest::new(
+                job_id,
+                import_batch_id(job_id),
+                DataOperationDestination::new(PathBuf::from(self.import_source.trim())),
+                ImportDestinationScope::CurrentStore,
+            );
+            self.data_operation_message = Some(if self.runtime.try_submit_csv_import(request) {
+                "Import queued. You can continue using OpenManic while it runs.".to_owned()
+            } else {
+                "Import could not be queued. Try again after current work finishes.".to_owned()
+            });
+        }
+        if let Some(message) = &self.data_operation_message {
+            ui.small(message);
+        }
         if basic != *self.settings_controller.basic() {
             let _ = self
                 .settings_controller
@@ -4412,9 +4695,8 @@ impl VerticalSliceApp {
                     self.runtime.reject_nonessential_work();
                     true
                 }
-                ShutdownStep::CancelSafeReads
-                | ShutdownStep::FlushSettings
-                | ShutdownStep::JoinReadersAndWorkers => true,
+                ShutdownStep::CancelSafeReads | ShutdownStep::FlushSettings => true,
+                ShutdownStep::JoinReadersAndWorkers => self.runtime.close_data_operation_worker(),
                 ShutdownStep::CheckpointCriticalActivity => self.runtime.checkpoint_writer(),
                 ShutdownStep::CloseWriter => self.runtime.close_writer(),
                 ShutdownStep::StopPlatform => self.stop_platform(),
