@@ -23,6 +23,7 @@ mod model;
 mod overview;
 mod reducer;
 mod repaint;
+mod settings;
 mod shell;
 mod shutdown;
 mod theme;
@@ -61,6 +62,10 @@ pub use overview::{
 pub use shutdown::{
     ShutdownAction, ShutdownController, ShutdownEffect, ShutdownFailureViewModel,
     render_shutdown_failure,
+};
+pub use settings::{
+    SettingsAction, SettingsAdvancedDraft, SettingsBasicDraft, SettingsController, SettingsEffect,
+    TITLE_COLLECTION_DISCLOSURE,
 };
 pub use theme::{
     BuiltInThemeMode, ResolvedTheme, ThemeController, ThemeResolutionError, ThemeTokens,
