@@ -271,6 +271,24 @@ mod native {
             disposition
         }
 
+        /// Shows a best-effort native notice after a durable focus completion.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`WindowsTrayError::ModifyIcon`] when the notification-area icon cannot show
+        /// the notice. The already-persisted focus completion is never affected.
+        pub fn show_focus_completion_notice(&self) -> Result<(), WindowsTrayError> {
+            let mut data = self.icon_data(NIF_INFO);
+            write_wide(&mut data.szInfo, "Your focus session is complete.");
+            write_wide(&mut data.szInfoTitle, "Focus session complete");
+            // SAFETY: The shell copies the fixed-size notification structure synchronously.
+            if unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw const data) }.as_bool() {
+                Ok(())
+            } else {
+                Err(WindowsTrayError::ModifyIcon)
+            }
+        }
+
         /// Removes and returns the next local native action without invoking application code.
         #[must_use]
         pub fn take_next_action(&mut self) -> Option<WindowsPlatformAction> {

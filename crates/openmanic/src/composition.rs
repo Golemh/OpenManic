@@ -227,11 +227,13 @@ struct WriterServices {
 /// Delivers a bounded in-app completion signal after durable focus completion.
 struct InAppFocusNotifications {
     completion_pending: Arc<AtomicBool>,
+    native_notice_sender: SyncSender<()>,
 }
 
 impl FocusNotificationPort for InAppFocusNotifications {
     fn notify_completed(&mut self, _: &FocusSnapshot) -> Result<(), FocusNotificationError> {
         self.completion_pending.store(true, Ordering::Release);
+        let _ = self.native_notice_sender.try_send(());
         Ok(())
     }
 }
@@ -970,6 +972,8 @@ struct RuntimeResources {
     identifiers: Arc<CommandIdentifiers>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
     focus_completion_pending: Arc<AtomicBool>,
+    #[cfg(windows)]
+    focus_notice_receiver: Option<Receiver<()>>,
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
     restore_requested: Arc<AtomicBool>,
     quit_requested: Arc<AtomicBool>,
@@ -1019,6 +1023,7 @@ impl RuntimeResources {
         let identifiers = Arc::new(CommandIdentifiers::default());
         let focus_notification_error = Arc::new(Mutex::new(None));
         let focus_completion_pending = Arc::new(AtomicBool::new(false));
+        let (focus_notice_sender, focus_notice_receiver) = mpsc::sync_channel(1);
         let focus_snapshot = Arc::new(Mutex::new(None));
         let worker_ui_inbox = Arc::clone(&ui_inbox);
         let worker_focus_notification_error = Arc::clone(&focus_notification_error);
@@ -1036,6 +1041,7 @@ impl RuntimeResources {
                     worker_ui_inbox,
                     worker_focus_notification_error,
                     worker_focus_completion_pending,
+                    focus_notice_sender,
                     worker_focus_snapshot,
                 );
             })
@@ -1052,6 +1058,8 @@ impl RuntimeResources {
                 identifiers,
                 focus_notification_error,
                 focus_completion_pending,
+                #[cfg(windows)]
+                focus_notice_receiver: Some(focus_notice_receiver),
                 focus_snapshot,
                 restore_requested: Arc::new(AtomicBool::new(false)),
                 quit_requested: Arc::new(AtomicBool::new(false)),
@@ -1226,11 +1234,15 @@ impl RuntimeResources {
             Arc::clone(&self.application_icons),
         )?;
         let (title_requests, title_stop, title_handle) = spawn_title_worker(Arc::clone(&self.lanes))?;
+        let Some(focus_notice_receiver) = self.focus_notice_receiver.take() else {
+            return Err(CompositionError::Runtime);
+        };
         let (stop_sender, platform_handle, ready_receiver) = spawn_platform_worker(
             self.action_router(),
             self.evidence_sink(),
             metadata_requests,
             title_requests,
+            focus_notice_receiver,
         )?;
         if let Ok(Ok(())) = ready_receiver.recv_timeout(Duration::from_secs(5)) {
             self.activation_handle = Some(activation_handle);
@@ -1348,6 +1360,7 @@ fn spawn_platform_worker(
     evidence_sink: RuntimeEvidenceSink,
     metadata_requests: SyncSender<WindowsApplicationMetadataRequest>,
     title_requests: SyncSender<WindowsWindowTitleObservationRequest>,
+    focus_notice_receiver: Receiver<()>,
 ) -> Result<PlatformWorkerStart, CompositionError> {
     let (stop_sender, stop_receiver) = mpsc::channel();
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -1363,6 +1376,7 @@ fn spawn_platform_worker(
                 evidence_sink,
                 metadata_requests,
                 title_requests,
+                focus_notice_receiver,
                 stop_receiver,
                 &ready_sender,
             )
@@ -1385,6 +1399,7 @@ fn run_platform_worker(
     evidence_sink: RuntimeEvidenceSink,
     metadata_requests: SyncSender<WindowsApplicationMetadataRequest>,
     title_requests: SyncSender<WindowsWindowTitleObservationRequest>,
+    focus_notice_receiver: Receiver<()>,
     stop_receiver: Receiver<()>,
     ready_sender: &SyncSender<Result<(), ()>>,
 ) -> Result<(), openmanic_platform::WindowsControlError> {
@@ -1396,6 +1411,9 @@ fn run_platform_worker(
     let _ = ready_sender.send(Ok(()));
     loop {
         control.pump_available_with_tray(&mut adapter, &evidence_sink, &mut tray)?;
+        while focus_notice_receiver.try_recv().is_ok() {
+            let _ = tray.show_focus_completion_notice();
+        }
         while let Some(action) = tray.take_next_action() {
             action_router.route(action);
         }
@@ -1519,10 +1537,11 @@ fn run_writer_worker(
     ui_inbox: Arc<UiInbox>,
     focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
     focus_completion_pending: Arc<AtomicBool>,
+    focus_notice_sender: SyncSender<()>,
     focus_snapshot: Arc<Mutex<Option<FocusSnapshot>>>,
 ) {
     let store = Arc::new(Mutex::new(store));
-    let mut services = writer_services(&store, focus_notification_error, focus_completion_pending);
+    let mut services = writer_services(&store, focus_notification_error, focus_completion_pending, focus_notice_sender);
     reconcile_focus_snapshot(&mut services, &focus_snapshot);
     let mut current_projection = None;
     let mut last_focus_reconciliation = Instant::now();
@@ -1595,6 +1614,7 @@ fn writer_services(
     store: &Arc<Mutex<SqliteStore>>,
     _focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
     focus_completion_pending: Arc<AtomicBool>,
+    focus_notice_sender: SyncSender<()>,
 ) -> WriterServices {
     let tracking = TrackingService::new(
         tracker_run_id(),
@@ -1618,6 +1638,7 @@ fn writer_services(
         },
         InAppFocusNotifications {
             completion_pending: focus_completion_pending,
+            native_notice_sender: focus_notice_sender,
         },
     );
     WriterServices {
