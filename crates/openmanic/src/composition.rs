@@ -3131,10 +3131,11 @@ impl VerticalSliceApp {
                     if schedule.rule().is_repeating()
                         && let (ScheduleId::Series(series_id), Some(anchor_date)) = (schedule.id(), anchor_date)
                         && ui.button("Edit…").clicked()
-                    {
-                        self.schedule_draft = Some(ScheduleDraft::from_recurring(
+                        && let Some(draft) = ScheduleDraft::from_recurring(
                             schedule, series_id, anchor_date, interval,
-                        ));
+                        )
+                    {
+                        self.schedule_draft = Some(draft);
                     }
                 });
             }
@@ -3260,16 +3261,11 @@ impl VerticalSliceApp {
                 RecurringOccurrenceOverride { interval: range, start_after_gap: false, start_earlier_fold: false, end_after_gap: false, end_earlier_fold: false },
             ),
             ScheduleEditScope::ThisAndFuture | ScheduleEditScope::EveryOccurrence => {
-                const DAY_US: i64 = 86_400_000_000;
-                const SECOND_US: i64 = 1_000_000;
-                let start_second = u32::try_from(range.start().get().rem_euclid(DAY_US) / SECOND_US)
-                    .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
-                let end_second = u32::try_from(range.end().get().rem_euclid(DAY_US) / SECOND_US)
-                    .map_err(|_| ScheduleDraftValidationError::CannotRepresent)?;
                 RecurringScheduleEdit::Rule(RecurringScheduleRuleChange {
-                    label: label.to_owned(), category_id: None, weekday_mask,
-                    start_second_of_day: start_second, end_second_of_day: end_second,
-                    time_zone_id: "Etc/UTC".to_owned(),
+                    label: label.to_owned(), category_id: recurring.category_id, weekday_mask,
+                    start_second_of_day: recurring.start_second_of_day,
+                    end_second_of_day: recurring.end_second_of_day,
+                    time_zone_id: recurring.time_zone_id,
                 })
             }
         };
@@ -3394,13 +3390,48 @@ impl ScheduleDraft {
         })
     }
 
-    fn from_recurring(snapshot: ScheduleSnapshot, series_id: ScheduleSeriesId, anchor_date: i32, range: HalfOpenInterval) -> Self {
-        Self { range, label: snapshot.rule().label().to_owned(), repeats: true, weekday_mask: snapshot.rule().segments().first().map_or(0b0111_1111, |segment| segment.weekday_mask()), validation_error: None, existing: None, recurring: Some(RecurringScheduleEditRequest { series_id, anchor_date, scope: ScheduleEditScope::OnlyThisDate, expected_revision: snapshot.entity_revision() }) }
+    fn from_recurring(
+        snapshot: ScheduleSnapshot,
+        series_id: ScheduleSeriesId,
+        anchor_date: i32,
+        range: HalfOpenInterval,
+    ) -> Option<Self> {
+        let segment = snapshot.rule().segments().into_iter().find(|segment| {
+            segment.effective_start_date() <= anchor_date
+                && segment.effective_end_date().is_none_or(|end| anchor_date <= end)
+        })?;
+        Some(Self {
+            range,
+            label: segment.label().to_owned(),
+            repeats: true,
+            weekday_mask: segment.weekday_mask(),
+            validation_error: None,
+            existing: None,
+            recurring: Some(RecurringScheduleEditRequest {
+                series_id,
+                anchor_date,
+                scope: ScheduleEditScope::OnlyThisDate,
+                expected_revision: snapshot.entity_revision(),
+                category_id: segment.category_id(),
+                start_second_of_day: segment.start_second_of_day(),
+                end_second_of_day: segment.end_second_of_day(),
+                time_zone_id: segment.time_zone_id().to_owned(),
+            }),
+        })
     }
 }
 
 #[derive(Clone, Debug)]
-struct RecurringScheduleEditRequest { series_id: ScheduleSeriesId, anchor_date: i32, scope: ScheduleEditScope, expected_revision: EntityRevision }
+struct RecurringScheduleEditRequest {
+    series_id: ScheduleSeriesId,
+    anchor_date: i32,
+    scope: ScheduleEditScope,
+    expected_revision: EntityRevision,
+    category_id: Option<CategoryId>,
+    start_second_of_day: u32,
+    end_second_of_day: u32,
+    time_zone_id: String,
+}
 
 fn render_schedule_draft(
     ui: &mut eframe::egui::Ui,
@@ -3607,7 +3638,7 @@ mod tests {
     use super::{
         CommandIdentifiers, PlatformActionRouter, UiInbox, UiIngress, day_range,
         focus_remaining_label, focus_remaining_us, recurring_schedule_rule, store_identity,
-        ScheduleDraftValidationError,
+        ScheduleDraft, ScheduleDraftValidationError,
     };
 
     #[test]
@@ -3806,6 +3837,53 @@ mod tests {
                 scope: ScheduleEditScope::ThisAndFuture,
             } if *actual_series_id == series_id
         ));
+    }
+
+    #[test]
+    fn recurring_editor_uses_the_segment_active_on_the_selected_date() {
+        let series_id = ScheduleSeriesId::from_bytes([8; 16]);
+        let mut rule = ScheduleRule::repeating(
+            "Original",
+            None,
+            0b0001_1111,
+            9 * 3_600,
+            10 * 3_600,
+            0,
+            None,
+            "Asia/Karachi",
+        )
+        .expect("valid initial segment");
+        rule.change_this_and_future(
+            120,
+            "Later",
+            None,
+            0b0110_0000,
+            14 * 3_600,
+            15 * 3_600,
+            "Europe/London",
+        )
+        .expect("valid later segment");
+        let snapshot = ScheduleSnapshot::try_new(
+            ScheduleId::Series(series_id),
+            rule,
+            EntityRevision::new(3),
+            UtcMicros::new(0),
+        )
+        .expect("matching recurrence identity");
+        let range = HalfOpenInterval::try_new(
+            UtcMicros::new(120 * 86_400_000_000),
+            UtcMicros::new(120 * 86_400_000_000 + 3_600_000_000),
+        )
+        .expect("positive selected occurrence");
+
+        let draft = ScheduleDraft::from_recurring(snapshot, series_id, 120, range)
+            .expect("selected date belongs to a rule segment");
+        let recurring = draft.recurring.expect("recurring edit metadata");
+        assert_eq!(draft.label, "Later");
+        assert_eq!(draft.weekday_mask, 0b0110_0000);
+        assert_eq!(recurring.start_second_of_day, 14 * 3_600);
+        assert_eq!(recurring.end_second_of_day, 15 * 3_600);
+        assert_eq!(recurring.time_zone_id, "Europe/London");
     }
 
     #[test]
