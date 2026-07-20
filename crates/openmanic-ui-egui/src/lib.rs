@@ -18,11 +18,13 @@ mod controller;
 mod distribution;
 mod layout;
 mod layout_editor;
+mod jobs;
 mod model;
 mod overview;
 mod reducer;
 mod repaint;
 mod shell;
+mod shutdown;
 mod theme;
 pub mod timeline;
 mod today;
@@ -43,6 +45,10 @@ pub use distribution::{
 };
 pub use layout::{DashboardColumnCount, DashboardPlacement, DashboardReflow, reflow_dashboard};
 pub use layout_editor::{LayoutEditAction, LayoutEditEffect, LayoutEditor};
+pub use jobs::{
+    DestructiveConfirmation, JobDescriptor, JobPresentation, JobPresentationState, JobProgress,
+    JobsAction, JobsController, JobsEffect, JobsViewModel,
+};
 pub use model::{
     DataLimitation, EmptyReason, MutationStatus, PresentableData, Route, RouteLocalState,
     SnapshotReception, TodayCategoryFilter, TodayNarrowingCriterion, TodayViewContext, UiAction,
@@ -51,6 +57,10 @@ pub use model::{
 pub use overview::{
     OverviewAction, OverviewController, OverviewDataState, OverviewEffect,
     OverviewPresentedAllocation, OverviewSavedViewItem, OverviewViewModel,
+};
+pub use shutdown::{
+    ShutdownAction, ShutdownController, ShutdownEffect, ShutdownFailureViewModel,
+    render_shutdown_failure,
 };
 pub use theme::{
     BuiltInThemeMode, ResolvedTheme, ThemeController, ThemeResolutionError, ThemeTokens,
