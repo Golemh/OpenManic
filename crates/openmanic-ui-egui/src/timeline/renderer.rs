@@ -19,16 +19,16 @@ use std::{
 };
 
 use super::{
-    PaintFill, PaintPrimitive, TimelineBand, TimelineDetail, TimelineDetailValue, TimelineGesture,
-    TimelineGestureEvent, TimelineInteraction, TimelinePaintPlan, TimelineTransform, hit_test,
-    prepare_schedule_overlays,
+    AdaptiveTickLayout, PaintFill, PaintPrimitive, TimelineBand, TimelineDetail,
+    TimelineDetailValue, TimelineGesture, TimelineGestureEvent, TimelineInteraction,
+    TimelinePaintPlan, TimelineTransform, hit_test, prepare_schedule_overlays,
 };
 use crate::{DataLimitation, PresentableData, ThemeTokens, TodayAction, TodayViewContext};
 
 const BAND_LABEL_WIDTH: f32 = 22.0;
-const OVERVIEW_TOP_PADDING: f32 = 22.0;
+const OVERVIEW_TOP_PADDING: f32 = 45.0;
 const OVERVIEW_HEIGHT: f32 = 44.0;
-const OVERVIEW_AXIS_GAP: f32 = 8.0;
+const OVERVIEW_AXIS_GAP: f32 = 12.0;
 const TICK_HEIGHT: f32 = 24.0;
 const CATEGORY_BAND_HEIGHT: f32 = 132.0;
 const ACTIVITY_BAND_HEIGHT: f32 = 14.0;
@@ -1137,7 +1137,7 @@ fn paint_overview(
     painter.text(
         Pos2::new(
             overview_rect.min.x - BAND_LABEL_WIDTH + 8.0,
-            overview_rect.min.y - 9.0,
+            overview_rect.min.y - 22.0,
         ),
         Align2::LEFT_CENTER,
         "24-HOUR VIEWFINDER",
@@ -1149,7 +1149,7 @@ fn paint_overview(
         format_view_range(view_range, snapshot.visible_range())
     );
     let view_chip = Rect::from_min_size(
-        Pos2::new(overview_rect.max.x - 178.0, overview_rect.min.y - 24.0),
+        Pos2::new(overview_rect.max.x - 178.0, overview_rect.min.y - 35.0),
         Vec2::new(178.0, 26.0),
     );
     painter.rect(
@@ -1292,27 +1292,15 @@ fn paint_hour_axis(
     bands: BandRects,
     theme_tokens: ThemeTokens,
 ) {
-    const TICK_INTERVALS: u64 = 5;
-    let visible = transform.visible_range();
-    for tick_index in 0..=TICK_INTERVALS {
-        let offset = visible.duration_us().saturating_mul(tick_index) / TICK_INTERVALS;
-        let instant = UtcMicros::new(
-            visible
-                .start()
-                .get()
-                .saturating_add(i64::try_from(offset).unwrap_or(i64::MAX)),
-        );
-        let x = transform.x_for(instant);
-        let alignment = if tick_index == 0 {
-            Align2::LEFT_TOP
-        } else if tick_index == TICK_INTERVALS {
-            Align2::RIGHT_TOP
-        } else {
-            Align2::CENTER_TOP
-        };
+    let Ok(layout) = AdaptiveTickLayout::try_new(48.0, 8.0) else {
+        return;
+    };
+    for tick in layout.generate(transform).ticks() {
+        let instant = tick.instant();
+        let x = tick.x();
         painter.text(
             Pos2::new(x, axis_top + 2.0),
-            alignment,
+            Align2::CENTER_TOP,
             format_day_clock(day_range, instant),
             FontId::proportional(10.0),
             theme_tokens.content_secondary(),

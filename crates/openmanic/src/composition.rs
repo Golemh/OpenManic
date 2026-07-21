@@ -3946,6 +3946,7 @@ struct VerticalSliceApp {
     requested_range: Option<HalfOpenInterval>,
     overview_range_mode: OverviewRangeMode,
     create_schedule_mode: bool,
+    schedule_hint_until: Option<Instant>,
     schedule_draft: Option<ScheduleDraft>,
     schedule_delete_request: Option<ScheduleDeleteRequest>,
     latest_schedule_command: Option<CommandId>,
@@ -4097,6 +4098,7 @@ impl VerticalSlice {
             requested_range: None,
             overview_range_mode: OverviewRangeMode::SevenDays,
             create_schedule_mode: false,
+            schedule_hint_until: None,
             schedule_draft: None,
             schedule_delete_request: None,
             latest_schedule_command: None,
@@ -4830,6 +4832,7 @@ impl VerticalSliceApp {
         openmanic_ui_egui::design::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.set_min_height(57.0);
+            ui.add_space(5.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 7.0;
                 if openmanic_ui_egui::design::day_button(ui, "‹", false) {
@@ -5202,18 +5205,46 @@ impl VerticalSliceApp {
                                     });
                                 }
                                 TodayWidgetResolution::Available(definition) => {
-                                    ui.horizontal(|ui| {
-                                        paint_today_widget_marker(ui, definition.kind(), tokens);
-                                        openmanic_ui_egui::design::section_header(
-                                            ui,
-                                            definition.display_name(),
+                                    if definition.kind() == TodayWidgetKind::TIMELINE {
+                                        ui.horizontal(|ui| {
+                                            paint_today_widget_marker(
+                                                ui,
+                                                definition.kind(),
+                                                tokens,
+                                            );
+                                            ui.vertical(|ui| {
+                                                openmanic_ui_egui::design::section_header(
+                                                    ui,
+                                                    definition.display_name(),
+                                                );
+                                                ui.label(
+                                                    eframe::egui::RichText::new(
+                                                        definition.description(),
+                                                    )
+                                                    .size(12.5)
+                                                    .color(openmanic_ui_egui::design::TEXT_FAINT),
+                                                );
+                                            });
+                                            self.render_timeline_actions(ui);
+                                        });
+                                    } else {
+                                        ui.horizontal(|ui| {
+                                            paint_today_widget_marker(
+                                                ui,
+                                                definition.kind(),
+                                                tokens,
+                                            );
+                                            openmanic_ui_egui::design::section_header(
+                                                ui,
+                                                definition.display_name(),
+                                            );
+                                        });
+                                        ui.label(
+                                            eframe::egui::RichText::new(definition.description())
+                                                .size(12.5)
+                                                .color(openmanic_ui_egui::design::TEXT_FAINT),
                                         );
-                                    });
-                                    ui.label(
-                                        eframe::egui::RichText::new(definition.description())
-                                            .size(12.5)
-                                            .color(openmanic_ui_egui::design::TEXT_FAINT),
-                                    );
+                                    }
                                     ui.add_space(8.0);
                                     if self.layout_editor.is_editing() {
                                         ui.colored_label(
@@ -5913,68 +5944,93 @@ impl VerticalSliceApp {
         }
     }
 
+    fn render_timeline_actions(&mut self, ui: &mut eframe::egui::Ui) {
+        ui.with_layout(
+            eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+            |ui| {
+                if openmanic_ui_egui::design::soft_button_sized(
+                    ui,
+                    "Reset view",
+                    eframe::egui::vec2(109.0, 35.0),
+                ) && self.timeline.reset_view()
+                {
+                    ui.ctx().request_repaint();
+                }
+                if openmanic_ui_egui::design::soft_button_sized(
+                    ui,
+                    "+ Add schedule",
+                    eframe::egui::vec2(126.0, 35.0),
+                ) {
+                    self.create_schedule_mode = true;
+                    self.schedule_hint_until = Some(Instant::now() + Duration::from_millis(2_400));
+                    ui.ctx().request_repaint();
+                }
+            },
+        );
+    }
+
     #[expect(
-        clippy::too_many_lines,
         clippy::excessive_nesting,
-        reason = "the compact toolbar keeps its two timeline controls together"
+        reason = "the temporary toast keeps its frame, icon, and text styling together"
     )]
+    fn render_schedule_hint(&mut self, context: &eframe::egui::Context) {
+        let Some(until) = self.schedule_hint_until else {
+            return;
+        };
+        if Instant::now() >= until {
+            self.schedule_hint_until = None;
+            return;
+        }
+        eframe::egui::Area::new(eframe::egui::Id::new("schedule-hint-toast"))
+            .anchor(
+                eframe::egui::Align2::CENTER_BOTTOM,
+                eframe::egui::vec2(0.0, -28.0),
+            )
+            .order(eframe::egui::Order::Foreground)
+            .show(context, |ui| {
+                eframe::egui::Frame::new()
+                    .fill(openmanic_ui_egui::design::SURFACE_RAISED)
+                    .stroke(eframe::egui::Stroke::new(
+                        1.0,
+                        openmanic_ui_egui::design::SCHEDULED.gamma_multiply(0.75),
+                    ))
+                    .corner_radius(11.0)
+                    .inner_margin(eframe::egui::Margin::symmetric(20, 11))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (dot, _) = ui.allocate_exact_size(
+                                eframe::egui::vec2(10.0, 10.0),
+                                eframe::egui::Sense::hover(),
+                            );
+                            ui.painter().circle_filled(
+                                dot.center(),
+                                3.5,
+                                openmanic_ui_egui::design::SCHEDULED,
+                            );
+                            ui.label(
+                                eframe::egui::RichText::new(
+                                    "Drag on the timeline to set a scheduled event",
+                                )
+                                .size(13.0)
+                                .strong()
+                                .color(openmanic_ui_egui::design::SCHEDULED),
+                            );
+                        });
+                    });
+            });
+        context.request_repaint_after(Duration::from_millis(100));
+    }
+
     fn render_timeline_widget(
         &mut self,
         ui: &mut eframe::egui::Ui,
         snapshot: &TodaySnapshot,
         context: &openmanic_ui_egui::TodayViewContext,
     ) {
-        ui.horizontal(|ui| {
-            ui.colored_label(
-                self.app.theme_tokens().content_secondary(),
-                "Scroll to zoom · drag the viewfinder window to pan · right-click for options",
-            );
-            ui.with_layout(
-                eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
-                |ui| {
-                    if openmanic_ui_egui::design::soft_button_sized(
-                        ui,
-                        "Reset view",
-                        eframe::egui::vec2(109.0, 35.0),
-                    ) && self.timeline.reset_view()
-                    {
-                        ui.ctx().request_repaint();
-                    }
-                    let add_schedule = ui.add_sized(
-                        [126.0, 35.0],
-                        eframe::egui::Button::new(
-                            eframe::egui::RichText::new("+ Add schedule")
-                                .size(12.5)
-                                .strong()
-                                .color(openmanic_ui_egui::design::TEXT_TERTIARY),
-                        )
-                        .fill(if self.create_schedule_mode {
-                            openmanic_ui_egui::design::ACCENT.gamma_multiply(0.22)
-                        } else {
-                            openmanic_ui_egui::design::SURFACE_RAISED
-                        })
-                        .stroke(eframe::egui::Stroke::new(
-                            1.0,
-                            if self.create_schedule_mode {
-                                openmanic_ui_egui::design::ACCENT
-                            } else {
-                                openmanic_ui_egui::design::BORDER
-                            },
-                        ))
-                        .corner_radius(6.0),
-                    );
-                    if add_schedule.clicked() {
-                        self.create_schedule_mode = !self.create_schedule_mode;
-                    }
-                },
-            );
-        });
-        if self.create_schedule_mode {
-            ui.colored_label(
-                self.app.theme_tokens().interaction_primary(),
-                "Drag across the timeline to choose exact start and end times.",
-            );
-        }
+        ui.colored_label(
+            self.app.theme_tokens().content_secondary(),
+            "Scroll to zoom · drag the viewfinder window to pan · right-click for options",
+        );
         self.timeline.set_theme_tokens(self.app.theme_tokens());
         self.timeline.set_category_labels(
             snapshot
@@ -6004,6 +6060,8 @@ impl VerticalSliceApp {
                 TimelineRenderAction::ViewRangeChanged { .. } => ui.ctx().request_repaint(),
                 TimelineRenderAction::ScheduleRequested { range } => {
                     self.schedule_draft = Some(ScheduleDraft::new(range));
+                    self.create_schedule_mode = false;
+                    self.schedule_hint_until = None;
                 }
                 TimelineRenderAction::OpenCategories { application_id } => {
                     self.selected_category_applications.clear();
@@ -6012,6 +6070,7 @@ impl VerticalSliceApp {
                 }
             }
         }
+        self.render_schedule_hint(ui.ctx());
         self.render_schedule_editor(ui);
         self.render_existing_schedule_controls(ui, snapshot);
     }
