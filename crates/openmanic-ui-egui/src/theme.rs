@@ -154,7 +154,24 @@ impl ResolvedTheme {
         visuals.override_text_color = Some(self.tokens.content_primary);
         visuals.selection.bg_fill = self.tokens.interaction_primary;
         visuals.error_fg_color = self.tokens.error;
-        context.set_visuals(visuals);
+        visuals.widgets.noninteractive.bg_fill = self.tokens.panel;
+        visuals.widgets.noninteractive.bg_stroke =
+            egui::Stroke::new(1.0, self.tokens.timeline_grid);
+        visuals.widgets.inactive.bg_fill = self.tokens.interaction_primary.gamma_multiply(0.14);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, self.tokens.timeline_grid);
+        visuals.widgets.hovered.bg_fill = self.tokens.interaction_primary.gamma_multiply(0.28);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.tokens.interaction_primary);
+        visuals.widgets.active.bg_fill = self.tokens.interaction_primary.gamma_multiply(0.45);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.tokens.interaction_primary);
+        for widget in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+        ] {
+            widget.corner_radius = egui::CornerRadius::same(6);
+        }
 
         let native_theme = match self.mode {
             BuiltInThemeMode::Dark => Theme::Dark,
@@ -162,9 +179,10 @@ impl ResolvedTheme {
             BuiltInThemeMode::FollowSystem => return,
         };
         let mut style = (*context.style_of(native_theme)).clone();
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+        style.spacing.button_padding = egui::vec2(10.0, 5.0);
         context.set_style_of(native_theme, style);
+        context.set_visuals(visuals);
     }
 }
 
@@ -225,16 +243,16 @@ impl ThemeController {
 fn tokens_for(mode: BuiltInThemeMode) -> ThemeTokens {
     match mode {
         BuiltInThemeMode::Dark => ThemeTokens {
-            canvas: Color32::from_rgb(18, 22, 31),
-            panel: Color32::from_rgb(27, 33, 45),
-            content_primary: Color32::from_rgb(238, 242, 250),
-            content_secondary: Color32::from_rgb(176, 188, 208),
-            interaction_primary: Color32::from_rgb(121, 151, 255),
-            success: Color32::from_rgb(107, 201, 139),
-            warning: Color32::from_rgb(236, 190, 93),
-            error: Color32::from_rgb(237, 113, 113),
-            timeline_grid: Color32::from_rgb(99, 114, 137),
-            schedule_bracket: Color32::from_rgb(133, 201, 255),
+            canvas: Color32::from_rgb(3, 7, 18),
+            panel: Color32::from_rgb(9, 13, 26),
+            content_primary: Color32::from_rgb(243, 246, 255),
+            content_secondary: Color32::from_rgb(137, 151, 184),
+            interaction_primary: Color32::from_rgb(103, 84, 255),
+            success: Color32::from_rgb(52, 211, 153),
+            warning: Color32::from_rgb(245, 158, 11),
+            error: Color32::from_rgb(244, 63, 94),
+            timeline_grid: Color32::from_rgb(30, 41, 59),
+            schedule_bracket: Color32::from_rgb(34, 211, 238),
         },
         BuiltInThemeMode::Light => ThemeTokens {
             canvas: Color32::from_rgb(244, 247, 252),

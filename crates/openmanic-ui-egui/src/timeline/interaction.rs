@@ -54,6 +54,11 @@ pub enum TimelineGesture {
         /// Shift changes vertical wheel input into horizontal panning.
         shift_held: bool,
     },
+    /// Replaces the visible range from the 24-hour overview navigator.
+    NavigateTo {
+        /// The exact range selected by the navigator.
+        range: HalfOpenInterval,
+    },
     /// Restores the caller-supplied default timeline range.
     ResetView,
     /// Cancels a captured gesture or transient hover/popup state.
@@ -192,10 +197,23 @@ impl TimelineInteraction {
                 vertical_delta,
                 shift_held,
             } => self.scrolled(transform, x, horizontal_delta, vertical_delta, shift_held),
+            TimelineGesture::NavigateTo { range } => self.navigate_to(range),
             TimelineGesture::ResetView => self.reset_view(),
             TimelineGesture::Escape => Some(self.escape()),
         };
         TimelineInteractionResponse::new(self.view_range, event, self.is_capturing())
+    }
+
+    fn navigate_to(&mut self, range: HalfOpenInterval) -> Option<TimelineGestureEvent> {
+        if range.start() < self.default_range.start()
+            || range.end() > self.default_range.end()
+            || range == self.view_range
+        {
+            return None;
+        }
+        self.capture = None;
+        self.view_range = range;
+        Some(TimelineGestureEvent::ViewChanged { range })
     }
 
     fn primary_pressed(
@@ -630,5 +648,33 @@ mod tests {
         );
         assert_eq!(reset.view_range(), default);
         assert!(!reset.is_capturing());
+    }
+
+    #[test]
+    fn overview_navigation_accepts_only_ranges_inside_the_selected_day() {
+        let day = range(0, 1_000);
+        let mut interaction = TimelineInteraction::new(day);
+        let moved = interaction.respond(
+            transform(day),
+            TimelineGesture::NavigateTo {
+                range: range(200, 600),
+            },
+        );
+        assert_eq!(moved.view_range(), range(200, 600));
+        assert_eq!(
+            moved.event(),
+            Some(TimelineGestureEvent::ViewChanged {
+                range: range(200, 600)
+            })
+        );
+
+        let rejected = interaction.respond(
+            transform(moved.view_range()),
+            TimelineGesture::NavigateTo {
+                range: range(-1, 600),
+            },
+        );
+        assert_eq!(rejected.view_range(), moved.view_range());
+        assert_eq!(rejected.event(), None);
     }
 }

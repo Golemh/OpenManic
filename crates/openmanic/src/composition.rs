@@ -101,6 +101,17 @@ const APPLICATION_ICON_CACHE_ENTRIES: usize = 128;
 #[cfg(windows)]
 const APPLICATION_ICON_CACHE_BYTES: usize = 16 * 1024 * 1024;
 
+const INITIAL_CATEGORY_NAMES: [&str; 8] = [
+    "Development",
+    "Communication",
+    "Design",
+    "Entertainment",
+    "Web Browsing",
+    "AI Assistants",
+    "Productivity",
+    "Security & Utilities",
+];
+
 /// Startup failures reported without exposing paths, titles, or raw platform errors.
 #[derive(Debug)]
 pub enum CompositionError {
@@ -155,7 +166,6 @@ impl Error for CompositionError {}
 struct TodaySnapshot {
     timeline: TimelineSnapshot,
     usage: ApplicationUsageSnapshot,
-    windows: Vec<(String, u64)>,
     distribution: openmanic_ui_egui::DistributionSnapshot,
     schedules: Vec<ScheduleSnapshot>,
     applications: Vec<(Application, bool)>,
@@ -170,10 +180,6 @@ impl TodaySnapshot {
     const fn usage(&self) -> &ApplicationUsageSnapshot {
         &self.usage
     }
-    fn windows(&self) -> &[(String, u64)] {
-        &self.windows
-    }
-
     const fn distribution(&self) -> &openmanic_ui_egui::DistributionSnapshot {
         &self.distribution
     }
@@ -2031,7 +2037,7 @@ fn spawn_metadata_worker(
                 lanes,
                 application_icons,
                 tracking_debug,
-            )
+            );
         })
         .map_err(|_| CompositionError::Runtime)?;
     Ok((request_sender, stop_sender, handle))
@@ -2706,6 +2712,7 @@ fn process_writer_work(
     }
     if let WriterWork::CatalogMetadata { application } = work {
         let updated = if let Ok(mut writer_store) = store.lock() {
+            let application = preserve_or_classify_application(&mut writer_store, application);
             writer_store
                 .writer()
                 .upsert_application(&application)
@@ -2726,6 +2733,7 @@ fn process_writer_work(
         let Ok(mut writer_store) = store.lock() else {
             return;
         };
+        let application = preserve_or_classify_application(&mut writer_store, application);
         if writer_store
             .writer()
             .upsert_application(&application)
@@ -3140,40 +3148,12 @@ fn build_today_snapshot(
         TodaySnapshot {
             timeline,
             usage,
-            windows: build_window_summaries(read, range),
             distribution,
             schedules,
             applications: catalog_applications,
             categories,
         },
     ))
-}
-
-fn build_window_summaries(
-    read: &openmanic_storage_sqlite::ReadSnapshot,
-    range: HalfOpenInterval,
-) -> Vec<(String, u64)> {
-    let mut totals = BTreeMap::<String, u64>::new();
-    for record in read.window_titles() {
-        let interval = record.interval();
-        if !interval.overlaps(range) {
-            continue;
-        }
-        let Ok(clipped) = HalfOpenInterval::try_new(
-            interval.start().max(range.start()),
-            interval.end().min(range.end()),
-        ) else {
-            continue;
-        };
-        *totals.entry(record.title().to_owned()).or_default() = totals
-            .get(record.title())
-            .copied()
-            .unwrap_or(0)
-            .saturating_add(clipped.duration_us());
-    }
-    let mut values = totals.into_iter().collect::<Vec<_>>();
-    values.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    values
 }
 
 /// Builds Calendar data from one correlated read snapshot without coupling it to Today data.
@@ -3325,7 +3305,29 @@ fn build_summaries(
 }
 
 fn range_label(range: HalfOpenInterval) -> String {
-    format!("{}–{} UTC", range.start().get(), range.end().get())
+    format_utc_range(range)
+}
+
+fn format_utc_range(range: HalfOpenInterval) -> String {
+    format!(
+        "{} - {} UTC",
+        format_utc_clock(range.start()),
+        format_utc_clock(range.end())
+    )
+}
+
+fn format_utc_clock(instant: UtcMicros) -> String {
+    const DAY_US: i64 = 86_400_000_000;
+    const MINUTE_US: i64 = 60_000_000;
+    let minute_of_day = instant.get().rem_euclid(DAY_US) / MINUTE_US;
+    let hour = minute_of_day / 60;
+    let minute = minute_of_day % 60;
+    let suffix = if hour < 12 { "AM" } else { "PM" };
+    let display_hour = match hour % 12 {
+        0 => 12,
+        value => value,
+    };
+    format!("{display_hour}:{minute:02} {suffix}")
 }
 
 fn recurring_schedule_rule(
@@ -3397,6 +3399,18 @@ const fn tracking_status_label(status: &MutationStatus) -> &'static str {
         MutationStatus::Pending => "Tracking request pending…",
         MutationStatus::Confirmed { .. } => "Tracking request confirmed.",
         MutationStatus::Rejected { .. } => "Tracking request was not saved.",
+    }
+}
+
+fn today_widget_icon(kind: TodayWidgetKind) -> &'static str {
+    if kind == TodayWidgetKind::TIMELINE {
+        "▦"
+    } else if kind == TodayWidgetKind::APPLICATION_USAGE {
+        "▤"
+    } else if kind == TodayWidgetKind::TIME_DISTRIBUTION {
+        "◒"
+    } else {
+        "◇"
     }
 }
 
@@ -3580,11 +3594,12 @@ impl VerticalSlice {
     ) -> Result<Self, CompositionError> {
         let store_path = bootstrap.data_root().path().join("openmanic.sqlite3");
         let store_identity = store_identity(bootstrap.data_root().path());
-        let store = SqliteStore::open(
+        let mut store = SqliteStore::open(
             &store_path,
             &StoreOpenOptions::new(store_identity, utc_now_micros(), env!("CARGO_PKG_VERSION")),
         )
         .map_err(|_| CompositionError::Storage)?;
+        seed_initial_categories(&mut store)?;
         let mut ui = UiController::try_new(
             UiModel::default(),
             UI_INBOUND_CAPACITY,
@@ -4200,10 +4215,9 @@ impl VerticalSliceApp {
                     .selectable_label(
                         presented.selected(),
                         format!(
-                            "{:?}: {}–{} UTC",
+                            "{:?}: {}",
                             presented.kind(),
-                            block.visual_range().start().get(),
-                            block.visual_range().end().get()
+                            format_utc_range(block.visual_range())
                         ),
                     )
                     .clicked()
@@ -4217,10 +4231,9 @@ impl VerticalSliceApp {
         }
         if let Some(details) = model.selected_details() {
             ui.label(format!(
-                "Selected: {:?}, {}–{} UTC",
+                "Selected: {:?}, {}",
                 details.kind(),
-                details.canonical_range().start().get(),
-                details.canonical_range().end().get()
+                format_utc_range(details.canonical_range())
             ));
         }
         self.render_schedule_editor(ui);
@@ -4302,21 +4315,7 @@ impl VerticalSliceApp {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Today {
             return;
         }
-        ui.add_space(16.0);
-        ui.horizontal(|ui| {
-            if ui.button("Pause tracking").clicked() {
-                self.queue_tracking_control(TrackingControlAction::Pause);
-            }
-            if ui.button("Resume tracking").clicked() {
-                self.queue_tracking_control(TrackingControlAction::Resume);
-            }
-            if let Some(acknowledgement) = self
-                .today
-                .tracking_acknowledgement(self.app.controller().model())
-            {
-                ui.label(tracking_status_label(acknowledgement.status()));
-            }
-        });
+        let tokens = self.app.theme_tokens();
         self.render_layout_editor_controls(ui);
         let data = self
             .app
@@ -4327,17 +4326,17 @@ impl VerticalSliceApp {
             .cloned();
         let context = self.app.controller().model().today_view_context().clone();
         let Some(snapshot) = data else {
-            ui.group(|ui| {
-                ui.heading("Application usage");
-                render_usage_snapshot(
-                    ui,
-                    &ApplicationUsageSnapshot::new("Today".to_owned(), Vec::new()),
-                );
-                ui.small("Waiting for dashboard data.");
-            });
+            eframe::egui::Frame::new()
+                .fill(tokens.panel())
+                .stroke(eframe::egui::Stroke::new(1.0, tokens.timeline_grid()))
+                .corner_radius(12.0)
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.heading("Preparing your dashboard");
+                    ui.colored_label(tokens.content_secondary(), "Waiting for activity data...");
+                });
             return;
         };
-        self.render_windows_widget(ui, snapshot.windows());
 
         let layout = self
             .layout_editor
@@ -4349,7 +4348,7 @@ impl VerticalSliceApp {
             .widget_bindings_for_layout(self.app.controller().model(), &layout);
         let reflow = reflow_dashboard(&layout, self.today.registry(), ui.available_width());
         let column_count = f32::from(reflow.columns().count());
-        let grid_gap = 8.0;
+        let grid_gap = 14.0;
         let grid_width = ui.available_width();
         let cell_width = ((grid_width - (grid_gap * (column_count - 1.0))) / column_count).max(1.0);
         let max_row = reflow
@@ -4358,10 +4357,23 @@ impl VerticalSliceApp {
             .map(openmanic_ui_egui::DashboardPlacement::row)
             .max()
             .unwrap_or(0);
-        let row_height = 340.0;
         let grid_rows = u16::try_from(max_row.saturating_add(1)).unwrap_or(u16::MAX);
+        let widget_height_for = |height| match height {
+            LayoutHeight::Compact => 150.0,
+            LayoutHeight::Standard => 230.0,
+            LayoutHeight::Tall => 390.0,
+        };
+        let mut row_heights = vec![0.0_f32; usize::from(grid_rows)];
+        for placement in reflow.placements() {
+            let row = usize::try_from(placement.row()).unwrap_or(usize::MAX);
+            if let Some(height) = row_heights.get_mut(row) {
+                *height = height.max(widget_height_for(placement.height()));
+            }
+        }
+        let grid_height =
+            row_heights.iter().sum::<f32>() + grid_gap * f32::from(grid_rows.saturating_sub(1));
         let (grid_rect, _) = ui.allocate_exact_size(
-            eframe::egui::vec2(grid_width, f32::from(grid_rows) * row_height),
+            eframe::egui::vec2(grid_width, grid_height),
             eframe::egui::Sense::hover(),
         );
         for placement in reflow.placements() {
@@ -4372,14 +4384,13 @@ impl VerticalSliceApp {
             else {
                 continue;
             };
-            let widget_height = match placement.height() {
-                LayoutHeight::Compact => 150.0,
-                LayoutHeight::Standard => 230.0,
-                LayoutHeight::Tall => 320.0,
-            };
+            let widget_height = widget_height_for(placement.height());
             let x = grid_rect.min.x + f32::from(placement.column()) * (cell_width + grid_gap);
-            let grid_row = u16::try_from(placement.row()).unwrap_or(u16::MAX);
-            let y = grid_rect.min.y + f32::from(grid_row) * row_height;
+            let grid_row_u16 = u16::try_from(placement.row()).unwrap_or(u16::MAX);
+            let grid_row = usize::from(grid_row_u16);
+            let y = grid_rect.min.y
+                + row_heights.iter().take(grid_row).sum::<f32>()
+                + grid_gap * f32::from(grid_row_u16);
             let widget_rect = eframe::egui::Rect::from_min_size(
                 eframe::egui::pos2(x, y),
                 eframe::egui::vec2(
@@ -4393,137 +4404,164 @@ impl VerticalSliceApp {
                     .max_rect(widget_rect)
                     .id_salt(placement.instance_id()),
                 |ui| {
-                    ui.group(|ui| {
-            ui.label(format!(
-                "Responsive placement: row {}, column {}, span {}/{}",
-                placement.row(),
-                placement.column(),
-                placement.span(),
-                reflow.columns().count(),
-            ));
-            if self.layout_editor.is_editing() {
-                ui.horizontal(|ui| {
-                    ui.label(binding.instance().id().as_str());
-                    if ui.button("Move earlier").clicked() {
-                        let _ = self.layout_editor.apply(
-                            LayoutEditAction::MoveEarlier {
-                                instance_id: binding.instance().id().as_str().to_owned(),
-                            },
-                            self.today.registry(),
-                        );
-                    }
-                    if ui.button("Move later").clicked() {
-                        let _ = self.layout_editor.apply(
-                            LayoutEditAction::MoveLater {
-                                instance_id: binding.instance().id().as_str().to_owned(),
-                            },
-                            self.today.registry(),
-                        );
-                    }
-                    if ui.button("Remove").clicked() {
-                        let _ = self.layout_editor.apply(
-                            LayoutEditAction::Remove {
-                                instance_id: binding.instance().id().as_str().to_owned(),
-                            },
-                            self.today.registry(),
-                        );
-                    }
-                    ui.label("Width:");
-                    for width_span in [3, 4, 6, 8, 9, 12] {
-                        if ui.button(width_span.to_string()).clicked() {
-                            let _ = self.layout_editor.apply(
-                                LayoutEditAction::Resize {
-                                    instance_id: binding.instance().id().as_str().to_owned(),
-                                    width_span,
-                                },
-                                self.today.registry(),
-                            );
-                        }
-                    }
-                    ui.label("Height:");
-                    for (label, height) in [
-                        ("Compact", LayoutHeight::Compact),
-                        ("Standard", LayoutHeight::Standard),
-                        ("Tall", LayoutHeight::Tall),
-                    ] {
-                        if ui.button(label).clicked() {
-                            let _ = self.layout_editor.apply(
-                                LayoutEditAction::SetHeight {
-                                    instance_id: binding.instance().id().as_str().to_owned(),
-                                    height,
-                                },
-                                self.today.registry(),
-                            );
-                        }
-                    }
-                });
-            }
-            match binding.resolution() {
-                TodayWidgetResolution::MissingRenderer => {
-                    ui.group(|ui| {
-                        ui.strong("Unavailable dashboard widget");
-                        ui.label(binding.instance().kind_id());
-                        ui.label(
+                    eframe::egui::Frame::new()
+                        .fill(tokens.panel())
+                        .stroke(eframe::egui::Stroke::new(1.0, tokens.timeline_grid()))
+                        .corner_radius(12.0)
+                        .inner_margin(eframe::egui::Margin::same(14))
+                        .show(ui, |ui| {
+                            ui.set_min_size(eframe::egui::vec2(
+                                (widget_rect.width() - 28.0).max(1.0),
+                                (widget_rect.height() - 28.0).max(1.0),
+                            ));
+                            if self.layout_editor.is_editing() {
+                                ui.label(format!(
+                                    "Responsive placement: row {}, column {}, span {}/{}",
+                                    placement.row(),
+                                    placement.column(),
+                                    placement.span(),
+                                    reflow.columns().count(),
+                                ));
+                            }
+                            if self.layout_editor.is_editing() {
+                                ui.horizontal(|ui| {
+                                    ui.label(binding.instance().id().as_str());
+                                    if ui.button("Move earlier").clicked() {
+                                        let _ = self.layout_editor.apply(
+                                            LayoutEditAction::MoveEarlier {
+                                                instance_id: binding
+                                                    .instance()
+                                                    .id()
+                                                    .as_str()
+                                                    .to_owned(),
+                                            },
+                                            self.today.registry(),
+                                        );
+                                    }
+                                    if ui.button("Move later").clicked() {
+                                        let _ = self.layout_editor.apply(
+                                            LayoutEditAction::MoveLater {
+                                                instance_id: binding
+                                                    .instance()
+                                                    .id()
+                                                    .as_str()
+                                                    .to_owned(),
+                                            },
+                                            self.today.registry(),
+                                        );
+                                    }
+                                    if ui.button("Remove").clicked() {
+                                        let _ = self.layout_editor.apply(
+                                            LayoutEditAction::Remove {
+                                                instance_id: binding
+                                                    .instance()
+                                                    .id()
+                                                    .as_str()
+                                                    .to_owned(),
+                                            },
+                                            self.today.registry(),
+                                        );
+                                    }
+                                    ui.label("Width:");
+                                    for width_span in [3, 4, 6, 8, 9, 12] {
+                                        if ui.button(width_span.to_string()).clicked() {
+                                            let _ = self.layout_editor.apply(
+                                                LayoutEditAction::Resize {
+                                                    instance_id: binding
+                                                        .instance()
+                                                        .id()
+                                                        .as_str()
+                                                        .to_owned(),
+                                                    width_span,
+                                                },
+                                                self.today.registry(),
+                                            );
+                                        }
+                                    }
+                                    ui.label("Height:");
+                                    for (label, height) in [
+                                        ("Compact", LayoutHeight::Compact),
+                                        ("Standard", LayoutHeight::Standard),
+                                        ("Tall", LayoutHeight::Tall),
+                                    ] {
+                                        if ui.button(label).clicked() {
+                                            let _ = self.layout_editor.apply(
+                                                LayoutEditAction::SetHeight {
+                                                    instance_id: binding
+                                                        .instance()
+                                                        .id()
+                                                        .as_str()
+                                                        .to_owned(),
+                                                    height,
+                                                },
+                                                self.today.registry(),
+                                            );
+                                        }
+                                    }
+                                });
+                            }
+                            match binding.resolution() {
+                                TodayWidgetResolution::MissingRenderer => {
+                                    ui.group(|ui| {
+                                        ui.strong("Unavailable dashboard widget");
+                                        ui.label(binding.instance().kind_id());
+                                        ui.label(
                             "This widget can be removed or the layout can be reset in Edit layout.",
                         );
-                    });
-                }
-                TodayWidgetResolution::Available(definition) => {
-                    ui.heading(definition.display_name());
-                    if self.layout_editor.is_editing() {
-                        ui.label("Widget interactions are disabled while editing this layout.");
-                    } else {
-                        self.render_today_widget(ui, definition.kind(), &snapshot, &context);
-                    }
-                }
-            }
-            });
+                                    });
+                                }
+                                TodayWidgetResolution::Available(definition) => {
+                                    ui.horizontal(|ui| {
+                                        ui.colored_label(
+                                            tokens.interaction_primary(),
+                                            today_widget_icon(definition.kind()),
+                                        );
+                                        ui.label(
+                                            eframe::egui::RichText::new(
+                                                definition.display_name().to_uppercase(),
+                                            )
+                                            .size(12.0)
+                                            .strong()
+                                            .color(tokens.content_primary()),
+                                        );
+                                    });
+                                    ui.colored_label(
+                                        tokens.content_secondary(),
+                                        definition.description(),
+                                    );
+                                    ui.separator();
+                                    if self.layout_editor.is_editing() {
+                                        ui.colored_label(
+                            tokens.content_secondary(),
+                            "Widget interactions are disabled while editing this layout.",
+                        );
+                                    } else {
+                                        self.render_today_widget(
+                                            ui,
+                                            definition.kind(),
+                                            &snapshot,
+                                            &context,
+                                        );
+                                    }
+                                }
+                            }
+                        });
                 },
             );
         }
     }
 
-    fn render_windows_widget(&self, ui: &mut eframe::egui::Ui, windows: &[(String, u64)]) {
-        ui.group(|ui| {
-            ui.heading("Windows");
-            let total = windows
-                .iter()
-                .fold(0_u64, |sum, (_, value)| sum.saturating_add(*value));
-            if windows.is_empty() {
-                ui.label("No window-title intervals have been recorded yet.");
-                return;
-            }
-            eframe::egui::Grid::new("window-duration-widget")
-                .striped(true)
-                .show(ui, |ui| {
-                    ui.strong("Window");
-                    ui.strong("Focused time");
-                    ui.strong("Share");
-                    ui.end_row();
-                    for (title, duration) in windows.iter().take(12) {
-                        let percent = if total == 0 {
-                            0
-                        } else {
-                            u32::try_from((u128::from(*duration) * 10_000) / u128::from(total))
-                                .unwrap_or(u32::MAX)
-                        };
-                        ui.label(title);
-                        ui.label(format!("{}s", duration / 1_000_000));
-                        ui.label(format!("{}.{:02}%", percent / 100, percent % 100));
-                        ui.end_row();
-                    }
-                });
-        });
-        ui.add_space(8.0);
-    }
-
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the diagnostics accordion intentionally groups its bounded read-only table"
+    )]
     fn render_live_backend_diagnostics(&mut self, ui: &mut eframe::egui::Ui) {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Today {
             return;
         }
         let debug = self.runtime.tracking_debug_snapshot();
         let tracking_enabled = self.runtime.tracking_permitted.load(Ordering::Acquire);
-        eframe::egui::CollapsingHeader::new("Live backend diagnostics")
+        eframe::egui::CollapsingHeader::new("Advanced tracking diagnostics")
             .default_open(false)
             .show(ui, |ui| {
                 ui.group(|ui| {
@@ -4556,10 +4594,10 @@ impl VerticalSliceApp {
                         |application_id| id_label(&application_id.as_bytes()),
                     ));
                     ui.end_row();
-                    ui.label("Latest event timestamp (UTC µs)");
+                    ui.label("Latest event time");
                     ui.label(debug.latest_observed_at.map_or_else(
                         || "None yet".to_owned(),
-                        |observed_at| observed_at.get().to_string(),
+                        |observed_at| format!("{} UTC", format_utc_clock(observed_at)),
                     ));
                     ui.end_row();
                     ui.label("Latest actual window title");
@@ -4588,6 +4626,7 @@ impl VerticalSliceApp {
 
     #[expect(
         clippy::excessive_nesting,
+        clippy::too_many_lines,
         reason = "the explicit layout editor retains its actions next to their egui controls"
     )]
     fn render_layout_editor_controls(&mut self, ui: &mut eframe::egui::Ui) {
@@ -4610,11 +4649,43 @@ impl VerticalSliceApp {
             });
         }
         if !self.layout_editor.is_editing() {
-            if ui.button("Edit layout").clicked() {
-                let _ = self
-                    .layout_editor
-                    .apply(LayoutEditAction::Begin, self.today.registry());
-            }
+            let tokens = self.app.theme_tokens();
+            eframe::egui::Frame::new()
+                .fill(tokens.panel())
+                .stroke(eframe::egui::Stroke::new(1.0, tokens.timeline_grid()))
+                .corner_radius(9.0)
+                .inner_margin(eframe::egui::Margin::symmetric(12, 7))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.colored_label(tokens.success(), "● Monitoring this device");
+                        if let Some(acknowledgement) = self
+                            .today
+                            .tracking_acknowledgement(self.app.controller().model())
+                        {
+                            ui.colored_label(
+                                tokens.content_secondary(),
+                                tracking_status_label(acknowledgement.status()),
+                            );
+                        }
+                        ui.with_layout(
+                            eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                            |ui| {
+                                if ui.button("Customize dashboard").clicked() {
+                                    let _ = self
+                                        .layout_editor
+                                        .apply(LayoutEditAction::Begin, self.today.registry());
+                                }
+                                if ui.button("Resume").clicked() {
+                                    self.queue_tracking_control(TrackingControlAction::Resume);
+                                }
+                                if ui.button("Pause").clicked() {
+                                    self.queue_tracking_control(TrackingControlAction::Pause);
+                                }
+                            },
+                        );
+                    });
+                });
+            ui.add_space(10.0);
             return;
         }
         ui.horizontal(|ui| {
@@ -5007,6 +5078,10 @@ impl VerticalSliceApp {
         }
     }
 
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the compact toolbar keeps its two timeline controls together"
+    )]
     fn render_timeline_widget(
         &mut self,
         ui: &mut eframe::egui::Ui,
@@ -5014,12 +5089,39 @@ impl VerticalSliceApp {
         context: &openmanic_ui_egui::TodayViewContext,
     ) {
         ui.horizontal(|ui| {
-            ui.toggle_value(&mut self.create_schedule_mode, "Create schedule");
-            if self.create_schedule_mode {
-                ui.label("Drag on the timeline to choose exact start and end times.");
-            }
+            ui.colored_label(
+                self.app.theme_tokens().content_secondary(),
+                "Wheel to zoom; drag the overview window to pan",
+            );
+            ui.with_layout(
+                eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                |ui| {
+                    if ui.button("Reset view").clicked() && self.timeline.reset_view() {
+                        ui.ctx().request_repaint();
+                    }
+                    ui.toggle_value(&mut self.create_schedule_mode, "Add schedule");
+                },
+            );
         });
+        if self.create_schedule_mode {
+            ui.colored_label(
+                self.app.theme_tokens().interaction_primary(),
+                "Drag across the timeline to choose exact start and end times.",
+            );
+        }
         self.timeline.set_theme_tokens(self.app.theme_tokens());
+        self.timeline.set_category_labels(
+            snapshot
+                .categories()
+                .iter()
+                .map(|category| (category.id(), category.name().as_str().to_owned())),
+        );
+        self.timeline.set_application_labels(
+            snapshot
+                .applications()
+                .iter()
+                .map(|(application, _)| (application.id(), application.name().as_str().to_owned())),
+        );
         let output = self.timeline.show_snapshot(
             ui,
             snapshot.timeline(),
@@ -5033,7 +5135,7 @@ impl VerticalSliceApp {
                         .controller_mut()
                         .reduce_local(UiAction::Today(action));
                 }
-                TimelineRenderAction::ViewRangeChanged { range } => self.publish_projection(range),
+                TimelineRenderAction::ViewRangeChanged { .. } => ui.ctx().request_repaint(),
                 TimelineRenderAction::ScheduleRequested { range } => {
                     self.schedule_draft = Some(ScheduleDraft::new(range));
                 }
@@ -5419,10 +5521,18 @@ impl VerticalSliceApp {
             .focus_completion_pending
             .swap(false, Ordering::AcqRel)
         {
-            ui.group(|ui| {
-                ui.strong("Focus session complete");
-                ui.label("Your completed focus session has been saved.");
-            });
+            eframe::egui::Frame::new()
+                .fill(self.app.theme_tokens().success().gamma_multiply(0.12))
+                .stroke(eframe::egui::Stroke::new(
+                    1.0,
+                    self.app.theme_tokens().success(),
+                ))
+                .corner_radius(8.0)
+                .inner_margin(10.0)
+                .show(ui, |ui| {
+                    ui.strong("Focus session complete");
+                    ui.label("Your completed focus session has been saved.");
+                });
         }
         let snapshot = self
             .runtime
@@ -5434,102 +5544,174 @@ impl VerticalSliceApp {
             self.latest_focus_session = Some(snapshot.session_id());
         }
 
-        ui.vertical(|ui| {
-            match snapshot.as_ref().map(|snapshot| snapshot.session().state()) {
-                Some(FocusSessionState::Ready | FocusSessionState::Planned { .. }) => {
-                    ui.label("Focus is ready to start.");
-                    if let Some(snapshot) = snapshot.as_ref()
-                        && ui.button("Start focus").clicked()
-                        && let Some(command_id) = self.runtime.try_submit_focus(
-                            self.runtime.identifiers.focus_start(snapshot.session_id()),
-                        )
-                    {
-                        self.latest_focus_command = Some(command_id);
+        let tokens = self.app.theme_tokens();
+        eframe::egui::Frame::new()
+            .fill(tokens.canvas())
+            .stroke(eframe::egui::Stroke::new(1.0, tokens.timeline_grid()))
+            .corner_radius(9.0)
+            .inner_margin(eframe::egui::Margin::symmetric(12, 10))
+            .show(ui, |ui| {
+                match snapshot.as_ref().map(|snapshot| snapshot.session().state()) {
+                    Some(FocusSessionState::Ready | FocusSessionState::Planned { .. }) => {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                eframe::egui::RichText::new("25:00")
+                                    .monospace()
+                                    .size(30.0)
+                                    .strong(),
+                            );
+                            ui.colored_label(
+                                self.app.theme_tokens().content_secondary(),
+                                "Ready for a focus session",
+                            );
+                        });
+                        if let Some(snapshot) = snapshot.as_ref()
+                            && ui
+                                .vertical_centered(|ui| {
+                                    ui.add_sized(
+                                        [ui.available_width().min(220.0), 28.0],
+                                        eframe::egui::Button::new(
+                                            eframe::egui::RichText::new("Start focus").strong(),
+                                        )
+                                        .fill(tokens.interaction_primary())
+                                        .corner_radius(7.0),
+                                    )
+                                })
+                                .inner
+                                .clicked()
+                            && let Some(command_id) = self.runtime.try_submit_focus(
+                                self.runtime.identifiers.focus_start(snapshot.session_id()),
+                            )
+                        {
+                            self.latest_focus_command = Some(command_id);
+                        }
+                    }
+                    Some(state @ FocusSessionState::Running { .. }) => {
+                        if let Some(remaining_us) =
+                            focus_remaining_us(state, UtcMicros::new(utc_now_micros()))
+                        {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    eframe::egui::RichText::new(focus_remaining_label(
+                                        remaining_us,
+                                    ))
+                                    .monospace()
+                                    .size(30.0)
+                                    .strong(),
+                                );
+                                ui.colored_label(
+                                    self.app.theme_tokens().success(),
+                                    "Focus session active",
+                                );
+                            });
+                            ui.ctx().request_repaint_after(Duration::from_secs(1));
+                        }
+                        if let Some(snapshot) = snapshot.as_ref() {
+                            self.render_focus_lifecycle_controls(
+                                ui,
+                                snapshot.session_id(),
+                                &[
+                                    ("Pause", FocusLifecycleAction::Pause),
+                                    ("Complete", FocusLifecycleAction::Complete),
+                                    ("Cancel", FocusLifecycleAction::Cancel),
+                                ],
+                            );
+                        }
+                    }
+                    Some(state @ FocusSessionState::Paused { .. }) => {
+                        if let Some(remaining_us) =
+                            focus_remaining_us(state, UtcMicros::new(utc_now_micros()))
+                        {
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    eframe::egui::RichText::new(focus_remaining_label(
+                                        remaining_us,
+                                    ))
+                                    .monospace()
+                                    .size(30.0)
+                                    .strong(),
+                                );
+                                ui.colored_label(self.app.theme_tokens().warning(), "Focus paused");
+                            });
+                        }
+                        if let Some(snapshot) = snapshot.as_ref() {
+                            self.render_focus_lifecycle_controls(
+                                ui,
+                                snapshot.session_id(),
+                                &[
+                                    ("Resume", FocusLifecycleAction::Resume),
+                                    ("Complete", FocusLifecycleAction::Complete),
+                                    ("Cancel", FocusLifecycleAction::Cancel),
+                                ],
+                            );
+                        }
+                    }
+                    Some(FocusSessionState::Completed { .. }) => {
+                        ui.label("Focus completed.");
+                    }
+                    Some(FocusSessionState::Cancelled { .. }) => {
+                        ui.label("Focus cancelled.");
+                    }
+                    None => {
+                        ui.vertical_centered(|ui| {
+                            ui.label(
+                                eframe::egui::RichText::new("25:00")
+                                    .monospace()
+                                    .size(30.0)
+                                    .strong(),
+                            );
+                            ui.colored_label(
+                                self.app.theme_tokens().content_secondary(),
+                                "No focus session prepared",
+                            );
+                        });
                     }
                 }
-                Some(state @ FocusSessionState::Running { .. }) => {
-                    if let Some(remaining_us) =
-                        focus_remaining_us(state, UtcMicros::new(utc_now_micros()))
-                    {
-                        ui.label(format!("Focus: {}", focus_remaining_label(remaining_us)));
-                        ui.ctx().request_repaint_after(Duration::from_secs(1));
-                    }
-                    if let Some(snapshot) = snapshot.as_ref() {
-                        self.render_focus_lifecycle_controls(
-                            ui,
-                            snapshot.session_id(),
-                            &[
-                                ("Pause", FocusLifecycleAction::Pause),
-                                ("Complete", FocusLifecycleAction::Complete),
-                                ("Cancel", FocusLifecycleAction::Cancel),
-                            ],
-                        );
-                    }
+                let may_prepare = !matches!(
+                    snapshot.as_ref().map(|snapshot| snapshot.session().state()),
+                    Some(
+                        FocusSessionState::Ready
+                            | FocusSessionState::Planned { .. }
+                            | FocusSessionState::Running { .. }
+                            | FocusSessionState::Paused { .. }
+                    )
+                );
+                if may_prepare
+                    && ui
+                        .vertical_centered(|ui| {
+                            ui.add_sized(
+                                [ui.available_width().min(240.0), 28.0],
+                                eframe::egui::Button::new(
+                                    eframe::egui::RichText::new("Set up 25-minute focus").strong(),
+                                )
+                                .fill(tokens.interaction_primary())
+                                .corner_radius(7.0),
+                            )
+                        })
+                        .inner
+                        .clicked()
+                    && let Some((session_id, command)) = self.runtime.identifiers.focus_draft()
+                    && let Some(command_id) = self.runtime.try_submit_focus(command)
+                {
+                    self.latest_focus_session = Some(session_id);
+                    self.latest_focus_command = Some(command_id);
                 }
-                Some(state @ FocusSessionState::Paused { .. }) => {
-                    if let Some(remaining_us) =
-                        focus_remaining_us(state, UtcMicros::new(utc_now_micros()))
-                    {
-                        ui.label(format!(
-                            "Focus paused: {}",
-                            focus_remaining_label(remaining_us)
-                        ));
-                    }
-                    if let Some(snapshot) = snapshot.as_ref() {
-                        self.render_focus_lifecycle_controls(
-                            ui,
-                            snapshot.session_id(),
-                            &[
-                                ("Resume", FocusLifecycleAction::Resume),
-                                ("Complete", FocusLifecycleAction::Complete),
-                                ("Cancel", FocusLifecycleAction::Cancel),
-                            ],
-                        );
-                    }
+                if let Some(command_id) = self.latest_focus_command
+                    && let Some(status) = self.app.controller().model().mutation_status(command_id)
+                {
+                    ui.label(focus_status_label(status));
                 }
-                Some(FocusSessionState::Completed { .. }) => {
-                    ui.label("Focus completed.");
+                if self
+                    .runtime
+                    .focus_notification_error
+                    .lock()
+                    .ok()
+                    .and_then(|value| *value)
+                    .is_some()
+                {
+                    ui.label("Focus completed, but the notification was unavailable.");
                 }
-                Some(FocusSessionState::Cancelled { .. }) => {
-                    ui.label("Focus cancelled.");
-                }
-                None => {
-                    ui.label("No focus session is prepared.");
-                }
-            }
-            let may_prepare = !matches!(
-                snapshot.as_ref().map(|snapshot| snapshot.session().state()),
-                Some(
-                    FocusSessionState::Ready
-                        | FocusSessionState::Planned { .. }
-                        | FocusSessionState::Running { .. }
-                        | FocusSessionState::Paused { .. }
-                )
-            );
-            if may_prepare
-                && ui.button("Prepare 25-minute focus").clicked()
-                && let Some((session_id, command)) = self.runtime.identifiers.focus_draft()
-                && let Some(command_id) = self.runtime.try_submit_focus(command)
-            {
-                self.latest_focus_session = Some(session_id);
-                self.latest_focus_command = Some(command_id);
-            }
-            if let Some(command_id) = self.latest_focus_command
-                && let Some(status) = self.app.controller().model().mutation_status(command_id)
-            {
-                ui.label(focus_status_label(status));
-            }
-            if self
-                .runtime
-                .focus_notification_error
-                .lock()
-                .ok()
-                .and_then(|value| *value)
-                .is_some()
-            {
-                ui.label("Focus completed, but the notification was unavailable.");
-            }
-        });
+            });
     }
 
     fn submit_focus_lifecycle(&mut self, session_id: FocusSessionId, action: FocusLifecycleAction) {
@@ -5642,10 +5824,9 @@ impl VerticalSliceApp {
             for (schedule, anchor_date, interval) in entries {
                 ui.horizontal(|ui| {
                     ui.label(format!(
-                        "{} — {} to {} UTC",
+                        "{} - {}",
                         schedule.rule().label(),
-                        interval.start().get(),
-                        interval.end().get()
+                        format_utc_range(interval)
                     ));
                     if ui.button("Delete…").clicked() {
                         self.schedule_delete_request = Some(ScheduleDeleteRequest {
@@ -6039,9 +6220,8 @@ fn render_schedule_draft(
     ui.group(|ui| {
         ui.strong(if draft.existing.is_some() { "Edit schedule" } else { "New schedule" });
         ui.label(format!(
-            "Provisional range: {} to {} UTC",
-            draft.range.start().get(),
-            draft.range.end().get()
+            "Provisional range: {}",
+            format_utc_range(draft.range)
         ));
         ui.horizontal(|ui| {
             ui.label("Name");
@@ -6117,9 +6297,9 @@ impl eframe::App for VerticalSliceApp {
                 .id_salt("today-dashboard-scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    self.render_live_backend_diagnostics(ui);
-                    ui.add_space(8.0);
                     self.render_today_dashboard(ui);
+                    ui.add_space(8.0);
+                    self.render_live_backend_diagnostics(ui);
                 });
         } else {
             self.render_today_dashboard(ui);
@@ -6231,6 +6411,168 @@ fn utc_now_micros() -> i64 {
         })
 }
 
+fn initial_category_id(index: u8) -> CategoryId {
+    let mut bytes = [0_u8; 16];
+    bytes[..5].copy_from_slice(b"OMCAT");
+    bytes[5] = index;
+    bytes[15] = 0xa1;
+    CategoryId::from_bytes(bytes)
+}
+
+fn initial_category_for_application(name: &str) -> Option<CategoryId> {
+    let name = name.trim().to_ascii_lowercase();
+    let category_index = if contains_any(
+        &name,
+        &[
+            "terminal",
+            "powershell",
+            "command prompt",
+            "visual studio",
+            "vs code",
+            "jetbrains",
+            "github desktop",
+        ],
+    ) {
+        0
+    } else if contains_any(&name, &["discord", "slack", "teams", "zoom"]) {
+        1
+    } else if contains_any(
+        &name,
+        &[
+            "figma",
+            "photoshop",
+            "illustrator",
+            "blender",
+            "davinci resolve",
+        ],
+    ) {
+        2
+    } else if contains_any(&name, &["spotify", "mpv", "vlc", "steam", "media player"]) {
+        3
+    } else if contains_any(
+        &name,
+        &[
+            "google chrome",
+            "chrome",
+            "firefox",
+            "microsoft edge",
+            "brave",
+        ],
+    ) {
+        4
+    } else if contains_any(&name, &["chatgpt", "claude", "gemini"]) {
+        5
+    } else if contains_any(
+        &name,
+        &[
+            "microsoft word",
+            "winword",
+            "excel",
+            "powerpoint",
+            "notion",
+            "obsidian",
+        ],
+    ) {
+        6
+    } else if contains_any(
+        &name,
+        &["keepass", "1password", "file explorer", "task manager"],
+    ) {
+        7
+    } else {
+        return None;
+    };
+    Some(initial_category_id(category_index))
+}
+
+fn contains_any(value: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|candidate| value.contains(candidate))
+}
+
+fn seed_initial_categories(store: &mut SqliteStore) -> Result<(), CompositionError> {
+    let applications = {
+        let mut reader = store
+            .open_read_session()
+            .map_err(|_| CompositionError::Storage)?;
+        let snapshot = reader.snapshot().map_err(|_| CompositionError::Storage)?;
+        if !snapshot.categories().is_empty() {
+            return Ok(());
+        }
+        snapshot
+            .applications()
+            .iter()
+            .map(|record| record.application().clone())
+            .collect::<Vec<_>>()
+    };
+    let observed_at = UtcMicros::new(utc_now_micros());
+    for (index, name) in INITIAL_CATEGORY_NAMES.iter().enumerate() {
+        let index = u8::try_from(index).map_err(|_| CompositionError::Storage)?;
+        let name = CategoryName::try_new(name).map_err(|_| CompositionError::Storage)?;
+        store
+            .writer()
+            .create_category(
+                &Category::new(initial_category_id(index), name),
+                observed_at,
+            )
+            .map_err(|_| CompositionError::Storage)?;
+    }
+    let mut assignments = BTreeMap::<CategoryId, Vec<ApplicationId>>::new();
+    for application in applications {
+        if let Some(category_id) = initial_category_for_application(application.name().as_str()) {
+            assignments
+                .entry(category_id)
+                .or_default()
+                .push(application.id());
+        }
+    }
+    for (category_id, application_ids) in assignments {
+        <StorageWriter as CatalogPersistence>::assign_applications(
+            store.writer(),
+            &application_ids,
+            Some(category_id),
+        )
+        .map_err(|_| CompositionError::Storage)?;
+    }
+    Ok(())
+}
+
+fn preserve_or_classify_application(
+    store: &mut SqliteStore,
+    application: Application,
+) -> Application {
+    let resolved_category = store
+        .open_read_session()
+        .ok()
+        .and_then(|mut reader| reader.snapshot().ok())
+        .map_or(application.category_id(), |snapshot| {
+            let existing = snapshot
+                .applications()
+                .iter()
+                .find(|record| record.application().id() == application.id());
+            if let Some(existing) = existing {
+                return existing.application().category_id();
+            }
+            let suggested = initial_category_for_application(application.name().as_str());
+            suggested.filter(|category_id| {
+                snapshot
+                    .categories()
+                    .iter()
+                    .any(|record| record.category().id() == *category_id)
+            })
+        });
+    if resolved_category == application.category_id() {
+        return application;
+    }
+    Application::try_new(
+        application.id(),
+        application.name().clone(),
+        resolved_category,
+        application.first_seen(),
+        application.last_seen(),
+    )
+    .unwrap_or(application)
+}
+
 fn day_range(offset_days: i32) -> Option<HalfOpenInterval> {
     const DAY_US: i64 = 86_400_000_000;
     let now = utc_now_micros();
@@ -6307,7 +6649,8 @@ mod tests {
     use super::{
         CommandIdentifiers, PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError,
         TrackingDebugState, UiInbox, UiIngress, calendar_schedule_target, day_range,
-        focus_remaining_label, focus_remaining_us, record_tracking_observation,
+        focus_remaining_label, focus_remaining_us, format_utc_clock, format_utc_range,
+        initial_category_for_application, initial_category_id, record_tracking_observation,
         recurring_schedule_rule, set_tracking_delivery, store_identity,
     };
 
@@ -6469,6 +6812,42 @@ mod tests {
                 .duration_us(),
             86_400_000_000
         );
+    }
+
+    #[test]
+    fn utc_values_are_presented_as_readable_twelve_hour_times() {
+        const HOUR_US: i64 = 3_600_000_000;
+        let range = HalfOpenInterval::try_new(
+            UtcMicros::new(9 * HOUR_US),
+            UtcMicros::new(13 * HOUR_US + 30 * 60_000_000),
+        )
+        .expect("fixture range is positive");
+
+        assert_eq!(format_utc_clock(range.start()), "9:00 AM");
+        assert_eq!(format_utc_range(range), "9:00 AM - 1:30 PM UTC");
+    }
+
+    #[test]
+    fn common_desktop_applications_receive_the_initial_taxonomy() {
+        for (application, category_index) in [
+            ("Discord", 1),
+            ("Google Chrome", 4),
+            ("Mozilla Firefox", 4),
+            ("ChatGPT", 5),
+            ("Claude", 5),
+            ("Gemini", 5),
+            ("Windows Terminal", 0),
+            ("Spotify", 3),
+            ("mpv", 3),
+            ("KeePassXC", 7),
+            ("1Password", 7),
+        ] {
+            assert_eq!(
+                initial_category_for_application(application),
+                Some(initial_category_id(category_index))
+            );
+        }
+        assert_eq!(initial_category_for_application("Unknown tool"), None);
     }
 
     #[test]

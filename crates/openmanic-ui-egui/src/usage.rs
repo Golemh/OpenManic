@@ -341,32 +341,21 @@ impl UsagePresentation {
 ///
 /// This intentionally does not submit actions or touch any application port.
 pub(crate) fn render_usage(ui: &mut Ui, presentation: &UsagePresentation) {
-    ui.heading("Tracked applications");
     if let Some(range_label) = presentation.range_label() {
-        ui.small(range_label);
-        ui.label(format!(
-            "Total focused time: {}",
-            format_duration(presentation.total_duration_us())
-        ));
-        ui.add_space(4.0);
-        egui::Grid::new("tracked-applications-table")
-            .striped(true)
-            .min_col_width(88.0)
-            .show(ui, |ui| {
-                ui.strong("Application");
-                ui.strong("Focused time");
-                ui.strong("Percentage of total");
-                ui.end_row();
-                for row in presentation.rows() {
-                    let percentage = row.percentage().hundredths();
-                    ui.label(row.label());
-                    ui.label(format_duration(row.duration_us()));
-                    ui.label(format!("{}.{:02}%", percentage / 100, percentage % 100));
-                    ui.end_row();
-                }
+        ui.horizontal(|ui| {
+            ui.small(range_label);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.strong(format_duration(presentation.total_duration_us()));
             });
+        });
+        ui.add_space(6.0);
+        egui::ScrollArea::vertical()
+            .id_salt("application-usage-rows")
+            .max_height(150.0)
+            .auto_shrink([false, true])
+            .show(ui, |ui| render_usage_rows(ui, presentation.rows()));
         if presentation.rows().is_empty() {
-            ui.small("No foreground application activity has been recorded for this day yet.");
+            ui.small("No application activity has been recorded for this day yet.");
         }
     }
     match presentation.state() {
@@ -392,6 +381,79 @@ pub(crate) fn render_usage(ui: &mut Ui, presentation: &UsagePresentation) {
         }
         UsagePresentationState::Ready => {}
     }
+}
+
+fn render_usage_rows(ui: &mut Ui, rows: &[UsageRow]) {
+    for row in rows {
+        render_usage_row(ui, row);
+    }
+}
+
+fn render_usage_row(ui: &mut Ui, row: &UsageRow) {
+    let percentage = row.percentage().hundredths();
+    let accent = usage_accent(row.application_id(), row.label());
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(egui::Stroke::new(
+            1.0,
+            ui.visuals().widgets.inactive.bg_stroke.color,
+        ))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(9, 7))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.colored_label(accent, "●");
+                ui.strong(row.label());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.colored_label(
+                        accent,
+                        format!("{}.{:02}%", percentage / 100, percentage % 100),
+                    );
+                });
+            });
+            let (bar, _) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
+            ui.painter()
+                .rect_filled(bar, 2.0, ui.visuals().faint_bg_color);
+            let hundredths = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
+            let width = bar.width() * (f32::from(hundredths) / 10_000.0);
+            ui.painter().rect_filled(
+                egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
+                2.0,
+                accent,
+            );
+            ui.horizontal(|ui| {
+                ui.small(format_duration(row.duration_us()));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.colored_label(ui.visuals().weak_text_color(), "Active during this day");
+                });
+            });
+        });
+}
+
+fn usage_accent(application_id: Option<ApplicationId>, label: &str) -> egui::Color32 {
+    const PALETTE: [egui::Color32; 6] = [
+        egui::Color32::from_rgb(103, 84, 255),
+        egui::Color32::from_rgb(21, 184, 214),
+        egui::Color32::from_rgb(225, 66, 156),
+        egui::Color32::from_rgb(239, 119, 30),
+        egui::Color32::from_rgb(81, 104, 220),
+        egui::Color32::from_rgb(21, 201, 152),
+    ];
+    let normalized = label.to_ascii_lowercase();
+    if normalized.contains("chrome") {
+        return egui::Color32::from_rgb(59, 130, 246);
+    }
+    if normalized.contains("discord") {
+        return egui::Color32::from_rgb(139, 92, 246);
+    }
+    if normalized.contains("slack") {
+        return egui::Color32::from_rgb(6, 182, 212);
+    }
+    application_id.map_or(PALETTE[0], |id| {
+        let bytes = id.as_bytes();
+        PALETTE[(usize::from(bytes[2]) + usize::from(bytes[9])) % PALETTE.len()]
+    })
 }
 
 fn format_duration(duration_us: u64) -> String {

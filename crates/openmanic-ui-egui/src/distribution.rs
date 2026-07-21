@@ -14,7 +14,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crate::model::{DataLimitation, PresentableData};
-use egui::{Color32, Rect, Vec2};
+use egui::Color32;
 
 /// The user-visible dimension used to group a distribution.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -399,60 +399,77 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
         return;
     };
 
-    ui.label(format!(
-        "{}: {}",
-        presentation.grouping_label(),
-        presentation.total_label()
-    ));
-    let (rect, _) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 14.0), egui::Sense::hover());
-    let palette = [
-        Color32::from_rgb(121, 151, 255),
-        Color32::from_rgb(107, 201, 139),
-        Color32::from_rgb(236, 190, 93),
-        Color32::from_rgb(197, 128, 255),
-        Color32::from_rgb(176, 188, 208),
-    ];
-    let visual_total = presentation
-        .segments()
-        .iter()
-        .map(|segment| visual_minutes(segment.included_micros()))
-        .map(f32::from)
-        .sum::<f32>()
-        .max(1.0);
-    let mut left = rect.left();
-    for (index, segment) in presentation.segments().iter().enumerate() {
-        let width =
-            rect.width() * (f32::from(visual_minutes(segment.included_micros())) / visual_total);
-        let right = if index + 1 == presentation.segments().len() {
-            rect.right()
-        } else {
-            (left + width).min(rect.right())
-        };
-        let segment_rect = Rect::from_min_max(
-            egui::pos2(left, rect.top()),
-            egui::pos2(right, rect.bottom()),
-        );
-        ui.painter()
-            .rect_filled(segment_rect, 2.0, palette[index % palette.len()]);
-        left = right;
-    }
+    ui.horizontal(|ui| {
+        ui.label(presentation.grouping_label());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.strong(presentation.total_label());
+        });
+    });
+    ui.add_space(6.0);
     for segment in presentation.segments() {
-        ui.label(format!(
-            "{}: {}",
-            segment.label(),
-            segment.exact_value_label()
-        ));
+        let color = distribution_color(segment.label());
+        let percentage = percentage_hundredths(
+            segment.included_micros(),
+            presentation.total_included_micros(),
+        );
+        ui.horizontal(|ui| {
+            ui.strong(segment.label());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!(
+                    "{}  ({}.{:02}%)",
+                    segment.exact_value_label(),
+                    percentage / 100,
+                    percentage % 100,
+                ));
+            });
+        });
+        let (bar, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 5.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(bar, 2.5, ui.visuals().faint_bg_color);
+        let bounded = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
+        let width = bar.width() * (f32::from(bounded) / 10_000.0);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
+            2.5,
+            color,
+        );
+        ui.add_space(4.0);
+    }
+    if presentation.segments().len() == 1
+        && presentation.segments()[0]
+            .label()
+            .eq_ignore_ascii_case("uncategorized")
+    {
+        ui.add_space(4.0);
+        ui.colored_label(
+            ui.visuals().weak_text_color(),
+            "Assign applications to categories to reveal a richer breakdown.",
+        );
     }
 }
 
-fn visual_minutes(micros: u64) -> u16 {
-    const MICROS_PER_MINUTE: u64 = 60_000_000;
-    if micros == 0 {
+fn distribution_color(label: &str) -> Color32 {
+    match label.to_ascii_lowercase().as_str() {
+        "uncategorized" => Color32::from_rgb(51, 65, 85),
+        "web browsing" => Color32::from_rgb(168, 85, 247),
+        "development" => Color32::from_rgb(59, 130, 246),
+        "communication" => Color32::from_rgb(6, 182, 212),
+        "entertainment" => Color32::from_rgb(236, 72, 153),
+        "design" => Color32::from_rgb(217, 70, 239),
+        "ai assistants" => Color32::from_rgb(139, 92, 246),
+        "productivity" => Color32::from_rgb(14, 165, 233),
+        "security & utilities" => Color32::from_rgb(20, 184, 166),
+        _ => Color32::from_rgb(100, 116, 139),
+    }
+}
+
+fn percentage_hundredths(value: u64, total: u64) -> u32 {
+    if total == 0 {
         return 0;
     }
-    let rounded_up = micros.saturating_add(MICROS_PER_MINUTE.saturating_sub(1)) / MICROS_PER_MINUTE;
-    u16::try_from(rounded_up).unwrap_or(u16::MAX)
+    let scaled = u128::from(value).saturating_mul(10_000);
+    u32::try_from(scaled / u128::from(total)).unwrap_or(10_000)
 }
 
 fn format_duration(micros: u64) -> String {
