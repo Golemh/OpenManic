@@ -273,18 +273,104 @@ pub fn color_dot(ui: &mut egui::Ui, color: Color32, size: f32) {
 /// Renders a soft (ghost) button and reports whether it was clicked.
 #[must_use]
 pub fn soft_button(ui: &mut egui::Ui, text: &str) -> bool {
-    ui.add(
-        egui::Button::new(
-            egui::RichText::new(text)
-                .size(12.5)
-                .strong()
-                .color(TEXT_TERTIARY),
-        )
-        .fill(SURFACE_RAISED)
-        .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(CornerRadius::same(RADIUS_BUTTON)),
+    ui.add(soft_button_widget(text)).clicked()
+}
+
+/// Renders a soft button with an exact interaction target.
+#[must_use]
+pub fn soft_button_sized(ui: &mut egui::Ui, text: &str, size: egui::Vec2) -> bool {
+    ui.add_sized(size, soft_button_widget(text)).clicked()
+}
+
+fn soft_button_widget(text: &str) -> egui::Button<'_> {
+    egui::Button::new(
+        egui::RichText::new(text)
+            .size(12.5)
+            .strong()
+            .color(TEXT_TERTIARY),
     )
-    .clicked()
+    .fill(SURFACE_RAISED)
+    .stroke(Stroke::new(1.0, BORDER))
+    .corner_radius(CornerRadius::same(RADIUS_BUTTON))
+}
+
+/// Renders one exact-size day navigation control.
+#[must_use]
+pub fn day_button(ui: &mut egui::Ui, text: &str, return_to_today: bool) -> bool {
+    let button = egui::Button::new(
+        egui::RichText::new(text)
+            .size(if return_to_today { 16.0 } else { 20.0 })
+            .strong()
+            .color(if return_to_today {
+                ACCENT_TEXT
+            } else {
+                TEXT_TERTIARY
+            }),
+    )
+    .fill(if return_to_today {
+        ACCENT.gamma_multiply(0.15)
+    } else {
+        SURFACE_RAISED
+    })
+    .stroke(Stroke::new(
+        1.0,
+        if return_to_today { ACCENT } else { BORDER },
+    ))
+    .corner_radius(CornerRadius::same(if return_to_today {
+        19
+    } else {
+        RADIUS_BUTTON
+    }));
+    ui.add_sized([38.0, 38.0], button).clicked()
+}
+
+/// Renders the global pause/resume control with a stable 80x36 target.
+#[must_use]
+pub fn tracking_button(ui: &mut egui::Ui, tracking_enabled: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(80.0, 36.0), egui::Sense::click());
+    let fill = if response.hovered() {
+        shade(SURFACE_RAISED, 0.08)
+    } else {
+        SURFACE_RAISED
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(RADIUS_BUTTON),
+        fill,
+        Stroke::new(1.0, BORDER),
+        StrokeKind::Inside,
+    );
+    let icon_center = egui::pos2(rect.left() + 17.0, rect.center().y);
+    if tracking_enabled {
+        for offset in [-2.5, 2.5] {
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(
+                    icon_center + egui::vec2(offset, 0.0),
+                    egui::vec2(3.0, 12.0),
+                ),
+                0.8,
+                TEXT_TERTIARY,
+            );
+        }
+    } else {
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                icon_center + egui::vec2(-3.0, -6.0),
+                icon_center + egui::vec2(-3.0, 6.0),
+                icon_center + egui::vec2(6.0, 0.0),
+            ],
+            ACTIVE,
+            Stroke::NONE,
+        ));
+    }
+    ui.painter().text(
+        egui::pos2(rect.left() + 29.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        if tracking_enabled { "Pause" } else { "Resume" },
+        egui::FontId::proportional(12.5),
+        TEXT_TERTIARY,
+    );
+    response.clicked()
 }
 
 /// Renders one navigation pill; returns whether it was clicked.
@@ -369,9 +455,9 @@ pub fn stat_chip(ui: &mut egui::Ui, key: &str, value: &str, accent: bool) {
         .corner_radius(CornerRadius::same(RADIUS_CHIP))
         .inner_margin(egui::Margin::symmetric(15, 8))
         .show(ui, |ui| {
-            ui.set_width(66.0);
+            ui.set_width(68.0);
             ui.vertical(|ui| {
-                ui.set_width(66.0);
+                ui.set_width(68.0);
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.label(
                     egui::RichText::new(key.to_ascii_uppercase())
@@ -381,7 +467,7 @@ pub fn stat_chip(ui: &mut egui::Ui, key: &str, value: &str, accent: bool) {
                 );
                 ui.label(
                     egui::RichText::new(value)
-                        .size(16.0)
+                        .size(15.0)
                         .monospace()
                         .color(value_color),
                 );

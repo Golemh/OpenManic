@@ -1144,15 +1144,27 @@ fn paint_overview(
         FontId::proportional(10.0),
         theme_tokens.content_secondary(),
     );
+    let view_label = format!(
+        "View {}",
+        format_view_range(view_range, snapshot.visible_range())
+    );
+    let view_chip = Rect::from_min_size(
+        Pos2::new(overview_rect.max.x - 178.0, overview_rect.min.y - 24.0),
+        Vec2::new(178.0, 26.0),
+    );
+    painter.rect(
+        view_chip,
+        egui::CornerRadius::same(8),
+        crate::design::ACCENT.gamma_multiply(0.15),
+        Stroke::new(1.0, crate::design::ACCENT.gamma_multiply(0.75)),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
-        Pos2::new(overview_rect.max.x, overview_rect.min.y - 9.0),
-        Align2::RIGHT_CENTER,
-        format!(
-            "View: {} UTC",
-            format_detail_range(view_range, snapshot.visible_range())
-        ),
-        FontId::proportional(10.0),
-        theme_tokens.interaction_primary(),
+        view_chip.center(),
+        Align2::CENTER_CENTER,
+        view_label,
+        FontId::monospace(11.0),
+        crate::design::ACCENT_TEXT,
     );
     painter.rect_filled(overview_rect, 4.0, SUBWIDGET);
     painter.rect_stroke(
@@ -1623,27 +1635,60 @@ fn render_timeline_legend(
     theme_tokens: ThemeTokens,
     visibility: &mut [bool; 5],
 ) {
+    visibility.fill(true);
     ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.colored_label(theme_tokens.content_secondary(), "LEGEND");
-        ui.checkbox(&mut visibility[CATEGORY_LANE], "Category");
-        ui.checkbox(&mut visibility[ACTIVE_STATE], "Active");
-        ui.checkbox(&mut visibility[AWAY_STATE], "Away");
-        ui.checkbox(&mut visibility[APPLICATION_LANE], "Applications");
-        ui.checkbox(&mut visibility[POWERED_OFF_STATE], "Powered off");
-        if let DataCompleteness::Partial {
-            unknown_missing_duration_us,
-        } = snapshot.completeness()
-        {
-            let covered = snapshot
-                .visible_range()
-                .duration_us()
-                .saturating_sub(unknown_missing_duration_us);
-            ui.colored_label(
-                theme_tokens.content_secondary(),
-                format!("Recorded: {}", format_duration(covered)),
+    ui.separator();
+    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        crate::design::section_header(ui, "Legend");
+        crate::design::color_dot(ui, crate::design::ACTIVE, 11.0);
+        ui.label(
+            egui::RichText::new("Active")
+                .size(12.5)
+                .color(crate::design::ACTIVE),
+        );
+        crate::design::color_dot(ui, crate::design::AWAY, 11.0);
+        ui.label(
+            egui::RichText::new("Away")
+                .size(12.5)
+                .color(crate::design::AWAY),
+        );
+        crate::design::color_dot(ui, crate::design::POWERED_OFF, 11.0);
+        ui.label(
+            egui::RichText::new("Powered off")
+                .size(12.5)
+                .color(crate::design::TEXT_MUTED),
+        );
+        let (scheduled_rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 11.0), Sense::hover());
+        ui.painter().line_segment(
+            [scheduled_rect.left_top(), scheduled_rect.right_top()],
+            Stroke::new(2.0, crate::design::SCHEDULED),
+        );
+        for x in [scheduled_rect.left(), scheduled_rect.right()] {
+            ui.painter().line_segment(
+                [
+                    Pos2::new(x, scheduled_rect.top()),
+                    Pos2::new(x, scheduled_rect.bottom()),
+                ],
+                Stroke::new(2.0, crate::design::SCHEDULED),
             );
         }
+        ui.label(
+            egui::RichText::new("Scheduled")
+                .size(12.5)
+                .color(crate::design::SCHEDULED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Recorded {}",
+                    format_duration(snapshot.totals().known_duration_us())
+                ))
+                .size(12.0)
+                .color(theme_tokens.content_secondary()),
+            );
+        });
     });
 }
 
@@ -1749,10 +1794,36 @@ fn detail_text(detail: TimelineDetail, detail_label: &str, day_range: HalfOpenIn
 
 fn format_detail_range(range: HalfOpenInterval, day_range: HalfOpenInterval) -> String {
     format!(
-        "{} - {}",
+        "{} – {}",
         format_day_clock(day_range, range.start()),
         format_day_clock(day_range, range.end()),
     )
+}
+
+fn format_view_range(range: HalfOpenInterval, day_range: HalfOpenInterval) -> String {
+    format!(
+        "{} – {}",
+        format_day_clock_minutes(day_range, range.start()),
+        format_day_clock_minutes(day_range, range.end()),
+    )
+}
+
+fn format_day_clock_minutes(
+    day_range: HalfOpenInterval,
+    instant: openmanic_domain::UtcMicros,
+) -> String {
+    let elapsed_us = i128::from(instant.get())
+        .saturating_sub(i128::from(day_range.start().get()))
+        .max(0);
+    let total_minutes = u64::try_from(elapsed_us / 60_000_000).unwrap_or(u64::MAX);
+    let hour = (total_minutes / 60) % 24;
+    let minute = total_minutes % 60;
+    let suffix = if hour < 12 { "AM" } else { "PM" };
+    let display_hour = match hour % 12 {
+        0 => 12,
+        value => value,
+    };
+    format!("{display_hour}:{minute:02} {suffix}")
 }
 
 fn format_day_clock(day_range: HalfOpenInterval, instant: openmanic_domain::UtcMicros) -> String {

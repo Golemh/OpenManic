@@ -3587,6 +3587,10 @@ fn paint_today_widget_marker(
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the compact ring, glow layers, and its paired metrics form one visual component"
+)]
 fn render_focus_break_snapshot(ui: &mut eframe::egui::Ui, snapshot: &TimelineSnapshot) {
     let active = snapshot
         .activity_band()
@@ -3596,59 +3600,207 @@ fn render_focus_break_snapshot(ui: &mut eframe::egui::Ui, snapshot: &TimelineSna
         .fold(0_u64, |sum, interval| {
             sum.saturating_add(interval.range().duration_us())
         });
-    let known = snapshot.totals().known_duration_us();
-    let break_time = known.saturating_sub(active);
-    let percentage = if known == 0 {
+    let break_time = snapshot
+        .activity_band()
+        .intervals()
+        .iter()
+        .filter(|interval| {
+            matches!(
+                *interval.value(),
+                ActivityStateValue::Idle | ActivityStateValue::PausedByUser
+            )
+        })
+        .fold(0_u64, |sum, interval| {
+            sum.saturating_add(interval.range().duration_us())
+        });
+    let focused_or_away = active.saturating_add(break_time);
+    let percentage = if focused_or_away == 0 {
         0
     } else {
-        u32::try_from(u128::from(active) * 100 / u128::from(known)).unwrap_or(100)
+        u32::try_from(u128::from(active) * 100 / u128::from(focused_or_away)).unwrap_or(100)
     };
-    let (rect, _) = ui.allocate_exact_size(
-        eframe::egui::vec2(ui.available_width(), 176.0),
-        eframe::egui::Sense::hover(),
-    );
-    let center = eframe::egui::pos2(rect.center().x, rect.top() + 78.0);
-    let radius = 54.0;
-    ui.painter().circle_stroke(
-        center,
-        radius,
-        eframe::egui::Stroke::new(22.0, eframe::egui::Color32::from_rgb(0x3A, 0x1D, 0x28)),
-    );
-    let bounded_percentage = u16::try_from(percentage.min(100)).unwrap_or(100);
-    let sweep = std::f32::consts::TAU * (f32::from(bounded_percentage) / 100.0);
-    if sweep > 0.0 {
-        let points = (0_u16..=48)
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(
+            eframe::egui::vec2(150.0, 150.0),
+            eframe::egui::Sense::hover(),
+        );
+        let center = rect.center();
+        let radius = 50.0;
+        let bounded_percentage = u16::try_from(percentage.min(100)).unwrap_or(100);
+        let active_sweep = std::f32::consts::TAU * (f32::from(bounded_percentage) / 100.0);
+        let active_points = (0_u16..=64)
             .map(|step| {
-                let angle = -std::f32::consts::FRAC_PI_2 + sweep * (f32::from(step) / 48.0);
+                let angle = -std::f32::consts::FRAC_PI_2 + active_sweep * (f32::from(step) / 64.0);
                 center + eframe::egui::Vec2::angled(angle) * radius
             })
-            .collect();
-        ui.painter().add(eframe::egui::epaint::PathShape::line(
-            points,
-            eframe::egui::Stroke::new(22.0, openmanic_ui_egui::design::ACTIVE),
-        ));
-    }
-    ui.painter().text(
-        center,
-        eframe::egui::Align2::CENTER_CENTER,
-        format!("{percentage}%"),
-        eframe::egui::FontId::monospace(25.0),
-        openmanic_ui_egui::design::TEXT_PRIMARY,
-    );
-    ui.horizontal(|ui| {
-        openmanic_ui_egui::design::color_dot(ui, openmanic_ui_egui::design::ACTIVE, 11.0);
-        ui.label("Focus");
-        ui.label(format_compact_duration(active));
+            .collect::<Vec<_>>();
+        ui.painter().circle_stroke(
+            center,
+            radius,
+            eframe::egui::Stroke::new(20.0, openmanic_ui_egui::design::ACTIVE.gamma_multiply(0.13)),
+        );
+        if active_sweep > 0.0 {
+            for (width, alpha) in [(34.0, 0.05), (28.0, 0.09)] {
+                ui.painter().add(eframe::egui::epaint::PathShape::line(
+                    active_points.clone(),
+                    eframe::egui::Stroke::new(
+                        width,
+                        openmanic_ui_egui::design::ACTIVE.gamma_multiply(alpha),
+                    ),
+                ));
+            }
+            ui.painter().add(eframe::egui::epaint::PathShape::line(
+                active_points,
+                eframe::egui::Stroke::new(20.0, openmanic_ui_egui::design::ACTIVE),
+            ));
+        }
+        let away_sweep = std::f32::consts::TAU - active_sweep;
+        if away_sweep > 0.001 {
+            let away_points = (0_u16..=24)
+                .map(|step| {
+                    let angle = -std::f32::consts::FRAC_PI_2
+                        + active_sweep
+                        + away_sweep * (f32::from(step) / 24.0);
+                    center + eframe::egui::Vec2::angled(angle) * radius
+                })
+                .collect();
+            ui.painter().add(eframe::egui::epaint::PathShape::line(
+                away_points,
+                eframe::egui::Stroke::new(20.0, openmanic_ui_egui::design::AWAY),
+            ));
+        }
+        ui.painter().text(
+            center + eframe::egui::vec2(0.0, -6.0),
+            eframe::egui::Align2::CENTER_CENTER,
+            format!("{percentage}%"),
+            eframe::egui::FontId::proportional(26.0),
+            openmanic_ui_egui::design::ACTIVE,
+        );
+        ui.painter().text(
+            center + eframe::egui::vec2(0.0, 17.0),
+            eframe::egui::Align2::CENTER_CENTER,
+            "focused",
+            eframe::egui::FontId::proportional(10.5),
+            openmanic_ui_egui::design::TEXT_MUTED,
+        );
         ui.add_space(18.0);
-        openmanic_ui_egui::design::color_dot(ui, openmanic_ui_egui::design::AWAY, 11.0);
-        ui.label("Break");
-        ui.label(format_compact_duration(break_time));
+        ui.vertical(|ui| {
+            ui.add_space(19.0);
+            render_focus_break_metric(
+                ui,
+                "Active focus",
+                active,
+                openmanic_ui_egui::design::ACTIVE,
+            );
+            ui.add_space(18.0);
+            render_focus_break_metric(
+                ui,
+                "Away / break",
+                break_time,
+                openmanic_ui_egui::design::AWAY,
+            );
+        });
     });
+}
+
+fn render_focus_break_metric(
+    ui: &mut eframe::egui::Ui,
+    label: &str,
+    duration_us: u64,
+    color: eframe::egui::Color32,
+) {
+    ui.horizontal(|ui| {
+        openmanic_ui_egui::design::color_dot(ui, color, 11.0);
+        ui.label(
+            eframe::egui::RichText::new(label)
+                .size(13.0)
+                .strong()
+                .color(openmanic_ui_egui::design::TEXT_SECONDARY),
+        );
+    });
+    ui.label(
+        eframe::egui::RichText::new(format_compact_duration(duration_us))
+            .size(16.0)
+            .strong()
+            .color(color),
+    );
 }
 
 fn format_compact_duration(micros: u64) -> String {
     let minutes = micros / 60_000_000;
     format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
+fn relative_day_label(day_offset: i32) -> String {
+    match day_offset {
+        0 => "Today".to_owned(),
+        -1 => "Yesterday".to_owned(),
+        value => format!("{} days ago", value.unsigned_abs()),
+    }
+}
+
+fn format_day_heading(day_offset: i32) -> String {
+    let Some(range) = day_range(day_offset) else {
+        return relative_day_label(day_offset);
+    };
+    let days_since_epoch = range.start().get().div_euclid(86_400_000_000);
+    let (year, month, day) = civil_date_from_days(days_since_epoch);
+    let weekday = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ][usize::try_from((days_since_epoch + 4).rem_euclid(7)).unwrap_or(0)];
+    let month = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ][usize::try_from(month.saturating_sub(1))
+        .unwrap_or(0)
+        .min(11)];
+    format!("{weekday}, {month} {day}, {year}")
+}
+
+fn civil_date_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
+    let shifted = days_since_epoch.saturating_add(719_468);
+    let era = shifted.div_euclid(146_097);
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (
+        year,
+        u32::try_from(month).unwrap_or(1),
+        u32::try_from(day).unwrap_or(1),
+    )
+}
+
+fn format_clock_label(instant: UtcMicros) -> String {
+    let minutes = instant.get().div_euclid(60_000_000).rem_euclid(24 * 60);
+    let hour_24 = minutes / 60;
+    let hour_12 = match hour_24 % 12 {
+        0 => 12,
+        hour => hour,
+    };
+    let suffix = if hour_24 < 12 { "AM" } else { "PM" };
+    format!("{hour_12}:{:02} {suffix}", minutes % 60)
 }
 
 const fn schedule_status_label(status: &MutationStatus) -> &'static str {
@@ -3768,6 +3920,8 @@ struct VerticalSliceApp {
     runtime: RuntimeResources,
     shutdown: ShutdownCoordinator,
     today: TodayController,
+    tracking_paused: bool,
+    pending_tracking_action: Option<TrackingControlAction>,
     layout_editor: LayoutEditor,
     pending_layout_save: Option<LayoutDocument>,
     pending_layout_navigation: Option<openmanic_ui_egui::Route>,
@@ -3917,6 +4071,8 @@ impl VerticalSlice {
             runtime: self.runtime,
             shutdown: self.shutdown,
             today: TodayController::new(),
+            tracking_paused: false,
+            pending_tracking_action: None,
             layout_editor: LayoutEditor::new(layout),
             pending_layout_save: None,
             pending_layout_navigation: None,
@@ -4650,81 +4806,116 @@ impl VerticalSliceApp {
                 .iter()
                 .fold(0_u64, |sum, app| sum.saturating_add(app.duration_us()))
         });
+        let tracked_bounds = data.as_ref().and_then(|snapshot| {
+            let mut recorded = snapshot
+                .timeline()
+                .activity_band()
+                .intervals()
+                .iter()
+                .filter(|interval| {
+                    matches!(
+                        *interval.value(),
+                        ActivityStateValue::Active
+                            | ActivityStateValue::Idle
+                            | ActivityStateValue::PausedByUser
+                            | ActivityStateValue::Excluded
+                    )
+                });
+            let first = recorded.next()?.range().start();
+            let last = recorded
+                .next_back()
+                .map_or(first, |interval| interval.range().end());
+            Some((first, last))
+        });
         openmanic_ui_egui::design::card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.set_min_height(57.0);
             ui.horizontal(|ui| {
-                if openmanic_ui_egui::design::soft_button(ui, "‹") {
+                ui.spacing_mut().item_spacing.x = 7.0;
+                if openmanic_ui_egui::design::day_button(ui, "‹", false) {
                     self.app
                         .controller_mut()
                         .reduce_local(UiAction::Today(TodayAction::PreviousDay));
                 }
-                if openmanic_ui_egui::design::soft_button(ui, "•") {
+                if openmanic_ui_egui::design::day_button(ui, "○", true) {
                     self.app
                         .controller_mut()
                         .reduce_local(UiAction::Today(TodayAction::ReturnToToday));
                 }
                 let can_navigate_next = self.today.can_navigate_next(self.app.controller().model());
-                if ui
-                    .add_enabled(
-                        can_navigate_next,
-                        eframe::egui::Button::new(eframe::egui::RichText::new("›").size(17.0)),
+                let next_clicked = if can_navigate_next {
+                    openmanic_ui_egui::design::day_button(ui, "›", false)
+                } else {
+                    ui.add_enabled(
+                        false,
+                        eframe::egui::Button::new(
+                            eframe::egui::RichText::new("›").size(20.0).strong(),
+                        )
+                        .min_size(eframe::egui::vec2(38.0, 38.0))
+                        .fill(openmanic_ui_egui::design::SURFACE_RAISED)
+                        .stroke(eframe::egui::Stroke::new(
+                            1.0,
+                            openmanic_ui_egui::design::BORDER,
+                        ))
+                        .corner_radius(6.0),
                     )
                     .clicked()
-                {
+                };
+                if next_clicked {
                     self.app
                         .controller_mut()
                         .reduce_local(UiAction::Today(TodayAction::NextDay));
                 }
                 ui.add_space(10.0);
                 ui.vertical(|ui| {
-                    let title = match day_offset {
-                        0 => "Today".to_owned(),
-                        -1 => "Yesterday".to_owned(),
-                        value => format!("{} days ago", value.unsigned_abs()),
-                    };
                     ui.label(
-                        eframe::egui::RichText::new(title)
+                        eframe::egui::RichText::new(format_day_heading(day_offset))
                             .size(19.0)
                             .strong()
                             .color(openmanic_ui_egui::design::TEXT_PRIMARY),
                     );
                     ui.label(
-                        eframe::egui::RichText::new("Tracked activity & personal schedule")
-                            .size(13.0)
+                        eframe::egui::RichText::new(relative_day_label(day_offset))
+                            .size(12.0)
                             .color(openmanic_ui_egui::design::TEXT_MUTED),
                     );
                 });
                 ui.with_layout(
                     eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
                     |ui| {
-                        if ui.button("Customize").clicked() {
-                            let _ = self
-                                .layout_editor
-                                .apply(LayoutEditAction::Begin, self.today.registry());
-                        }
-                        let tracking_enabled =
-                            self.runtime.tracking_permitted.load(Ordering::Acquire);
-                        let tracking_label = if tracking_enabled { "Pause" } else { "Resume" };
-                        if ui.button(tracking_label).clicked() {
-                            self.queue_tracking_control(if tracking_enabled {
-                                TrackingControlAction::Pause
-                            } else {
-                                TrackingControlAction::Resume
-                            });
-                        }
                         openmanic_ui_egui::design::stat_chip(
                             ui,
-                            "Recorded",
+                            "Duration",
                             &format_compact_duration(recorded_us),
+                            true,
+                        );
+                        openmanic_ui_egui::design::stat_chip(
+                            ui,
+                            "Day end",
+                            &tracked_bounds.map_or_else(
+                                || "--:--".to_owned(),
+                                |(_, end)| format_clock_label(end),
+                            ),
                             false,
                         );
                         openmanic_ui_egui::design::stat_chip(
                             ui,
-                            "Duration",
-                            &format_compact_duration(usage_us),
-                            true,
+                            "Day start",
+                            &tracked_bounds.map_or_else(
+                                || "--:--".to_owned(),
+                                |(start, _)| format_clock_label(start),
+                            ),
+                            false,
                         );
+                        if openmanic_ui_egui::design::soft_button_sized(
+                            ui,
+                            "Edit layout",
+                            eframe::egui::vec2(88.0, 35.0),
+                        ) {
+                            let _ = self
+                                .layout_editor
+                                .apply(LayoutEditAction::Begin, self.today.registry());
+                        }
                     },
                 );
             });
@@ -4804,40 +4995,63 @@ impl VerticalSliceApp {
                         .show(ui, |ui| {
                             ui.set_min_width((banner_rect.width() - 44.0).max(1.0));
                             ui.horizontal(|ui| {
+                                let (dot_rect, _) = ui.allocate_exact_size(
+                                    eframe::egui::vec2(14.0, 14.0),
+                                    eframe::egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(
+                                    dot_rect.center(),
+                                    10.0,
+                                    openmanic_ui_egui::design::ACCENT.gamma_multiply(0.16),
+                                );
+                                ui.painter().circle_filled(
+                                    dot_rect.center(),
+                                    7.0,
+                                    openmanic_ui_egui::design::ACCENT,
+                                );
+                                ui.add_space(8.0);
                                 ui.vertical(|ui| {
                                     ui.label(
-                                        eframe::egui::RichText::new("Selected range")
-                                            .size(12.0)
+                                        eframe::egui::RichText::new("CURRENT SELECTION")
+                                            .size(11.0)
                                             .strong()
-                                            .color(openmanic_ui_egui::design::ACCENT_TEXT),
+                                            .color(openmanic_ui_egui::design::TEXT_MUTED),
                                     );
                                     ui.label(
-                                        eframe::egui::RichText::new("Current timeline viewport")
-                                            .size(17.0)
+                                        eframe::egui::RichText::new("Whole view window")
+                                            .size(19.0)
                                             .strong()
                                             .color(openmanic_ui_egui::design::TEXT_PRIMARY),
                                     );
                                 });
-                                ui.with_layout(
-                                    eframe::egui::Layout::right_to_left(
-                                        eframe::egui::Align::Center,
-                                    ),
-                                    |ui| {
-                                        if ui.button("Reset selection").clicked() {
-                                            self.app.controller_mut().reduce_local(
-                                                UiAction::Today(TodayAction::ClearAllNarrowing),
-                                            );
-                                        }
-                                        ui.label(
-                                            eframe::egui::RichText::new(format_compact_duration(
-                                                usage_us,
-                                            ))
-                                            .size(22.0)
-                                            .monospace()
-                                            .color(openmanic_ui_egui::design::TEXT_PRIMARY),
-                                        );
-                                    },
-                                );
+                                let trailing_width = 118.0 + 16.0 + 120.0;
+                                ui.add_space((ui.available_width() - trailing_width).max(0.0));
+                                ui.vertical(|ui| {
+                                    ui.set_width(120.0);
+                                    ui.label(
+                                        eframe::egui::RichText::new("Active time")
+                                            .size(11.0)
+                                            .color(openmanic_ui_egui::design::TEXT_MUTED),
+                                    );
+                                    ui.label(
+                                        eframe::egui::RichText::new(format_compact_duration(
+                                            usage_us,
+                                        ))
+                                        .size(24.0)
+                                        .monospace()
+                                        .color(openmanic_ui_egui::design::TEXT_PRIMARY),
+                                    );
+                                });
+                                ui.add_space(16.0);
+                                if openmanic_ui_egui::design::soft_button_sized(
+                                    ui,
+                                    "Clear selection",
+                                    eframe::egui::vec2(118.0, 35.0),
+                                ) {
+                                    self.app.controller_mut().reduce_local(UiAction::Today(
+                                        TodayAction::ClearAllNarrowing,
+                                    ));
+                                }
                             });
                         });
                     ui.painter().rect_filled(
@@ -5700,6 +5914,7 @@ impl VerticalSliceApp {
     }
 
     #[expect(
+        clippy::too_many_lines,
         clippy::excessive_nesting,
         reason = "the compact toolbar keeps its two timeline controls together"
     )]
@@ -5712,15 +5927,45 @@ impl VerticalSliceApp {
         ui.horizontal(|ui| {
             ui.colored_label(
                 self.app.theme_tokens().content_secondary(),
-                "Wheel to zoom; drag the overview window to pan",
+                "Scroll to zoom · drag the viewfinder window to pan · right-click for options",
             );
             ui.with_layout(
                 eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
                 |ui| {
-                    if ui.button("Reset view").clicked() && self.timeline.reset_view() {
+                    if openmanic_ui_egui::design::soft_button_sized(
+                        ui,
+                        "Reset view",
+                        eframe::egui::vec2(109.0, 35.0),
+                    ) && self.timeline.reset_view()
+                    {
                         ui.ctx().request_repaint();
                     }
-                    ui.toggle_value(&mut self.create_schedule_mode, "Add schedule");
+                    let add_schedule = ui.add_sized(
+                        [126.0, 35.0],
+                        eframe::egui::Button::new(
+                            eframe::egui::RichText::new("+ Add schedule")
+                                .size(12.5)
+                                .strong()
+                                .color(openmanic_ui_egui::design::TEXT_TERTIARY),
+                        )
+                        .fill(if self.create_schedule_mode {
+                            openmanic_ui_egui::design::ACCENT.gamma_multiply(0.22)
+                        } else {
+                            openmanic_ui_egui::design::SURFACE_RAISED
+                        })
+                        .stroke(eframe::egui::Stroke::new(
+                            1.0,
+                            if self.create_schedule_mode {
+                                openmanic_ui_egui::design::ACCENT
+                            } else {
+                                openmanic_ui_egui::design::BORDER
+                            },
+                        ))
+                        .corner_radius(6.0),
+                    );
+                    if add_schedule.clicked() {
+                        self.create_schedule_mode = !self.create_schedule_mode;
+                    }
                 },
             );
         });
@@ -6162,9 +6407,46 @@ impl VerticalSliceApp {
 
     fn queue_tracking_control(&mut self, action: TrackingControlAction) {
         let request = self.runtime.identifiers.tracking_request(action);
-        let _ = self
+        if self
             .today
-            .queue_tracking(self.app.controller_mut(), request);
+            .queue_tracking(self.app.controller_mut(), request)
+            .is_ok()
+        {
+            self.tracking_paused = action == TrackingControlAction::Pause;
+            self.pending_tracking_action = Some(action);
+        }
+    }
+
+    fn reconcile_tracking_control(&mut self) {
+        let Some(action) = self.pending_tracking_action else {
+            return;
+        };
+        let Some(acknowledgement) = self
+            .today
+            .tracking_acknowledgement(self.app.controller().model())
+        else {
+            return;
+        };
+        match acknowledgement.status() {
+            MutationStatus::Pending => {}
+            MutationStatus::Confirmed { .. } => self.pending_tracking_action = None,
+            MutationStatus::Rejected { .. } => {
+                self.tracking_paused = action == TrackingControlAction::Resume;
+                self.pending_tracking_action = None;
+            }
+        }
+    }
+
+    fn handle_header_tracking_toggle(&mut self, tracking_enabled: bool) {
+        if !self.app.take_header_tracking_toggle_request() {
+            return;
+        }
+        let action = if tracking_enabled {
+            TrackingControlAction::Pause
+        } else {
+            TrackingControlAction::Resume
+        };
+        self.queue_tracking_control(action);
     }
 
     #[expect(
@@ -7098,7 +7380,11 @@ impl eframe::App for VerticalSliceApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let route_before_shell = self.app.controller().model().route();
+                let tracking_enabled = !self.tracking_paused;
+                self.app.set_header_tracking_enabled(tracking_enabled);
                 eframe::App::ui(&mut self.app, ui, frame);
+                self.reconcile_tracking_control();
+                self.handle_header_tracking_toggle(tracking_enabled);
                 let route_after_shell = self.app.controller().model().route();
                 if self.layout_editor.is_editing() && route_after_shell != route_before_shell {
                     self.pending_layout_navigation = Some(route_after_shell);
@@ -7586,11 +7872,23 @@ mod tests {
     use super::{
         CommandIdentifiers, ForegroundSwitchDecision, ForegroundSwitchStabilizer,
         PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError, TrackingDebugState,
-        UiInbox, UiIngress, calendar_schedule_target, day_range, focus_remaining_label,
-        focus_remaining_us, foreground_observed_at, format_utc_clock, format_utc_range,
-        initial_category_for_application, initial_category_id, record_tracking_observation,
-        recurring_schedule_rule, set_tracking_delivery, store_identity,
+        UiInbox, UiIngress, calendar_schedule_target, civil_date_from_days, day_range,
+        focus_remaining_label, focus_remaining_us, foreground_observed_at, format_clock_label,
+        format_utc_clock, format_utc_range, initial_category_for_application, initial_category_id,
+        record_tracking_observation, recurring_schedule_rule, set_tracking_delivery,
+        store_identity,
     };
+
+    #[test]
+    fn dashboard_calendar_and_clock_labels_cover_epoch_and_twelve_hour_boundaries() {
+        assert_eq!(civil_date_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_date_from_days(19_782), (2024, 2, 29));
+        assert_eq!(format_clock_label(UtcMicros::new(0)), "12:00 AM");
+        assert_eq!(
+            format_clock_label(UtcMicros::new(13 * 3_600_000_000 + 5 * 60_000_000)),
+            "1:05 PM"
+        );
+    }
 
     fn foreground_application(value: u8, observed_at_utc: UtcMicros) -> Application {
         Application::try_new(

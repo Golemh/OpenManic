@@ -10,18 +10,36 @@ use crate::{
     UiModel, design,
 };
 
-/// Renders the application shell and returns whether ordinary input changed state.
-pub(crate) fn render<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: ThemeTokens) -> bool {
-    let mut changed = false;
+/// One frame of interaction emitted by the shared application shell.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ShellOutput {
+    pub(crate) changed: bool,
+    pub(crate) tracking_toggle_requested: bool,
+}
+
+/// Renders the application shell and returns its bounded interaction output.
+pub(crate) fn render<T>(
+    ui: &mut egui::Ui,
+    model: &mut UiModel<T>,
+    tokens: ThemeTokens,
+    tracking_enabled: Option<bool>,
+) -> ShellOutput {
+    let mut output = ShellOutput::default();
     egui::Frame::new()
         .fill(design::TITLEBAR)
         .inner_margin(egui::Margin::symmetric(22, 12))
-        .show(ui, |ui| changed |= render_navigation(ui, model));
+        .show(ui, |ui| {
+            let navigation = render_navigation(ui, model, tracking_enabled);
+            output.changed |= navigation.changed;
+            output.tracking_toggle_requested |= navigation.tracking_toggle_requested;
+        });
     // 1px title-bar bottom border.
-    let separator_rect =
-        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 1.0));
-    ui.painter()
-        .rect_filled(separator_rect, 0.0, design::TITLEBAR_BORDER);
+    let separator_y = ui.cursor().min.y;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        separator_y,
+        Stroke::new(1.0, design::TITLEBAR_BORDER),
+    );
 
     let has_presentation_notice = !matches!(model.data(), PresentableData::Ready(_));
     let has_mutation_notice = latest_mutation(model).is_some();
@@ -30,19 +48,23 @@ pub(crate) fn render<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: Theme
             .fill(tokens.canvas())
             .inner_margin(egui::Margin::symmetric(26, 11))
             .show(ui, |ui| {
-                changed |= render_presentation_state(ui, model.data(), tokens);
-                changed |= render_mutation_state(ui, model, tokens);
+                output.changed |= render_presentation_state(ui, model.data(), tokens);
+                output.changed |= render_mutation_state(ui, model, tokens);
             });
     }
-    changed
+    output
 }
 
 #[expect(
     clippy::excessive_nesting,
     reason = "the single header row keeps navigation state and its action adjacent"
 )]
-fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
-    let mut changed = false;
+fn render_navigation<T>(
+    ui: &mut egui::Ui,
+    model: &mut UiModel<T>,
+    tracking_enabled: Option<bool>,
+) -> ShellOutput {
+    let mut output = ShellOutput::default();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         render_logo_chip(ui);
@@ -58,7 +80,7 @@ fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
             for route in Route::all() {
                 if design::nav_pill(ui, route.label(), model.route() == route) {
                     crate::reducer::reduce(model, UiAction::Navigate(route));
-                    changed = true;
+                    output.changed = true;
                 }
             }
         });
@@ -76,9 +98,13 @@ fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
             }
             ui.add_space(5.0);
             render_monitoring_indicator(ui);
+            if let Some(tracking_enabled) = tracking_enabled {
+                ui.add_space(5.0);
+                output.tracking_toggle_requested |= design::tracking_button(ui, tracking_enabled);
+            }
         });
     });
-    changed
+    output
 }
 
 fn render_logo_chip(ui: &mut egui::Ui) {
