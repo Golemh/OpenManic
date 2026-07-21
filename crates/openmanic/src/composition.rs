@@ -39,13 +39,15 @@ use openmanic_application::{
     TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
     TimelineSnapshot, TimelineSourceActivity, TitleDisclosure, TitleObservationResult,
     TitleStabilizer, TrackingCommand, TrackingEvidence, TrackingPersistenceIntent,
-    TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService, WorkLane,
+    TrackingCheckpoint, TrackingPersistencePort, TrackingPersistenceSubmit,
+    TrackingService, WorkLane,
     bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
-    ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
-    FocusSessionId, FocusSessionState, HalfOpenInterval, LayoutDocument, LayoutHeight,
-    OneTimeScheduleId, ScheduleEditScope, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+    ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
+    ApplicationName, Category, CategoryId, CategoryName, FocusSessionId, FocusSessionState,
+    HalfOpenInterval, LayoutDocument, LayoutHeight, OneTimeScheduleId, ScheduleEditScope,
+    ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -66,8 +68,9 @@ use openmanic_ui_egui::{
     DestructiveConfirmation, InboundMessage, JobDescriptor, JobPresentationState, JobsAction,
     JobsController, JobsEffect, LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus,
     OpenManicApp, PresentableData, SettingsAction, SettingsController, SettingsEffect,
-    ShutdownController, ShutdownEffect, TodayController, TodayTrackingRequest, TodayWidgetKind,
-    TodayWidgetResolution, TrackingControlAction, UiAction, UiController, UiModel,
+    ShutdownController, ShutdownEffect, TodayAction, TodayController, TodayTrackingRequest,
+    TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction, UiController,
+    UiModel,
     reflow_dashboard, render_distribution_snapshot, render_shutdown_failure, render_usage_snapshot,
 };
 
@@ -3553,6 +3556,7 @@ struct VerticalSliceApp {
     jobs: JobsController,
     projection_sequence: u64,
     requested_range: Option<HalfOpenInterval>,
+    overview_range_mode: OverviewRangeMode,
     create_schedule_mode: bool,
     schedule_draft: Option<ScheduleDraft>,
     schedule_delete_request: Option<ScheduleDeleteRequest>,
@@ -3600,6 +3604,7 @@ impl VerticalSlice {
         )
         .map_err(|_| CompositionError::Storage)?;
         seed_initial_categories(&mut store)?;
+        seed_demo_data(&mut store)?;
         let mut ui = UiController::try_new(
             UiModel::default(),
             UI_INBOUND_CAPACITY,
@@ -3699,6 +3704,7 @@ impl VerticalSlice {
             jobs: JobsController::default(),
             projection_sequence: 1,
             requested_range: None,
+            overview_range_mode: OverviewRangeMode::SevenDays,
             create_schedule_mode: false,
             schedule_draft: None,
             schedule_delete_request: None,
@@ -4171,26 +4177,56 @@ impl VerticalSliceApp {
             return;
         }
         ui.add_space(16.0);
-        ui.heading("Calendar");
-        ui.horizontal(|ui| {
-            if ui.button("Previous day").clicked() {
-                self.apply_calendar_action(CalendarAction::PreviousDay);
-            }
-            if ui
-                .add_enabled(
-                    self.calendar
+        openmanic_ui_egui::design::card_frame()
+            .inner_margin(eframe::egui::Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if openmanic_ui_egui::design::soft_button(ui, "‹") {
+                        self.apply_calendar_action(CalendarAction::PreviousDay);
+                    }
+                    if openmanic_ui_egui::design::soft_button(ui, "○") {
+                        self.apply_calendar_action(CalendarAction::ReturnToToday);
+                    }
+                    let next_enabled = self
+                        .calendar
                         .view_model(&self.calendar_data)
-                        .next_day_enabled(),
-                    eframe::egui::Button::new("Next day"),
-                )
-                .clicked()
-            {
-                self.apply_calendar_action(CalendarAction::NextDay);
-            }
-            if ui.button("Today").clicked() {
-                self.apply_calendar_action(CalendarAction::ReturnToToday);
-            }
-        });
+                        .next_day_enabled();
+                    if ui
+                        .add_enabled(
+                            next_enabled,
+                            eframe::egui::Button::new(
+                                eframe::egui::RichText::new("›")
+                                    .size(14.0)
+                                    .strong()
+                                    .color(openmanic_ui_egui::design::TEXT_TERTIARY),
+                            )
+                            .fill(openmanic_ui_egui::design::SURFACE_RAISED)
+                            .stroke(eframe::egui::Stroke::new(
+                                1.0,
+                                openmanic_ui_egui::design::BORDER,
+                            )),
+                        )
+                        .clicked()
+                    {
+                        self.apply_calendar_action(CalendarAction::NextDay);
+                    }
+                    ui.add_space(8.0);
+                    ui.vertical(|ui| {
+                        ui.label(
+                            eframe::egui::RichText::new("Calendar")
+                                .size(20.0)
+                                .strong()
+                                .color(openmanic_ui_egui::design::TEXT_PRIMARY),
+                        );
+                        ui.label(
+                            eframe::egui::RichText::new("Time entries & scheduled focus")
+                                .size(12.5)
+                                .color(openmanic_ui_egui::design::TEXT_MUTED),
+                        );
+                    });
+                });
+            });
+        ui.add_space(11.0);
         let model = self.calendar.view_model(&self.calendar_data);
         match model.state() {
             CalendarDataState::Loading => {
@@ -4209,25 +4245,64 @@ impl VerticalSliceApp {
             }
         }
         for presented in model.blocks() {
-            ui.horizontal(|ui| {
-                let block = presented.block();
-                if ui
-                    .selectable_label(
-                        presented.selected(),
-                        format!(
-                            "{:?}: {}",
+            let block = presented.block();
+            let accent = if presented.kind() == CalendarBlockKind::Schedule {
+                openmanic_ui_egui::design::SCHEDULED
+            } else {
+                openmanic_ui_egui::design::category_color("development")
+            };
+            let fill = if presented.selected() {
+                accent.gamma_multiply(0.18)
+            } else {
+                openmanic_ui_egui::design::SURFACE
+            };
+            eframe::egui::Frame::new()
+                .fill(fill)
+                .stroke(eframe::egui::Stroke::new(
+                    1.0,
+                    if presented.selected() {
+                        accent
+                    } else {
+                        openmanic_ui_egui::design::BORDER
+                    },
+                ))
+                .corner_radius(10.0)
+                .inner_margin(eframe::egui::Margin::symmetric(12, 8))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Left color bar in the block's accent color.
+                        let (bar, _) = ui.allocate_exact_size(
+                            eframe::egui::vec2(3.0, 20.0),
+                            eframe::egui::Sense::hover(),
+                        );
+                        ui.painter().rect_filled(bar, 2.0, accent);
+                        let label = format!(
+                            "{:?} · {}",
                             presented.kind(),
                             format_utc_range(block.visual_range())
-                        ),
-                    )
-                    .clicked()
-                {
-                    self.apply_calendar_action(CalendarAction::SelectBlock { id: block.id() });
-                }
-                if presented.kind() == CalendarBlockKind::Schedule {
-                    self.render_calendar_schedule_controls(ui, block.id());
-                }
-            });
+                        );
+                        if ui
+                            .add(
+                                eframe::egui::Label::new(
+                                    eframe::egui::RichText::new(label)
+                                        .size(13.0)
+                                        .strong()
+                                        .color(openmanic_ui_egui::design::TEXT_SECONDARY),
+                                )
+                                .sense(eframe::egui::Sense::click()),
+                            )
+                            .clicked()
+                        {
+                            self.apply_calendar_action(CalendarAction::SelectBlock {
+                                id: block.id(),
+                            });
+                        }
+                        if presented.kind() == CalendarBlockKind::Schedule {
+                            self.render_calendar_schedule_controls(ui, block.id());
+                        }
+                    });
+                });
+            ui.add_space(6.0);
         }
         if let Some(details) = model.selected_details() {
             ui.label(format!(
@@ -4316,6 +4391,58 @@ impl VerticalSliceApp {
             return;
         }
         let tokens = self.app.theme_tokens();
+        let day_offset = self
+            .app
+            .controller()
+            .model()
+            .today_view_context()
+            .selected_day_offset();
+        openmanic_ui_egui::design::card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if openmanic_ui_egui::design::soft_button(ui, "‹") {
+                    self.app
+                        .controller_mut()
+                        .reduce_local(UiAction::Today(TodayAction::PreviousDay));
+                }
+                if openmanic_ui_egui::design::soft_button(ui, "○") {
+                    self.app
+                        .controller_mut()
+                        .reduce_local(UiAction::Today(TodayAction::ReturnToToday));
+                }
+                let can_navigate_next = self.today.can_navigate_next(self.app.controller().model());
+                if ui
+                    .add_enabled(
+                        can_navigate_next,
+                        eframe::egui::Button::new(eframe::egui::RichText::new("›").size(17.0)),
+                    )
+                    .clicked()
+                {
+                    self.app
+                        .controller_mut()
+                        .reduce_local(UiAction::Today(TodayAction::NextDay));
+                }
+                ui.add_space(10.0);
+                ui.vertical(|ui| {
+                    let title = match day_offset {
+                        0 => "Today".to_owned(),
+                        -1 => "Yesterday".to_owned(),
+                        value => format!("{} days ago", value.unsigned_abs()),
+                    };
+                    ui.label(
+                        eframe::egui::RichText::new(title)
+                            .size(22.0)
+                            .strong()
+                            .color(openmanic_ui_egui::design::TEXT_PRIMARY),
+                    );
+                    ui.label(
+                        eframe::egui::RichText::new("Tracked activity & personal schedule")
+                            .size(13.0)
+                            .color(openmanic_ui_egui::design::TEXT_MUTED),
+                    );
+                });
+            });
+        });
+        ui.add_space(11.0);
         self.render_layout_editor_controls(ui);
         let data = self
             .app
@@ -4326,15 +4453,10 @@ impl VerticalSliceApp {
             .cloned();
         let context = self.app.controller().model().today_view_context().clone();
         let Some(snapshot) = data else {
-            eframe::egui::Frame::new()
-                .fill(tokens.panel())
-                .stroke(eframe::egui::Stroke::new(1.0, tokens.timeline_grid()))
-                .corner_radius(12.0)
-                .inner_margin(16.0)
-                .show(ui, |ui| {
-                    ui.heading("Preparing your dashboard");
-                    ui.colored_label(tokens.content_secondary(), "Waiting for activity data...");
-                });
+            openmanic_ui_egui::design::card_frame().show(ui, |ui| {
+                ui.heading("Preparing your dashboard");
+                ui.colored_label(tokens.content_secondary(), "Waiting for activity data...");
+            });
             return;
         };
 
@@ -4404,10 +4526,7 @@ impl VerticalSliceApp {
                     .max_rect(widget_rect)
                     .id_salt(placement.instance_id()),
                 |ui| {
-                    eframe::egui::Frame::new()
-                        .fill(tokens.panel())
-                        .stroke(eframe::egui::Stroke::new(1.0, tokens.timeline_grid()))
-                        .corner_radius(12.0)
+                    openmanic_ui_egui::design::card_frame()
                         .inner_margin(eframe::egui::Margin::same(14))
                         .show(ui, |ui| {
                             ui.set_min_size(eframe::egui::vec2(
@@ -4516,20 +4635,17 @@ impl VerticalSliceApp {
                                             tokens.interaction_primary(),
                                             today_widget_icon(definition.kind()),
                                         );
-                                        ui.label(
-                                            eframe::egui::RichText::new(
-                                                definition.display_name().to_uppercase(),
-                                            )
-                                            .size(12.0)
-                                            .strong()
-                                            .color(tokens.content_primary()),
+                                        openmanic_ui_egui::design::section_header(
+                                            ui,
+                                            definition.display_name(),
                                         );
                                     });
-                                    ui.colored_label(
-                                        tokens.content_secondary(),
-                                        definition.description(),
+                                    ui.label(
+                                        eframe::egui::RichText::new(definition.description())
+                                            .size(12.5)
+                                            .color(openmanic_ui_egui::design::TEXT_FAINT),
                                     );
-                                    ui.separator();
+                                    ui.add_space(8.0);
                                     if self.layout_editor.is_editing() {
                                         ui.colored_label(
                             tokens.content_secondary(),
@@ -4548,6 +4664,115 @@ impl VerticalSliceApp {
                         });
                 },
             );
+        }
+    }
+
+    fn render_overview_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
+        use openmanic_ui_egui::design;
+        if self.app.controller().model().route() != openmanic_ui_egui::Route::Overview {
+            return;
+        }
+        let data = self
+            .app
+            .controller()
+            .model()
+            .data()
+            .visible_value()
+            .cloned();
+
+        design::card_frame().show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(
+                        eframe::egui::RichText::new("Overview")
+                            .size(22.0)
+                            .strong()
+                            .color(design::TEXT_PRIMARY),
+                    );
+                    ui.label(
+                        eframe::egui::RichText::new(self.overview_range_mode.title())
+                            .size(13.0)
+                            .color(design::TEXT_MUTED),
+                    );
+                });
+                ui.with_layout(
+                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+                    |ui| {
+                        for mode in OverviewRangeMode::ALL.iter().rev() {
+                            if design::segment_option(
+                                ui,
+                                mode.label(),
+                                self.overview_range_mode == *mode,
+                            ) {
+                                self.overview_range_mode = *mode;
+                            }
+                        }
+                    },
+                );
+            });
+        });
+        ui.add_space(11.0);
+
+        let Some(snapshot) = data else {
+            design::card_frame().show(ui, |ui| {
+                ui.colored_label(design::TEXT_MUTED, "Waiting for activity data...");
+            });
+            return;
+        };
+        let usage_total_us: u64 = snapshot
+            .usage()
+            .applications()
+            .iter()
+            .map(openmanic_ui_egui::ApplicationUsage::duration_us)
+            .sum();
+        let application_count = snapshot.usage().applications().len();
+        let known_us = snapshot.timeline().totals().known_duration_us();
+
+        ui.columns(3, |columns| {
+            render_overview_tile(
+                &mut columns[0],
+                "Active total",
+                &format_micros_duration(usage_total_us),
+                "tracked this day",
+                design::TEXT_PRIMARY,
+            );
+            render_overview_tile(
+                &mut columns[1],
+                "Known coverage",
+                &format_micros_duration(known_us),
+                "of the visible range",
+                design::ACCENT_TEXT,
+            );
+            render_overview_tile(
+                &mut columns[2],
+                "Applications",
+                &application_count.to_string(),
+                "seen in this range",
+                design::ACTIVE,
+            );
+        });
+        ui.add_space(11.0);
+
+        ui.columns(2, |columns| {
+            design::card_frame().show(&mut columns[0], |ui| {
+                design::section_header(ui, "Category breakdown");
+                ui.add_space(8.0);
+                render_distribution_snapshot(ui, snapshot.distribution());
+            });
+            design::card_frame().show(&mut columns[1], |ui| {
+                design::section_header(ui, "Apps & websites");
+                ui.add_space(8.0);
+                render_usage_snapshot(ui, snapshot.usage());
+            });
+        });
+        if self.overview_range_mode != OverviewRangeMode::SevenDays {
+            ui.add_space(11.0);
+            design::card_frame().show(ui, |ui| {
+                ui.colored_label(
+                    design::TEXT_FAINT,
+                    "Multi-day aggregation for this range arrives with the range projection; the selected day is shown meanwhile.",
+                );
+            });
         }
     }
 
@@ -4746,9 +4971,26 @@ impl VerticalSliceApp {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Settings {
             return;
         }
+        use openmanic_ui_egui::design;
         ui.add_space(16.0);
-        ui.heading("Settings");
-        ui.label("These choices stay on this device and apply after you save them.");
+        design::card_frame()
+            .inner_margin(eframe::egui::Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.label(
+                    eframe::egui::RichText::new("Settings")
+                        .size(22.0)
+                        .strong()
+                        .color(design::TEXT_PRIMARY),
+                );
+                ui.label(
+                    eframe::egui::RichText::new(
+                        "Tracking, privacy, and wellness · all data stays on this device",
+                    )
+                    .size(13.0)
+                    .color(design::TEXT_MUTED),
+                );
+            });
+        ui.add_space(11.0);
         let mut basic = self.settings_controller.basic().clone();
         let mut automatic = basic.start_tracking_automatically();
         let mut login = basic.start_at_login();
@@ -4756,26 +4998,57 @@ impl VerticalSliceApp {
         let mut titles = basic.collect_window_titles();
         let mut notifications = basic.notifications_enabled();
         let mut sounds = basic.focus_sounds_enabled();
-        ui.checkbox(&mut automatic, "Start tracking after consent");
-        ui.checkbox(&mut login, "Start OpenManic when I sign in");
-        ui.checkbox(
-            &mut close_to_tray,
-            "Keep tracking in the tray when I close the window",
-        );
-        ui.checkbox(&mut titles, "Collect window titles");
-        ui.small(self.settings_controller.title_collection_disclosure());
-        ui.checkbox(&mut notifications, "Show notifications");
-        ui.checkbox(&mut sounds, "Play focus sounds");
+        design::card_frame().show(ui, |ui| {
+            design::section_header(ui, "Tracking");
+            ui.label(
+                eframe::egui::RichText::new("How activity is captured")
+                    .size(12.5)
+                    .color(design::TEXT_FAINT),
+            );
+            ui.add_space(8.0);
+            settings_toggle_row(ui, "Start tracking after consent", None, &mut automatic);
+            settings_toggle_row(ui, "Start OpenManic when I sign in", None, &mut login);
+            settings_toggle_row(
+                ui,
+                "Keep tracking in the tray when I close the window",
+                None,
+                &mut close_to_tray,
+            );
+        });
+        ui.add_space(11.0);
+        design::card_frame().show(ui, |ui| {
+            design::section_header(ui, "Privacy");
+            ui.label(
+                eframe::egui::RichText::new("You are always in control of your data")
+                    .size(12.5)
+                    .color(design::TEXT_FAINT),
+            );
+            ui.add_space(8.0);
+            settings_toggle_row(
+                ui,
+                "Collect window titles",
+                Some(self.settings_controller.title_collection_disclosure()),
+                &mut titles,
+            );
+            settings_toggle_row(ui, "Show notifications", None, &mut notifications);
+            settings_toggle_row(ui, "Play focus sounds", None, &mut sounds);
+        });
         basic.set_start_tracking_automatically(automatic);
         basic.set_start_at_login(login);
         basic.set_close_to_tray(close_to_tray);
         basic.set_collect_window_titles(titles);
         basic.set_notifications_enabled(notifications);
         basic.set_focus_sounds_enabled(sounds);
+        ui.add_space(11.0);
         ui.horizontal(|ui| {
-            ui.label("Appearance:");
+            ui.label(
+                eframe::egui::RichText::new("Appearance")
+                    .size(13.0)
+                    .strong()
+                    .color(design::TEXT_SECONDARY),
+            );
             for (mode, label) in [(0_u8, "Dark"), (1, "Light"), (2, "Follow system")] {
-                if ui.button(label).clicked() {
+                if design::segment_option(ui, label, false) {
                     let _ = self
                         .runtime
                         .try_submit_theme(mode, UtcMicros::new(utc_now_micros()));
@@ -4784,7 +5057,7 @@ impl VerticalSliceApp {
         });
         ui.add_space(12.0);
         ui.separator();
-        ui.heading("Data");
+        design::section_header(ui, "Data & Categories");
         ui.label("Export and import operate only on files you select on this device.");
         ui.horizontal(|ui| {
             ui.label("Export CSV to:");
@@ -5170,7 +5443,22 @@ impl VerticalSliceApp {
             return;
         };
         ui.add_space(16.0);
-        ui.heading("Categories");
+        openmanic_ui_egui::design::card_frame()
+            .inner_margin(eframe::egui::Margin::symmetric(20, 14))
+            .show(ui, |ui| {
+                ui.label(
+                    eframe::egui::RichText::new("Categories")
+                        .size(22.0)
+                        .strong()
+                        .color(openmanic_ui_egui::design::TEXT_PRIMARY),
+                );
+                ui.label(
+                    eframe::egui::RichText::new("Map applications to categories")
+                        .size(13.0)
+                        .color(openmanic_ui_egui::design::TEXT_MUTED),
+                );
+            });
+        ui.add_space(11.0);
         ui.horizontal(|ui| {
             ui.label("New category");
             ui.text_edit_singleline(&mut self.new_category_name);
@@ -5461,6 +5749,11 @@ impl VerticalSliceApp {
                 self.render_application_icon(ui, application_id);
                 #[cfg(not(windows))]
                 ui.label("□");
+                let accent = openmanic_ui_egui::design::application_brand_color(
+                    application.name().as_str(),
+                )
+                .unwrap_or(openmanic_ui_egui::design::UNKNOWN);
+                openmanic_ui_egui::design::color_dot(ui, accent, 12.0);
                 let mut selected = self
                     .selected_category_applications
                     .contains(&application_id);
@@ -5474,9 +5767,26 @@ impl VerticalSliceApp {
                         self.selected_category_applications.remove(&application_id);
                     }
                 }
-                ui.label(format!("Category: {category_name}"));
+                if category_name == "Uncategorized" {
+                    ui.label(
+                        eframe::egui::RichText::new("Untracked")
+                            .size(12.5)
+                            .italics()
+                            .color(openmanic_ui_egui::design::TEXT_FAINT),
+                    );
+                } else {
+                    openmanic_ui_egui::design::percent_pill(
+                        ui,
+                        category_name,
+                        openmanic_ui_egui::design::category_color(category_name),
+                    );
+                }
                 if *excluded {
-                    ui.label("Excluded from future tracking");
+                    ui.label(
+                        eframe::egui::RichText::new("Excluded from future tracking")
+                            .size(12.0)
+                            .color(openmanic_ui_egui::design::AWAY),
+                    );
                 }
                 let action_label = if *excluded {
                     "Include future tracking"
@@ -6213,6 +6523,124 @@ struct RecurringScheduleEditRequest {
     time_zone_id: String,
 }
 
+/// Range selection for the Overview analytics header.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverviewRangeMode {
+    /// The last seven days.
+    SevenDays,
+    /// The last twelve weeks.
+    Weeks,
+    /// The last twelve months.
+    Months,
+}
+
+impl OverviewRangeMode {
+    const ALL: [Self; 3] = [Self::SevenDays, Self::Weeks, Self::Months];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::SevenDays => "7 Days",
+            Self::Weeks => "Weeks",
+            Self::Months => "Months",
+        }
+    }
+
+    const fn title(self) -> &'static str {
+        match self {
+            Self::SevenDays => "Last 7 days",
+            Self::Weeks => "Last 12 weeks",
+            Self::Months => "Last 12 months",
+        }
+    }
+}
+
+fn render_overview_tile(
+    ui: &mut eframe::egui::Ui,
+    label: &str,
+    value: &str,
+    sub: &str,
+    value_color: eframe::egui::Color32,
+) {
+    use openmanic_ui_egui::design;
+    design::card_frame()
+        .inner_margin(eframe::egui::Margin::symmetric(18, 15))
+        .show(ui, |ui| {
+            ui.label(
+                eframe::egui::RichText::new(label.to_uppercase())
+                    .size(10.5)
+                    .strong()
+                    .color(design::TEXT_MUTED),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                eframe::egui::RichText::new(value)
+                    .size(26.0)
+                    .monospace()
+                    .color(value_color),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                eframe::egui::RichText::new(sub)
+                    .size(11.5)
+                    .strong()
+                    .color(design::TEXT_FAINT),
+            );
+        });
+}
+
+fn settings_toggle_row(
+    ui: &mut eframe::egui::Ui,
+    label: &str,
+    description: Option<&str>,
+    value: &mut bool,
+) {
+    use openmanic_ui_egui::design;
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(
+                eframe::egui::RichText::new(label)
+                    .size(14.0)
+                    .strong()
+                    .color(design::TEXT_SECONDARY),
+            );
+            if let Some(description) = description {
+                ui.label(
+                    eframe::egui::RichText::new(description)
+                        .size(12.0)
+                        .color(design::TEXT_FAINT),
+                );
+            }
+        });
+        ui.with_layout(
+            eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+            |ui| {
+                let _ = design::toggle_switch(ui, value);
+            },
+        );
+    });
+    // Hairline separator between rows.
+    let (line, _) = ui.allocate_exact_size(
+        eframe::egui::vec2(ui.available_width(), 1.0),
+        eframe::egui::Sense::hover(),
+    );
+    ui.painter().rect_filled(line, 0.0, design::HAIRLINE);
+    ui.add_space(6.0);
+}
+
+fn format_micros_duration(duration_us: u64) -> String {
+    let total_seconds = duration_us / 1_000_000;
+    let hours = total_seconds / 3_600;
+    let minutes = (total_seconds % 3_600) / 60;
+    let seconds = total_seconds % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes:02}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds:02}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 fn render_schedule_draft(
     ui: &mut eframe::egui::Ui,
     draft: &mut ScheduleDraft,
@@ -6272,10 +6700,6 @@ fn render_weekday_selector(ui: &mut eframe::egui::Ui, weekday_mask: &mut u8) {
 }
 
 impl eframe::App for VerticalSliceApp {
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "the settings overlay deliberately contains its bounded visual frame and scroll surface."
-    )]
     fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
         // The bootstrap data-root lock, instance owner, worker handles, and supervisor remain
         // process-owned while the viewport is hidden or stalled.
@@ -6292,34 +6716,21 @@ impl eframe::App for VerticalSliceApp {
                 .controller_mut()
                 .reduce_local(UiAction::Navigate(route_before_shell));
         }
-        if route_after_shell == openmanic_ui_egui::Route::Today {
-            eframe::egui::ScrollArea::vertical()
-                .id_salt("today-dashboard-scroll")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
+        eframe::egui::ScrollArea::vertical()
+            .id_salt("openmanic-dashboard-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| match route_after_shell {
+                openmanic_ui_egui::Route::Today => {
                     self.render_today_dashboard(ui);
                     ui.add_space(8.0);
                     self.render_live_backend_diagnostics(ui);
-                });
-        } else {
-            self.render_today_dashboard(ui);
-        }
+                }
+                openmanic_ui_egui::Route::Overview => self.render_overview_dashboard(ui),
+                openmanic_ui_egui::Route::Categories => self.render_categories_dashboard(ui),
+                openmanic_ui_egui::Route::Calendar => self.render_calendar_dashboard(ui),
+                openmanic_ui_egui::Route::Settings => self.render_settings_dashboard(ui),
+            });
         self.render_onboarding(ui);
-        self.render_categories_dashboard(ui);
-        self.render_calendar_dashboard(ui);
-        if route_after_shell == openmanic_ui_egui::Route::Settings {
-            let context = ui.ctx().clone();
-            eframe::egui::Area::new(eframe::egui::Id::new("phase-six-settings"))
-                .fixed_pos(eframe::egui::pos2(12.0, 84.0))
-                .show(&context, |ui| {
-                    ui.set_width(640.0);
-                    eframe::egui::Frame::window(ui.style()).show(ui, |ui| {
-                        eframe::egui::ScrollArea::vertical()
-                            .max_height(640.0)
-                            .show(ui, |ui| self.render_settings_dashboard(ui));
-                    });
-                });
-        }
         self.publish_day_projection();
         self.dispatch_ui_commands();
         let context = ui.ctx().clone();
@@ -6534,6 +6945,131 @@ fn seed_initial_categories(store: &mut SqliteStore) -> Result<(), CompositionErr
         .map_err(|_| CompositionError::Storage)?;
     }
     Ok(())
+}
+
+/// Fills a brand-new local store with a small, deterministic activity story.
+///
+/// The seed is deliberately idempotent: as soon as the store has either an
+/// application or recorded activity, OpenManic leaves the user's data alone.
+/// Keeping it at the composition boundary also means every dashboard is fed by
+/// ordinary persisted projections rather than a UI-only fixture.
+fn seed_demo_data(store: &mut SqliteStore) -> Result<(), CompositionError> {
+    let is_empty = {
+        let mut reader = store
+            .open_read_session()
+            .map_err(|_| CompositionError::Storage)?;
+        let snapshot = reader.snapshot().map_err(|_| CompositionError::Storage)?;
+        snapshot.applications().is_empty() && snapshot.activities().is_empty()
+    };
+    if !is_empty {
+        return Ok(());
+    }
+
+    const DEMO_APPLICATIONS: [(&str, u8, u8); 7] = [
+        ("Visual Studio Code", 0, 1),
+        ("Slack", 1, 2),
+        ("Google Chrome", 4, 3),
+        ("Figma", 2, 4),
+        ("ChatGPT", 5, 5),
+        ("Notion", 6, 6),
+        ("Spotify", 3, 7),
+    ];
+    let now = utc_now_micros();
+    let observed_at = UtcMicros::new(now);
+    let mut application_ids = BTreeMap::new();
+    for (name, category_index, id_byte) in DEMO_APPLICATIONS {
+        let application_id = demo_application_id(id_byte);
+        let application = Application::try_new(
+            application_id,
+            ApplicationName::try_new(name).map_err(|_| CompositionError::Storage)?,
+            Some(initial_category_id(category_index)),
+            UtcMicros::new(now.saturating_sub(6 * 60 * 60 * 1_000_000)),
+            observed_at,
+        )
+        .map_err(|_| CompositionError::Storage)?;
+        store
+            .writer()
+            .upsert_application(&application)
+            .map_err(|_| CompositionError::Storage)?;
+        application_ids.insert(id_byte, application_id);
+    }
+
+    let run_id = demo_tracker_run_id();
+    let run_start = UtcMicros::new(now.saturating_sub(6 * 60 * 60 * 1_000_000));
+    let registration = TrackerRunRegistration::try_new(run_id, run_start, "openmanic-demo-v1")
+        .map_err(|_| CompositionError::Storage)?;
+    store
+        .writer()
+        .register_tracker_run(&registration)
+        .map_err(|_| CompositionError::Storage)?;
+
+    let active_evidence = ActivityEvidence::try_from_cause(ActivityCause::ForegroundApplication)
+        .map_err(|_| CompositionError::Storage)?;
+    let mut cursor = run_start.get();
+    let mut intervals = Vec::new();
+    for (application_byte, minutes) in [
+        (1_u8, 72_i64),
+        (2, 18),
+        (3, 46),
+        (4, 51),
+        (5, 31),
+        (6, 42),
+        (7, 19),
+        (1, 34),
+    ] {
+        let end = cursor.saturating_add(minutes.saturating_mul(60 * 1_000_000));
+        let application_id = application_ids
+            .get(&application_byte)
+            .copied()
+            .ok_or(CompositionError::Storage)?;
+        let range = HalfOpenInterval::try_new(UtcMicros::new(cursor), UtcMicros::new(end))
+            .map_err(|_| CompositionError::Storage)?;
+        let interval = ActivityInterval::try_new(
+            run_id,
+            range,
+            ActivityState::Active,
+            active_evidence,
+            Some(application_id),
+        )
+        .map_err(|_| CompositionError::Storage)?;
+        intervals.push(interval);
+        // Short intentional gaps make the timeline's unknown/coverage states visible.
+        cursor = end.saturating_add(6 * 60 * 1_000_000);
+    }
+    let checkpoint_start = cursor.max(now.saturating_sub(30 * 1_000_000));
+    let checkpoint = TrackingCheckpoint::try_new(
+        run_id,
+        UtcMicros::new(checkpoint_start),
+        UtcMicros::new(checkpoint_start),
+        ActivityState::Unavailable,
+        ActivityEvidence::try_from_cause(ActivityCause::AdapterStarting)
+            .map_err(|_| CompositionError::Storage)?,
+        None,
+        1,
+    )
+    .map_err(|_| CompositionError::Storage)?;
+    let intent = TrackingPersistenceIntent::try_new(intervals, checkpoint)
+        .map_err(|_| CompositionError::Storage)?;
+    store
+        .writer()
+        .persist_tracking(&intent)
+        .map_err(|_| CompositionError::Storage)?;
+    Ok(())
+}
+
+fn demo_application_id(value: u8) -> ApplicationId {
+    let mut bytes = [0_u8; 16];
+    bytes[..5].copy_from_slice(b"OMAPP");
+    bytes[5] = value;
+    bytes[15] = 0xd1;
+    ApplicationId::from_bytes(bytes)
+}
+
+fn demo_tracker_run_id() -> TrackerRunId {
+    let mut bytes = [0_u8; 16];
+    bytes[..5].copy_from_slice(b"OMRUN");
+    bytes[15] = 0xd1;
+    TrackerRunId::from_bytes(bytes)
 }
 
 fn preserve_or_classify_application(

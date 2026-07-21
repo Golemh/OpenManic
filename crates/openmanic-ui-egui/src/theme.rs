@@ -243,16 +243,16 @@ impl ThemeController {
 fn tokens_for(mode: BuiltInThemeMode) -> ThemeTokens {
     match mode {
         BuiltInThemeMode::Dark => ThemeTokens {
-            canvas: Color32::from_rgb(3, 7, 18),
-            panel: Color32::from_rgb(9, 13, 26),
-            content_primary: Color32::from_rgb(243, 246, 255),
-            content_secondary: Color32::from_rgb(137, 151, 184),
-            interaction_primary: Color32::from_rgb(103, 84, 255),
-            success: Color32::from_rgb(52, 211, 153),
+            canvas: crate::design::BG_CANVAS,
+            panel: crate::design::SURFACE,
+            content_primary: crate::design::TEXT_PRIMARY,
+            content_secondary: crate::design::TEXT_MUTED,
+            interaction_primary: crate::design::ACCENT,
+            success: crate::design::ACTIVE,
             warning: Color32::from_rgb(245, 158, 11),
-            error: Color32::from_rgb(244, 63, 94),
-            timeline_grid: Color32::from_rgb(30, 41, 59),
-            schedule_bracket: Color32::from_rgb(34, 211, 238),
+            error: crate::design::AWAY,
+            timeline_grid: crate::design::BORDER,
+            schedule_bracket: crate::design::SCHEDULED,
         },
         BuiltInThemeMode::Light => ThemeTokens {
             canvas: Color32::from_rgb(244, 247, 252),

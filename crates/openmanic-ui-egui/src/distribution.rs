@@ -413,27 +413,39 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
             presentation.total_included_micros(),
         );
         ui.horizontal(|ui| {
-            ui.strong(segment.label());
+            crate::design::color_dot(ui, color, 12.0);
+            ui.label(
+                egui::RichText::new(segment.label())
+                    .size(13.5)
+                    .strong()
+                    .color(crate::design::TEXT_SECONDARY),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(format!(
-                    "{}  ({}.{:02}%)",
-                    segment.exact_value_label(),
-                    percentage / 100,
-                    percentage % 100,
-                ));
+                crate::design::percent_pill(
+                    ui,
+                    &format!("{}%", percentage / 100),
+                    color,
+                );
+                ui.label(
+                    egui::RichText::new(segment.exact_value_label())
+                        .size(12.5)
+                        .monospace()
+                        .color(crate::design::TEXT_SECTION),
+                );
             });
         });
         let (bar, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 5.0), egui::Sense::hover());
-        ui.painter()
-            .rect_filled(bar, 2.5, ui.visuals().faint_bg_color);
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
+        ui.painter().rect_filled(bar, 5.0, crate::design::TRACK);
         let bounded = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
         let width = bar.width() * (f32::from(bounded) / 10_000.0);
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
-            2.5,
-            color,
-        );
+        if width >= 1.0 {
+            crate::design::paint_bar_gradient(
+                ui.painter(),
+                egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
+                color,
+            );
+        }
         ui.add_space(4.0);
     }
     if presentation.segments().len() == 1
@@ -450,17 +462,14 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
 }
 
 fn distribution_color(label: &str) -> Color32 {
-    match label.to_ascii_lowercase().as_str() {
-        "uncategorized" => Color32::from_rgb(51, 65, 85),
-        "web browsing" => Color32::from_rgb(168, 85, 247),
-        "development" => Color32::from_rgb(59, 130, 246),
-        "communication" => Color32::from_rgb(6, 182, 212),
-        "entertainment" => Color32::from_rgb(236, 72, 153),
-        "design" => Color32::from_rgb(217, 70, 239),
-        "ai assistants" => Color32::from_rgb(139, 92, 246),
-        "productivity" => Color32::from_rgb(14, 165, 233),
-        "security & utilities" => Color32::from_rgb(20, 184, 166),
-        _ => Color32::from_rgb(100, 116, 139),
+    if label.eq_ignore_ascii_case("uncategorized") {
+        return crate::design::UNKNOWN;
+    }
+    let resolved = crate::design::category_color(label);
+    if resolved == crate::design::UNKNOWN {
+        Color32::from_rgb(100, 116, 139)
+    } else {
+        resolved
     }
 }
 

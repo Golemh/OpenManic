@@ -58,10 +58,10 @@ const AWAY_STATE: usize = 2;
 const APPLICATION_LANE: usize = 3;
 const POWERED_OFF_STATE: usize = 4;
 
-const TRACK: Color32 = Color32::from_rgb(11, 15, 25);
-const SUBWIDGET: Color32 = Color32::from_rgb(5, 8, 17);
-const BAND_BORDER: Color32 = Color32::from_rgb(30, 41, 59);
-const MUTED: Color32 = Color32::from_rgb(137, 151, 184);
+const TRACK: Color32 = crate::design::INSET;
+const SUBWIDGET: Color32 = crate::design::BG_DEEP;
+const BAND_BORDER: Color32 = crate::design::BORDER;
+const MUTED: Color32 = crate::design::TEXT_MUTED;
 const SELECTED: Color32 = Color32::from_rgb(255, 255, 255);
 const ERROR: Color32 = Color32::from_rgb(244, 63, 94);
 const WARNING: Color32 = Color32::from_rgb(245, 158, 11);
@@ -1400,7 +1400,14 @@ fn paint_primitive(
         rect.max.x -= horizontal_inset;
     }
     if fill == PaintFill::Visible {
-        painter.rect_filled(rect, corner_radius.min(rect.height() / 2.0), color);
+        let rounding = corner_radius.min(rect.height() / 2.0);
+        if rect.height() >= 10.0 && rect.width() >= 3.0 {
+            // Design cell-gradient rule: darker top, lighter bottom.
+            painter.rect_filled(rect, rounding, crate::design::shade(color, -0.26));
+            crate::design::paint_cell_gradient(painter, rect.shrink(0.5), color);
+        } else {
+            painter.rect_filled(rect, rounding, color);
+        }
     } else {
         painter.line_segment(
             [rect.left_top(), rect.right_bottom()],
@@ -1770,12 +1777,12 @@ fn partial_message(limitations: &[DataLimitation]) -> &'static str {
 
 const fn activity_color(state: ActivityState) -> Color32 {
     match state {
-        ActivityState::Active => Color32::from_rgb(52, 211, 153),
-        ActivityState::Idle => Color32::from_rgb(245, 158, 11),
+        ActivityState::Active => crate::design::ACTIVE,
+        ActivityState::Idle => crate::design::AWAY,
         ActivityState::PausedByUser => Color32::from_rgb(92, 119, 255),
         ActivityState::Excluded => Color32::from_rgb(174, 92, 255),
-        ActivityState::Unavailable | ActivityState::PoweredOff => Color32::from_rgb(244, 63, 94),
-        ActivityState::UnknownMissing => Color32::from_rgb(51, 65, 85),
+        ActivityState::Unavailable | ActivityState::PoweredOff => crate::design::POWERED_OFF,
+        ActivityState::UnknownMissing => crate::design::UNKNOWN,
     }
 }
 
@@ -1783,17 +1790,14 @@ fn category_color_for(category_id: CategoryId, labels: &BTreeMap<CategoryId, Str
     let Some(label) = labels.get(&category_id) else {
         return category_color(category_id.as_bytes());
     };
-    match label.to_ascii_lowercase().as_str() {
-        "uncategorized" => Color32::from_rgb(51, 65, 85),
-        "web browsing" => Color32::from_rgb(168, 85, 247),
-        "development" => Color32::from_rgb(59, 130, 246),
-        "communication" => Color32::from_rgb(6, 182, 212),
-        "entertainment" => Color32::from_rgb(236, 72, 153),
-        "design" => Color32::from_rgb(217, 70, 239),
-        "ai assistants" => Color32::from_rgb(139, 92, 246),
-        "productivity" => Color32::from_rgb(14, 165, 233),
-        "security & utilities" => Color32::from_rgb(20, 184, 166),
-        _ => category_color(category_id.as_bytes()),
+    if label.eq_ignore_ascii_case("uncategorized") {
+        return crate::design::UNKNOWN;
+    }
+    let resolved = crate::design::category_color(label);
+    if resolved == crate::design::UNKNOWN {
+        category_color(category_id.as_bytes())
+    } else {
+        resolved
     }
 }
 
@@ -1804,23 +1808,15 @@ fn application_color_for(
     let Some(label) = labels.get(&application_id) else {
         return application_color(application_id.as_bytes());
     };
+    if let Some(brand) = crate::design::application_brand_color(label) {
+        return brand;
+    }
     let normalized = label.to_ascii_lowercase();
-    if normalized.contains("chrome") {
-        Color32::from_rgb(59, 130, 246)
-    } else if normalized.contains("discord") {
-        Color32::from_rgb(139, 92, 246)
-    } else if normalized.contains("slack") {
-        Color32::from_rgb(6, 182, 212)
-    } else if normalized.contains("firefox") {
+    if normalized.contains("firefox") {
         Color32::from_rgb(249, 115, 22)
     } else if normalized.contains("spotify") {
         Color32::from_rgb(34, 197, 94)
-    } else if normalized.contains("terminal") {
-        Color32::from_rgb(99, 102, 241)
-    } else if normalized.contains("chatgpt")
-        || normalized.contains("claude")
-        || normalized.contains("gemini")
-    {
+    } else if normalized.contains("chatgpt") || normalized.contains("gemini") {
         Color32::from_rgb(168, 85, 247)
     } else if normalized.contains("mpv") || normalized.contains("vlc") {
         Color32::from_rgb(236, 72, 153)
