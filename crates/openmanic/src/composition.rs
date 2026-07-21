@@ -65,13 +65,13 @@ use openmanic_ui_egui::timeline::{TimelineRenderAction, TimelineRenderer};
 use openmanic_ui_egui::{
     ApplicationUsage, ApplicationUsageSnapshot, CalendarAction, CalendarBlockKind,
     CalendarController, CalendarDataState, CalendarEffect, CommandDispatcher,
-    DestructiveConfirmation, InboundMessage, JobDescriptor, JobPresentationState, JobsAction,
-    JobsController, JobsEffect, LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus,
-    OpenManicApp, PresentableData, SettingsAction, SettingsController, SettingsEffect,
-    ShutdownController, ShutdownEffect, TodayAction, TodayCategoryFilter, TodayController,
-    TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction,
-    UiController, UiModel, reflow_dashboard, render_distribution_snapshot, render_shutdown_failure,
-    render_usage_snapshot,
+    DestructiveConfirmation, DistributionContribution, DistributionGrouping, DistributionSnapshot,
+    InboundMessage, JobDescriptor, JobPresentationState, JobsAction, JobsController, JobsEffect,
+    LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus, OpenManicApp,
+    PresentableData, SettingsAction, SettingsController, SettingsEffect, ShutdownController,
+    ShutdownEffect, TodayAction, TodayCategoryFilter, TodayController, TodayTrackingRequest,
+    TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction, UiController, UiModel,
+    reflow_dashboard, render_distribution_snapshot, render_shutdown_failure, render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
@@ -3588,10 +3588,6 @@ fn paint_today_widget_marker(
     ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the compact ring, glow layers, and its paired metrics form one visual component"
-)]
 fn render_focus_break_snapshot(ui: &mut eframe::egui::Ui, snapshot: &TimelineSnapshot) {
     let active = snapshot
         .activity_band()
@@ -3614,6 +3610,14 @@ fn render_focus_break_snapshot(ui: &mut eframe::egui::Ui, snapshot: &TimelineSna
         .fold(0_u64, |sum, interval| {
             sum.saturating_add(interval.range().duration_us())
         });
+    render_focus_break_values(ui, active, break_time);
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the compact ring, glow layers, and its paired metrics form one visual component"
+)]
+fn render_focus_break_values(ui: &mut eframe::egui::Ui, active: u64, break_time: u64) {
     let focused_or_away = active.saturating_add(break_time);
     let percentage = if focused_or_away == 0 {
         0
@@ -3730,6 +3734,113 @@ fn render_focus_break_metric(
 fn format_compact_duration(micros: u64) -> String {
     let minutes = micros / 60_000_000;
     format!("{}h {:02}m", minutes / 60, minutes % 60)
+}
+
+struct SelectedCategoryWidgetData {
+    usage: ApplicationUsageSnapshot,
+    distribution: DistributionSnapshot,
+    active_us: u64,
+}
+
+fn selected_category_widget_data(
+    snapshot: &TodaySnapshot,
+    context: &openmanic_ui_egui::TodayViewContext,
+) -> Option<SelectedCategoryWidgetData> {
+    if context.category_filter().len() != 1 {
+        return None;
+    }
+    let filter = context.category_filter().iter().next().copied()?;
+    let (key, label) = match filter {
+        TodayCategoryFilter::Category(category_id) => {
+            let label = snapshot
+                .categories()
+                .iter()
+                .find(|category| category.id() == category_id)
+                .map_or_else(
+                    || "Category".to_owned(),
+                    |category| category.name().as_str().to_owned(),
+                );
+            (
+                format!("category-{}", id_label(&category_id.as_bytes())),
+                label,
+            )
+        }
+        TodayCategoryFilter::Uncategorized => {
+            ("uncategorized".to_owned(), "Uncategorized".to_owned())
+        }
+    };
+    let selected_range = context.timeline_selection();
+    let active_us = snapshot
+        .timeline()
+        .category_band()
+        .intervals()
+        .iter()
+        .filter(|interval| match (filter, *interval.value()) {
+            (TodayCategoryFilter::Category(selected), CategoryBandValue::Category(category_id)) => {
+                selected == category_id
+            }
+            (TodayCategoryFilter::Uncategorized, CategoryBandValue::Uncategorized) => true,
+            _ => false,
+        })
+        .fold(0_u64, |total, interval| {
+            total.saturating_add(clipped_duration_us(interval.range(), selected_range))
+        });
+
+    let usage = selected_category_usage(snapshot, filter, selected_range);
+    let distribution = DistributionSnapshot::try_from_contributions(
+        DistributionGrouping::Category,
+        [DistributionContribution::new(key, label.clone(), active_us)],
+    )
+    .ok()?;
+    Some(SelectedCategoryWidgetData {
+        usage: ApplicationUsageSnapshot::new(format!("{label} selection"), usage),
+        distribution,
+        active_us,
+    })
+}
+
+fn selected_category_usage(
+    snapshot: &TodaySnapshot,
+    filter: TodayCategoryFilter,
+    selected_range: Option<HalfOpenInterval>,
+) -> Vec<ApplicationUsage> {
+    let mut durations = BTreeMap::<ApplicationId, u64>::new();
+    for interval in snapshot.timeline().application_band().intervals() {
+        let ApplicationBandValue::Application(application_id) = *interval.value() else {
+            continue;
+        };
+        let matches_category = snapshot
+            .applications()
+            .iter()
+            .find(|(application, _)| application.id() == application_id)
+            .is_some_and(|(application, _)| match filter {
+                TodayCategoryFilter::Category(category_id) => {
+                    application.category_id() == Some(category_id)
+                }
+                TodayCategoryFilter::Uncategorized => application.category_id().is_none(),
+            });
+        if matches_category {
+            let duration = clipped_duration_us(interval.range(), selected_range);
+            durations
+                .entry(application_id)
+                .and_modify(|total| *total = total.saturating_add(duration))
+                .or_insert(duration);
+        }
+    }
+    snapshot
+        .applications()
+        .iter()
+        .filter_map(|(application, _)| {
+            let duration = durations.get(&application.id()).copied().unwrap_or(0);
+            (duration > 0).then(|| {
+                ApplicationUsage::new(
+                    application.id(),
+                    application.name().as_str().to_owned(),
+                    duration,
+                )
+            })
+        })
+        .collect()
 }
 
 fn today_selection_summary(
@@ -4228,7 +4339,6 @@ impl VerticalSliceApp {
     ) {
         let Some(icon) = self.runtime.application_icon(application_id) else {
             self.application_icon_textures.remove(&application_id);
-            ui.label("□");
             return;
         };
         let texture = self
@@ -4988,6 +5098,7 @@ impl VerticalSliceApp {
                 ui.with_layout(
                     eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
                     |ui| {
+                        ui.add_space(12.0);
                         openmanic_ui_egui::design::stat_chip(
                             ui,
                             "Duration",
@@ -6127,13 +6238,35 @@ impl VerticalSliceApp {
         if kind == TodayWidgetKind::TIMELINE {
             self.render_timeline_widget(ui, snapshot, context);
         } else if kind == TodayWidgetKind::APPLICATION_USAGE {
-            render_usage_snapshot(ui, snapshot.usage());
+            if let Some(filtered) = selected_category_widget_data(snapshot, context) {
+                render_usage_snapshot(ui, &filtered.usage);
+            } else {
+                render_usage_snapshot(ui, snapshot.usage());
+            }
         } else if kind == TodayWidgetKind::CATEGORY_DISTRIBUTION {
-            openmanic_ui_egui::render_category_distribution_snapshot(ui, snapshot.distribution());
+            if let Some(filtered) = selected_category_widget_data(snapshot, context) {
+                openmanic_ui_egui::render_category_distribution_snapshot(
+                    ui,
+                    &filtered.distribution,
+                );
+            } else {
+                openmanic_ui_egui::render_category_distribution_snapshot(
+                    ui,
+                    snapshot.distribution(),
+                );
+            }
         } else if kind == TodayWidgetKind::FOCUS_VS_BREAK {
-            render_focus_break_snapshot(ui, snapshot.timeline());
+            if let Some(filtered) = selected_category_widget_data(snapshot, context) {
+                render_focus_break_values(ui, filtered.active_us, 0);
+            } else {
+                render_focus_break_snapshot(ui, snapshot.timeline());
+            }
         } else if kind == TodayWidgetKind::TIME_DISTRIBUTION {
-            render_distribution_snapshot(ui, snapshot.distribution());
+            if let Some(filtered) = selected_category_widget_data(snapshot, context) {
+                render_distribution_snapshot(ui, &filtered.distribution);
+            } else {
+                render_distribution_snapshot(ui, snapshot.distribution());
+            }
         } else if kind == TodayWidgetKind::FOCUS {
             self.render_focus_controls(ui);
         }
@@ -6482,13 +6615,14 @@ impl VerticalSliceApp {
                         |ui| {
                             #[cfg(windows)]
                             self.render_application_icon(ui, application.id());
-                            #[cfg(not(windows))]
-                            ui.label("□");
                             let accent =
                                 design::application_brand_color(application.name().as_str())
                                     .unwrap_or(design::UNKNOWN);
                             design::color_dot(ui, accent, 12.0);
                             ui.vertical(|ui| {
+                                if !excluded {
+                                    ui.add_space(3.0);
+                                }
                                 ui.label(
                                     eframe::egui::RichText::new(application.name().as_str())
                                         .size(13.5)
@@ -8018,7 +8152,7 @@ fn render_schedule_draft(
 
     let context = ui.ctx().clone();
     let dim_layer = eframe::egui::LayerId::new(
-        eframe::egui::Order::Foreground,
+        eframe::egui::Order::Middle,
         eframe::egui::Id::new("schedule-modal-dim"),
     );
     context.layer_painter(dim_layer).rect_filled(

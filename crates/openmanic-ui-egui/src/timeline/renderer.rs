@@ -126,6 +126,7 @@ impl TimelineRenderOutput {
 pub struct TimelineRenderer {
     interaction: Option<TimelineInteraction>,
     persistent_detail: Option<TimelineDetail>,
+    schedule_preview: Option<HalfOpenInterval>,
     primary_down: bool,
     middle_down: bool,
     pressed_band: Option<TimelineBand>,
@@ -168,6 +169,7 @@ impl TimelineRenderer {
         Self {
             interaction: None,
             persistent_detail: None,
+            schedule_preview: None,
             primary_down: false,
             middle_down: false,
             pressed_band: None,
@@ -216,6 +218,7 @@ impl TimelineRenderer {
         if changed {
             self.interaction = Some(TimelineInteraction::new(default_range));
             self.overview_capture = None;
+            self.schedule_preview = None;
             self.primary_down = false;
             self.middle_down = false;
             self.auto_follow_default = true;
@@ -407,6 +410,7 @@ impl TimelineRenderer {
                 .is_some_and(|interaction| interaction.view_range() != default_range);
         if day_changed || self.interaction.is_none() || default_changed_while_following {
             self.interaction = Some(TimelineInteraction::new(default_range));
+            self.schedule_preview = None;
             self.snapshot_range = Some(day_range);
             self.default_view_range = Some(default_range);
             self.auto_follow_default = true;
@@ -550,6 +554,7 @@ impl TimelineRenderer {
         let response = interaction.respond(transform, gesture);
         match response.event() {
             Some(TimelineGestureEvent::Clicked { instant }) => {
+                self.schedule_preview = None;
                 let pressed_band = self.pressed_band;
                 let detail = pressed_band.and_then(|band| detail_at(snapshot, band, instant));
                 let action = detail.and_then(TimelineDetail::action);
@@ -567,6 +572,7 @@ impl TimelineRenderer {
                 self.pressed_band = None;
             }
             Some(TimelineGestureEvent::RangeSelected { range }) => {
+                self.schedule_preview = None;
                 output.actions.push(TimelineRenderAction::Today(
                     TodayAction::SetTimelineSelection {
                         selection: Some(range),
@@ -575,6 +581,7 @@ impl TimelineRenderer {
                 self.pressed_band = None;
             }
             Some(TimelineGestureEvent::ScheduleRequested { range }) => {
+                self.schedule_preview = None;
                 output
                     .actions
                     .push(TimelineRenderAction::ScheduleRequested { range });
@@ -594,13 +601,13 @@ impl TimelineRenderer {
                 }
             }
             Some(TimelineGestureEvent::Cancelled) => {
+                self.schedule_preview = None;
                 self.pressed_band = None;
             }
-            Some(
-                TimelineGestureEvent::RangePreview { .. }
-                | TimelineGestureEvent::SchedulePreview { .. },
-            )
-            | None => {}
+            Some(TimelineGestureEvent::SchedulePreview { range }) => {
+                self.schedule_preview = Some(range);
+            }
+            Some(TimelineGestureEvent::RangePreview { .. }) | None => {}
         }
     }
 
@@ -630,7 +637,10 @@ impl TimelineRenderer {
             snapshot,
             transform.visible_range(),
             &self.category_labels,
-            layout.overview_hover,
+            OverviewState {
+                hover: layout.overview_hover,
+                selected_category: single_selected_category(context),
+            },
             self.theme_tokens,
         );
         paint_band_tracks(painter, layout.bands, self.theme_tokens);
@@ -684,6 +694,13 @@ impl TimelineRenderer {
             transform,
             layout.bands,
             context.timeline_selection(),
+            self.theme_tokens,
+        );
+        paint_schedule_preview(
+            painter,
+            transform,
+            layout.bands,
+            self.schedule_preview,
             self.theme_tokens,
         );
         paint_persistent_selection(painter, transform, layout.bands, self.persistent_detail);
@@ -760,20 +777,40 @@ fn paint_schedule_overlays(
     ) {
         let adjusted = overlay.occurrence().adjusted();
         let pixels = overlay.bracket().range().pixels();
-        let top = band_rects.category.min.y - 8.0;
+        let top = band_rects.category.min.y - 9.0;
         let bottom = band_rects.category.min.y;
-        let stroke = Stroke::new(
-            if adjusted { 2.0 } else { 1.0 },
-            theme_tokens.schedule_bracket(),
-        );
-        painter.line_segment(
-            [
-                Pos2::new(pixels.start_x(), top),
-                Pos2::new(pixels.end_x(), top),
-            ],
-            stroke,
-        );
+        let left = pixels.start_x();
+        let right = pixels.end_x();
+        let corner = ((right - left) * 0.5).min(6.0);
+        let bracket_points = vec![
+            Pos2::new(left, bottom),
+            Pos2::new(left, top + corner),
+            Pos2::new(left + corner, top),
+            Pos2::new(right - corner, top),
+            Pos2::new(right, top + corner),
+            Pos2::new(right, bottom),
+        ];
+        for (width, alpha) in [(6.0, 0.08), (3.5, 0.15)] {
+            painter.add(egui::Shape::line(
+                bracket_points.clone(),
+                Stroke::new(width, theme_tokens.schedule_bracket().gamma_multiply(alpha)),
+            ));
+        }
+        painter.add(egui::Shape::line(
+            bracket_points,
+            Stroke::new(
+                if adjusted { 2.25 } else { 1.5 },
+                theme_tokens.schedule_bracket(),
+            ),
+        ));
         let label_x = (pixels.start_x() + pixels.end_x()) * 0.5;
+        painter.text(
+            Pos2::new(label_x + 0.5, top - 2.5),
+            Align2::CENTER_BOTTOM,
+            overlay.occurrence().label(),
+            FontId::proportional(10.5),
+            Color32::BLACK.gamma_multiply(0.65),
+        );
         painter.text(
             Pos2::new(label_x, top - 3.0),
             Align2::CENTER_BOTTOM,
@@ -781,21 +818,31 @@ fn paint_schedule_overlays(
             FontId::proportional(10.5),
             theme_tokens.schedule_bracket(),
         );
-        painter.line_segment(
-            [
-                Pos2::new(pixels.start_x(), top),
-                Pos2::new(pixels.start_x(), bottom),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                Pos2::new(pixels.end_x(), top),
-                Pos2::new(pixels.end_x(), bottom),
-            ],
-            stroke,
-        );
     }
+}
+
+fn paint_schedule_preview(
+    painter: &Painter,
+    transform: TimelineTransform,
+    bands: BandRects,
+    preview: Option<HalfOpenInterval>,
+    theme_tokens: ThemeTokens,
+) {
+    let Some(preview) = preview.and_then(|range| transform.range_geometry(range)) else {
+        return;
+    };
+    let highlight = Rect::from_min_max(
+        Pos2::new(preview.pixels().start_x(), bands.category.min.y),
+        Pos2::new(preview.pixels().end_x(), bands.application.max.y),
+    );
+    let cyan = theme_tokens.schedule_bracket();
+    painter.rect_filled(highlight, 4.0, cyan.gamma_multiply(0.17));
+    painter.rect_stroke(
+        highlight,
+        4.0,
+        Stroke::new(1.5, cyan.gamma_multiply(0.90)),
+        egui::StrokeKind::Inside,
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -825,6 +872,12 @@ enum OverviewCapture {
     ResizeEnd {
         initial: HalfOpenInterval,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OverviewState {
+    hover: Option<OverviewHover>,
+    selected_category: Option<TodayCategoryFilter>,
 }
 
 impl OverviewCapture {
@@ -1151,7 +1204,7 @@ fn paint_overview(
     snapshot: &TimelineSnapshot,
     view_range: HalfOpenInterval,
     category_labels: &BTreeMap<CategoryId, String>,
-    hover: Option<OverviewHover>,
+    state: OverviewState,
     theme_tokens: ThemeTokens,
 ) {
     painter.text(
@@ -1201,12 +1254,18 @@ fn paint_overview(
         return;
     };
     let plan = TimelinePaintPlan::from_snapshot(day_transform, snapshot);
-    paint_overview_day_map(painter, overview_rect, &plan, category_labels);
+    paint_overview_day_map(
+        painter,
+        overview_rect,
+        &plan,
+        category_labels,
+        state.selected_category,
+    );
     let Some(viewport) = overview_view_rect(overview_rect, snapshot.visible_range(), view_range)
     else {
         return;
     };
-    paint_overview_window(painter, viewport, hover);
+    paint_overview_window(painter, viewport, state.hover);
 }
 
 fn paint_overview_day_map(
@@ -1214,6 +1273,7 @@ fn paint_overview_day_map(
     overview_rect: Rect,
     plan: &TimelinePaintPlan<'_>,
     category_labels: &BTreeMap<CategoryId, String>,
+    selected_category: Option<TodayCategoryFilter>,
 ) {
     let day_map_rect = Rect::from_min_max(
         Pos2::new(overview_rect.left(), overview_rect.top() + 2.0),
@@ -1233,7 +1293,24 @@ fn paint_overview_day_map(
                 CategoryBandValue::Uncategorized => Color32::from_rgb(51, 65, 85),
                 CategoryBandValue::NonApplicationState(state) => activity_color(*state),
             };
-            color.gamma_multiply(0.30)
+            let selected = match (selected_category, value) {
+                (
+                    Some(TodayCategoryFilter::Category(selected)),
+                    CategoryBandValue::Category(category_id),
+                ) => selected == *category_id,
+                (Some(TodayCategoryFilter::Uncategorized), CategoryBandValue::Uncategorized)
+                | (None, _) => true,
+                _ => false,
+            };
+            color.gamma_multiply(if selected {
+                if selected_category.is_some() {
+                    0.65
+                } else {
+                    0.30
+                }
+            } else {
+                0.10
+            })
         },
         |_| None,
     );

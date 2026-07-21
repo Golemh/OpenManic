@@ -455,9 +455,9 @@ pub fn stat_chip(ui: &mut egui::Ui, key: &str, value: &str, accent: bool) {
         .corner_radius(CornerRadius::same(RADIUS_CHIP))
         .inner_margin(egui::Margin::symmetric(15, 8))
         .show(ui, |ui| {
-            ui.set_width(68.0);
+            ui.set_width(84.0);
             ui.vertical(|ui| {
-                ui.set_width(68.0);
+                ui.set_width(84.0);
                 ui.spacing_mut().item_spacing.y = 1.0;
                 ui.label(
                     egui::RichText::new(key.to_ascii_uppercase())
