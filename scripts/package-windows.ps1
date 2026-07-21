@@ -6,6 +6,18 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+function Get-Sha256([string]$LiteralPath) {
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot "dist"))
 if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
@@ -69,7 +81,7 @@ try {
         throw "Could not determine whether the release source tree is clean."
     }
     $sourceState = if ($trackedChanges.Count -eq 0) { "clean" } else { "dirty" }
-    $executableHash = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    $executableHash = Get-Sha256 $executable
     @(
         "OpenManic portable Windows release"
         "Version: $version"
@@ -81,7 +93,7 @@ try {
     ) | Set-Content -LiteralPath (Join-Path $stageRoot "BUILD-INFO.txt") -Encoding UTF8
 
     Compress-Archive -LiteralPath $stageRoot -DestinationPath $zipPath -CompressionLevel Optimal
-    $zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $zipHash = Get-Sha256 $zipPath
     "$zipHash  $([System.IO.Path]::GetFileName($zipPath))" | Set-Content -LiteralPath $checksumPath -Encoding ASCII -NoNewline
 
     Write-Host "Created $zipPath"
