@@ -39,15 +39,14 @@ use openmanic_application::{
     SettingsPersistence, SettingsSnapshot, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
     SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
     TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TitleDisclosure,
-    TitleObservationResult, TitleStabilizer, TrackingCheckpoint, TrackingCommand, TrackingEvidence,
+    TitleObservationResult, TitleStabilizer, TrackingCommand, TrackingEvidence,
     TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
     WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
 use openmanic_domain::{
-    ActivityCause, ActivityEvidence, ActivityInterval, ActivityState, Application, ApplicationId,
-    ApplicationName, Category, CategoryId, CategoryName, FocusSessionId, FocusSessionState,
-    HalfOpenInterval, LayoutDocument, LayoutHeight, OneTimeScheduleId, ScheduleEditScope,
-    ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+    ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
+    FocusSessionId, FocusSessionState, HalfOpenInterval, LayoutDocument, LayoutHeight,
+    OneTimeScheduleId, ScheduleEditScope, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
 };
 #[cfg(windows)]
 use openmanic_platform::{
@@ -4208,7 +4207,6 @@ impl VerticalSlice {
         )
         .map_err(|_| CompositionError::Storage)?;
         seed_initial_categories(&mut store)?;
-        seed_demo_data(&mut store)?;
         let mut ui = UiController::try_new(
             UiModel::default(),
             UI_INBOUND_CAPACITY,
@@ -8537,139 +8535,6 @@ fn seed_initial_categories(store: &mut SqliteStore) -> Result<(), CompositionErr
         .map_err(|_| CompositionError::Storage)?;
     }
     Ok(())
-}
-
-/// Fills a brand-new local store with a small, deterministic activity story.
-///
-/// The seed is deliberately idempotent: as soon as the store has either an
-/// application or recorded activity, OpenManic leaves the user's data alone.
-/// Keeping it at the composition boundary also means every dashboard is fed by
-/// ordinary persisted projections rather than a UI-only fixture.
-fn seed_demo_data(store: &mut SqliteStore) -> Result<(), CompositionError> {
-    let is_empty = {
-        let mut reader = store
-            .open_read_session()
-            .map_err(|_| CompositionError::Storage)?;
-        let snapshot = reader.snapshot().map_err(|_| CompositionError::Storage)?;
-        snapshot.applications().is_empty() && snapshot.activities().is_empty()
-    };
-    if !is_empty {
-        return Ok(());
-    }
-
-    const DEMO_APPLICATIONS: [(&str, u8, u8); 7] = [
-        ("Visual Studio Code", 0, 1),
-        ("Slack", 1, 2),
-        ("Google Chrome", 4, 3),
-        ("Figma", 2, 4),
-        ("ChatGPT", 5, 5),
-        ("Notion", 6, 6),
-        ("Spotify", 3, 7),
-    ];
-    let now = utc_now_micros();
-    let observed_at = UtcMicros::new(now);
-    let mut application_ids = BTreeMap::new();
-    for (name, category_index, id_byte) in DEMO_APPLICATIONS {
-        let application_id = demo_application_id(id_byte);
-        let application = Application::try_new(
-            application_id,
-            ApplicationName::try_new(name).map_err(|_| CompositionError::Storage)?,
-            Some(initial_category_id(category_index)),
-            UtcMicros::new(now.saturating_sub(6 * 60 * 60 * 1_000_000)),
-            observed_at,
-        )
-        .map_err(|_| CompositionError::Storage)?;
-        store
-            .writer()
-            .upsert_application(&application)
-            .map_err(|_| CompositionError::Storage)?;
-        application_ids.insert(id_byte, application_id);
-    }
-
-    let run_id = demo_tracker_run_id();
-    let run_start = UtcMicros::new(now.saturating_sub(6 * 60 * 60 * 1_000_000));
-    let registration = TrackerRunRegistration::try_new(run_id, run_start, "openmanic-demo-v1")
-        .map_err(|_| CompositionError::Storage)?;
-    store
-        .writer()
-        .register_tracker_run(&registration)
-        .map_err(|_| CompositionError::Storage)?;
-
-    let active_evidence = ActivityEvidence::try_from_cause(ActivityCause::ForegroundApplication)
-        .map_err(|_| CompositionError::Storage)?;
-    let idle_evidence = ActivityEvidence::try_from_cause(ActivityCause::IdleThreshold)
-        .map_err(|_| CompositionError::Storage)?;
-    let mut cursor = run_start.get();
-    let mut intervals = Vec::new();
-    for (application_byte, minutes) in [
-        (1_u8, 72_i64),
-        (2, 18),
-        (3, 46),
-        (4, 51),
-        (5, 31),
-        (6, 42),
-        (7, 19),
-        (1, 34),
-    ] {
-        let end = cursor.saturating_add(minutes.saturating_mul(60 * 1_000_000));
-        let application_id = application_ids
-            .get(&application_byte)
-            .copied()
-            .ok_or(CompositionError::Storage)?;
-        let range = HalfOpenInterval::try_new(UtcMicros::new(cursor), UtcMicros::new(end))
-            .map_err(|_| CompositionError::Storage)?;
-        let interval = ActivityInterval::try_new(
-            run_id,
-            range,
-            ActivityState::Active,
-            active_evidence,
-            Some(application_id),
-        )
-        .map_err(|_| CompositionError::Storage)?;
-        intervals.push(interval);
-        let idle_end = end.saturating_add(6 * 60 * 1_000_000);
-        let idle_range = HalfOpenInterval::try_new(UtcMicros::new(end), UtcMicros::new(idle_end))
-            .map_err(|_| CompositionError::Storage)?;
-        intervals.push(
-            ActivityInterval::try_new(run_id, idle_range, ActivityState::Idle, idle_evidence, None)
-                .map_err(|_| CompositionError::Storage)?,
-        );
-        cursor = idle_end;
-    }
-    let checkpoint_start = cursor.max(now.saturating_sub(30 * 1_000_000));
-    let checkpoint = TrackingCheckpoint::try_new(
-        run_id,
-        UtcMicros::new(checkpoint_start),
-        UtcMicros::new(checkpoint_start),
-        ActivityState::Unavailable,
-        ActivityEvidence::try_from_cause(ActivityCause::AdapterStarting)
-            .map_err(|_| CompositionError::Storage)?,
-        None,
-        1,
-    )
-    .map_err(|_| CompositionError::Storage)?;
-    let intent = TrackingPersistenceIntent::try_new(intervals, checkpoint)
-        .map_err(|_| CompositionError::Storage)?;
-    store
-        .writer()
-        .persist_tracking(&intent)
-        .map_err(|_| CompositionError::Storage)?;
-    Ok(())
-}
-
-fn demo_application_id(value: u8) -> ApplicationId {
-    let mut bytes = [0_u8; 16];
-    bytes[..5].copy_from_slice(b"OMAPP");
-    bytes[5] = value;
-    bytes[15] = 0xd1;
-    ApplicationId::from_bytes(bytes)
-}
-
-fn demo_tracker_run_id() -> TrackerRunId {
-    let mut bytes = [0_u8; 16];
-    bytes[..5].copy_from_slice(b"OMRUN");
-    bytes[15] = 0xd1;
-    TrackerRunId::from_bytes(bytes)
 }
 
 fn preserve_or_classify_application(
