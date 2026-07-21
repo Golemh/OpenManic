@@ -376,13 +376,19 @@ impl WindowsControlAdapter {
                     self.normalizer.acknowledge_reconciliation();
                 }
                 let application_id = stable_application_id(application.identity());
-                if let (Some(sender), Some(path)) =
-                    (&self.metadata_requests, application.display_path())
-                {
+                // Desktop apps resolve their name from the executable path; packaged/Store apps
+                // have no path, so derive a readable label from their package identity. Without
+                // this, packaged apps never receive a metadata request and stay stuck on the
+                // provisional "Tracked application" placeholder forever.
+                let metadata_label = application
+                    .display_path()
+                    .map(ToOwned::to_owned)
+                    .or_else(|| packaged_display_label(application.identity()));
+                if let (Some(sender), Some(label)) = (&self.metadata_requests, metadata_label) {
                     let _ = sender.try_send(WindowsApplicationMetadataRequest::new(
                         application_id,
                         event.received_at_utc().get(),
-                        path.to_owned(),
+                        label,
                     ));
                 }
                 if let (Some(sender), Some(title)) =
@@ -553,6 +559,41 @@ fn detected_capabilities() -> PlatformCapabilities {
 /// The source value is already a stable AUMID or normalized full executable path; raw window,
 /// PID, title, and executable filename values never participate. The root composition persists
 /// the resulting ID before it submits foreground evidence to the tracking reducer.
+/// Derives a readable display label for a packaged application from its stable identity.
+///
+/// Packaged apps have no executable path, so their name is recovered from the package family
+/// (or the family portion of the AUMID): the trailing publisher hash and any leading publisher
+/// namespace are stripped, leaving the application token (for example
+/// `5319275A.WhatsAppDesktop_cv1g1gvanyjgm` becomes `WhatsAppDesktop`). Returns [`None`] for
+/// unpackaged executable identities, which are labeled from their path instead.
+#[cfg(windows)]
+fn packaged_display_label(identity: &StableApplicationIdentity) -> Option<String> {
+    let StableApplicationIdentity::Packaged {
+        aumid,
+        package_family,
+    } = identity
+    else {
+        return None;
+    };
+    let family = package_family
+        .as_deref()
+        .unwrap_or_else(|| aumid.split('!').next().unwrap_or(aumid.as_str()));
+    let without_publisher = family.rsplit_once('_').map_or(family, |(name, _)| name);
+    let token = without_publisher
+        .rsplit_once('.')
+        .map_or(without_publisher, |(_, app)| app);
+    let cleaned: String = token
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == ' ')
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
 #[cfg(windows)]
 fn stable_application_id(
     identity: &StableApplicationIdentity,

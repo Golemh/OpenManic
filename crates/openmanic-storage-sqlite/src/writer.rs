@@ -854,6 +854,53 @@ impl StorageWriter {
         Ok(revision)
     }
 
+    /// Inserts a newly observed application, or updates only its liveness and category for an
+    /// existing one.
+    ///
+    /// The display name is deliberately never overwritten here. This lets a provisional
+    /// foreground placeholder create the row when the application is first seen without ever
+    /// clobbering a name already resolved by the metadata worker on a later focus switch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError`] if a referenced category is absent or the application mutation
+    /// cannot commit with its revision.
+    pub fn touch_application(
+        &mut self,
+        application: &Application,
+    ) -> Result<DataRevision, StorageError> {
+        let transaction = self.begin_writer_transaction("begin application touch")?;
+        let revision = next_revision(&transaction)?;
+        let category_row_id = application
+            .category_id()
+            .map(|id| category_row_id(&transaction, id.as_bytes()))
+            .transpose()?;
+        transaction
+            .execute(
+                "INSERT INTO application(
+                     public_id, display_name, display_name_override, category_id,
+                     exclusion_policy, first_seen_utc_us, last_seen_utc_us, icon_digest
+                 ) VALUES (?1, ?2, NULL, ?3, 0, ?4, ?5, NULL)
+                 ON CONFLICT(public_id) DO UPDATE SET
+                     category_id = excluded.category_id,
+                     first_seen_utc_us = MIN(application.first_seen_utc_us, excluded.first_seen_utc_us),
+                     last_seen_utc_us = MAX(application.last_seen_utc_us, excluded.last_seen_utc_us)",
+                params![
+                    application.id().as_bytes().as_slice(),
+                    application.name().as_str(),
+                    category_row_id,
+                    application.first_seen().get(),
+                    application.last_seen().get(),
+                ],
+            )
+            .map_err(|error| database_error(&error, "touch application"))?;
+        update_revision(&transaction, revision)?;
+        transaction
+            .commit()
+            .map_err(|error| database_error(&error, "commit application touch"))?;
+        Ok(revision)
+    }
+
     /// Persists one complete tracking transition or checkpoint with its next data revision.
     ///
     /// # Errors

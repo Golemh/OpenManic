@@ -356,7 +356,55 @@ fn normalize_full_windows_process_path(full_path: &str) -> Option<String> {
     // `QueryFullProcessImageNameW(PROCESS_NAME_WIN32)` already returns the full Win32 image path.
     // Preserve its Unicode spelling; equality is delegated to CompareStringOrdinal above instead
     // of performing lossy or locale-dependent Unicode case conversion here.
-    Some(full_path.replace('/', "\\"))
+    //
+    // Collapse version-bearing install directories so that an application keeps one stable
+    // identity across auto-updates (Squirrel/Electron apps install each version into a folder
+    // such as `app-0.11.4`). Only the version segment is rewritten, so unrelated applications
+    // whose remaining path differs never collide.
+    let replaced = full_path.replace('/', "\\");
+    let normalized = replaced
+        .split('\\')
+        .map(collapse_versioned_path_segment)
+        .collect::<Vec<_>>()
+        .join("\\");
+    Some(normalized)
+}
+
+/// Rewrites a single path segment that encodes an application version to a fixed token.
+///
+/// Recognizes the Squirrel/Electron `app-<version>` layout (for example `app-0.11.4`) and bare
+/// version directories (for example `1.2.3`). Every other segment, including executable file
+/// names and ordinary folders, is returned unchanged.
+fn collapse_versioned_path_segment(segment: &str) -> &str {
+    if is_squirrel_versioned_segment(segment) {
+        "app-<version>"
+    } else if is_bare_version_segment(segment) {
+        "<version>"
+    } else {
+        segment
+    }
+}
+
+/// Returns whether a segment is the Squirrel `app-<version>` install-directory form.
+fn is_squirrel_versioned_segment(segment: &str) -> bool {
+    let prefix = b"app-";
+    let bytes = segment.as_bytes();
+    if bytes.len() <= prefix.len() || !bytes[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return false;
+    }
+    is_bare_version_segment(&segment[prefix.len()..])
+}
+
+/// Returns whether a segment is a bare dotted version such as `1.2.3` or `0.11.4.567`.
+fn is_bare_version_segment(segment: &str) -> bool {
+    let mut components = 0_u32;
+    for component in segment.split('.') {
+        if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+        components += 1;
+    }
+    components >= 2
 }
 
 fn is_full_windows_path(path: &str) -> bool {
@@ -832,6 +880,52 @@ mod tests {
         assert!(first.is_same_windows_path_as(&second));
         assert_eq!(first.display_path(), "C:/Apps/\u{00c5}pp.exe");
         assert_eq!(first.identity_path(), "C:\\Apps\\\u{00c5}pp.exe");
+    }
+
+    #[test]
+    fn versioned_squirrel_install_directories_share_one_identity_path() {
+        let older = WindowsExecutablePath::from_full_process_path(
+            "C:\\Users\\me\\AppData\\Local\\Claude\\app-0.11.4\\claude.exe".to_owned(),
+        )
+        .expect("the versioned path is valid");
+        let newer = WindowsExecutablePath::from_full_process_path(
+            "C:\\Users\\me\\AppData\\Local\\Claude\\app-0.11.5\\claude.exe".to_owned(),
+        )
+        .expect("the versioned path is valid");
+
+        assert_eq!(older.identity_path(), newer.identity_path());
+        assert_eq!(
+            older.identity_path(),
+            "C:\\Users\\me\\AppData\\Local\\Claude\\app-<version>\\claude.exe"
+        );
+        // The original spelling is retained for display and metadata resolution.
+        assert_eq!(
+            older.display_path(),
+            "C:\\Users\\me\\AppData\\Local\\Claude\\app-0.11.4\\claude.exe"
+        );
+    }
+
+    #[test]
+    fn bare_version_directories_collapse_but_ordinary_segments_do_not() {
+        let path = WindowsExecutablePath::from_full_process_path(
+            "C:\\Program Files\\Vendor\\2.3.1\\bin\\tool.exe".to_owned(),
+        )
+        .expect("the versioned path is valid");
+        assert_eq!(
+            path.identity_path(),
+            "C:\\Program Files\\Vendor\\<version>\\bin\\tool.exe"
+        );
+
+        // Non-version segments (a lone number, a name with a dotted filename, `app-beta`) are
+        // left untouched so unrelated applications never merge.
+        let untouched = WindowsExecutablePath::from_full_process_path(
+            "C:\\Games\\app-beta\\2024\\game.v2.exe".to_owned(),
+        )
+        .expect("the path is valid");
+        assert_eq!(
+            untouched.identity_path(),
+            "C:\\Games\\app-beta\\2024\\game.v2.exe"
+        );
     }
 
     fn executable(full_path: &str) -> ProcessApplicationInspection {

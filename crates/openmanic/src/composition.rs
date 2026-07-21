@@ -2224,7 +2224,10 @@ fn run_metadata_worker(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
-        let result: ApplicationIconResult = openmanic_platform::extract_application_icon(&request);
+        // Resolve and publish the display name FIRST so the provisional placeholder is replaced
+        // as quickly as possible. The icon decode below is comparatively slow (it reads and
+        // decodes the executable's icon resource); doing it first would make every name update
+        // wait behind an icon, stacking latency under a burst of foreground switches.
         let display_name = openmanic_platform::extract_application_display_name(&request);
         let observed_at_utc = UtcMicros::new(request.observed_at_utc_us());
         if let Ok(name) = ApplicationName::try_new(display_name.clone())
@@ -2236,8 +2239,10 @@ fn run_metadata_worker(
                 observed_at_utc,
             )
         {
+            // Deliver the resolved name on the guaranteed Critical lane so it is not silently
+            // dropped under backpressure; this replaces the provisional placeholder within a pump.
             let _ = lanes.try_submit(
-                WorkLane::Optional,
+                WorkLane::Critical,
                 WriterWork::CatalogMetadata { application },
             );
         }
@@ -2245,6 +2250,7 @@ fn run_metadata_worker(
             debug.latest_executable = Some(request.executable_path().to_owned());
             debug.latest_product_name = Some(display_name);
         }
+        let result: ApplicationIconResult = openmanic_platform::extract_application_icon(&request);
         if let Ok(mut cache) = application_icons.lock() {
             let _ = result.apply_to(&mut cache);
         }
@@ -2917,9 +2923,11 @@ fn process_catalog_foreground(
         return;
     };
     let application = preserve_or_classify_application(&mut writer_store, application);
+    // Foreground switches must never overwrite a name already resolved by the metadata worker,
+    // so the provisional "Tracked application" placeholder can only ever create a brand-new row.
     if writer_store
         .writer()
-        .upsert_application(&application)
+        .touch_application(&application)
         .is_err()
     {
         return;
