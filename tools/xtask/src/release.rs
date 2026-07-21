@@ -16,8 +16,43 @@ pub(crate) fn run(repository: &Path) -> Result<(), Failure> {
     }
 
     report_artifact_size(repository)?;
+    run_command(repository, &package_built_artifact_command())?;
     print_manual_smoke_prerequisites();
     Ok(())
+}
+
+pub(crate) fn package(repository: &Path) -> Result<(), Failure> {
+    if !cfg!(target_os = "windows") {
+        return Err(Failure::check("package-windows must run on Windows x86-64"));
+    }
+    run_command(repository, &package_command())
+}
+
+fn package_command() -> CommandSpec {
+    CommandSpec::new(
+        "powershell",
+        [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "scripts/package-windows.ps1",
+        ],
+    )
+}
+
+fn package_built_artifact_command() -> CommandSpec {
+    CommandSpec::new(
+        "powershell",
+        [
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            "scripts/package-windows.ps1",
+            "-SkipBuild",
+        ],
+    )
 }
 
 fn feature_and_build_commands() -> Vec<CommandSpec> {
@@ -94,7 +129,7 @@ fn print_manual_smoke_prerequisites() {
 
 #[cfg(test)]
 mod tests {
-    use super::feature_and_build_commands;
+    use super::{feature_and_build_commands, package_built_artifact_command, package_command};
 
     #[test]
     fn checks_renderers_separately_and_builds_only_wgpu_release() {
@@ -110,6 +145,19 @@ mod tests {
             commands
                 .iter()
                 .all(|command| !command.contains("--all-features"))
+        );
+    }
+
+    #[test]
+    fn portable_package_uses_the_reviewed_windows_script() {
+        assert_eq!(
+            package_command().display(),
+            "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-windows.ps1"
+        );
+        assert!(
+            package_built_artifact_command()
+                .display()
+                .ends_with("-SkipBuild")
         );
     }
 }

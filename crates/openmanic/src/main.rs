@@ -1,6 +1,7 @@
 //! OpenManic executable entry point.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 #[cfg(all(feature = "renderer-wgpu", feature = "renderer-glow"))]
 compile_error!("select exactly one renderer: renderer-wgpu or renderer-glow");

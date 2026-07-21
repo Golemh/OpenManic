@@ -30,6 +30,7 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), Failure> {
         Task::DocsCheck => run_docs_check(&repository),
         Task::DependencyCheck => dependency::run(&repository),
         Task::ReleaseCheck => run_release_check(&repository),
+        Task::PackageWindows => release::package(&repository),
     }
 }
 
@@ -40,6 +41,7 @@ enum Task {
     DocsCheck,
     DependencyCheck,
     ReleaseCheck,
+    PackageWindows,
 }
 
 impl Task {
@@ -60,6 +62,7 @@ impl Task {
             Some("docs-check") => Ok(Self::DocsCheck),
             Some("dependency-check") => Ok(Self::DependencyCheck),
             Some("release-check") => Ok(Self::ReleaseCheck),
+            Some("package-windows") => Ok(Self::PackageWindows),
             Some(other) => Err(Failure::usage(format!(
                 "unknown command `{other}`; run `cargo xtask help`"
             ))),
@@ -72,7 +75,7 @@ impl Task {
 
 fn print_help() {
     println!(
-        "Usage: cargo xtask <command>\n\nCommands:\n  quality           Run format, check, lint, test, rustdoc, and docs checks\n  docs-check        Validate documentation structure and local links\n  dependency-check  Run the pinned cargo-deny policy checks\n  release-check     Run quality, dependency, feature, build, and release gates\n  help              Show this help"
+        "Usage: cargo xtask <command>\n\nCommands:\n  quality           Run format, check, lint, test, rustdoc, and docs checks\n  docs-check        Validate documentation structure and local links\n  dependency-check  Run the pinned cargo-deny policy checks\n  release-check     Run quality, dependency, feature, build, and release gates\n  package-windows   Build a portable Windows ZIP and SHA-256 checksum\n  help              Show this help"
     );
 }
 
@@ -139,6 +142,7 @@ mod tests {
             (vec!["docs-check"], Task::DocsCheck),
             (vec!["dependency-check"], Task::DependencyCheck),
             (vec!["release-check"], Task::ReleaseCheck),
+            (vec!["package-windows"], Task::PackageWindows),
         ] {
             let arguments = input.into_iter().map(OsString::from);
             assert_eq!(
