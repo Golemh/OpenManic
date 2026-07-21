@@ -351,7 +351,7 @@ mod tests {
             &registry,
         );
         let draft = editor.draft().expect("edit mode retains a draft");
-        assert_eq!(draft.widgets.len(), 5);
+        assert_eq!(draft.widgets.len(), 7);
         assert!(
             draft
                 .widgets
@@ -373,6 +373,14 @@ mod tests {
         let LayoutEditEffect::Save(document) = effect else {
             return;
         };
-        assert_eq!(document.definition().widgets[1].height, LayoutHeight::Tall);
+        let definition = document.definition();
+        assert_eq!(
+            definition
+                .widgets
+                .iter()
+                .find(|widget| widget.instance_id == "today.usage")
+                .map(|widget| widget.height),
+            Some(LayoutHeight::Tall)
+        );
     }
 }

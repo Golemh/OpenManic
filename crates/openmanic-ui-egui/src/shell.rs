@@ -1,6 +1,6 @@
 //! Application shell chrome styled after the OpenManic Studio design.
 //!
-//! Renders the fixed title bar (logo chip, wordmark, navigation pills, live
+//! Renders the title bar (logo chip, wordmark, navigation pills, live
 //! monitoring indicator), plus shared presentation and mutation notices.
 
 use eframe::egui::{self, Align, Color32, CornerRadius, RichText, Stroke, StrokeKind};
@@ -23,16 +23,24 @@ pub(crate) fn render<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: Theme
     ui.painter()
         .rect_filled(separator_rect, 0.0, design::TITLEBAR_BORDER);
 
-    egui::Frame::new()
-        .fill(tokens.canvas())
-        .inner_margin(egui::Margin::symmetric(26, 22))
-        .show(ui, |ui| {
-            changed |= render_presentation_state(ui, model.data(), tokens);
-            changed |= render_mutation_state(ui, model, tokens);
-        });
+    let has_presentation_notice = !matches!(model.data(), PresentableData::Ready(_));
+    let has_mutation_notice = latest_mutation(model).is_some();
+    if has_presentation_notice || has_mutation_notice {
+        egui::Frame::new()
+            .fill(tokens.canvas())
+            .inner_margin(egui::Margin::symmetric(26, 11))
+            .show(ui, |ui| {
+                changed |= render_presentation_state(ui, model.data(), tokens);
+                changed |= render_mutation_state(ui, model, tokens);
+            });
+    }
     changed
 }
 
+#[expect(
+    clippy::excessive_nesting,
+    reason = "the single header row keeps navigation state and its action adjacent"
+)]
 fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
     let mut changed = false;
     ui.horizontal(|ui| {
@@ -82,7 +90,23 @@ fn render_logo_chip(ui: &mut egui::Ui) {
         CornerRadius::same(12),
         design::ACCENT.gamma_multiply(0.18),
     );
-    design::paint_cell_gradient(painter, rect, design::ACCENT_LIGHT);
+    let mut mesh = egui::epaint::Mesh::default();
+    let index = u32::try_from(mesh.vertices.len()).unwrap_or(0);
+    for (position, color) in [
+        (rect.left_top(), design::ACCENT_LIGHT),
+        (rect.right_top(), design::ACCENT),
+        (rect.right_bottom(), design::ACCENT),
+        (rect.left_bottom(), design::ACCENT_LIGHT),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: position,
+            uv: egui::epaint::WHITE_UV,
+            color,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[index, index + 1, index + 2, index, index + 2, index + 3]);
+    painter.add(mesh);
     painter.rect_stroke(
         rect,
         CornerRadius::same(9),

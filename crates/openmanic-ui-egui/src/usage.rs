@@ -342,16 +342,10 @@ impl UsagePresentation {
 /// This intentionally does not submit actions or touch any application port.
 pub(crate) fn render_usage(ui: &mut Ui, presentation: &UsagePresentation) {
     if let Some(range_label) = presentation.range_label() {
-        ui.horizontal(|ui| {
-            ui.small(range_label);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.strong(format_duration(presentation.total_duration_us()));
-            });
-        });
-        ui.add_space(6.0);
+        let _ = range_label;
         egui::ScrollArea::vertical()
             .id_salt("application-usage-rows")
-            .max_height(150.0)
+            .max_height(300.0)
             .auto_shrink([false, true])
             .show(ui, |ui| render_usage_rows(ui, presentation.rows()));
         if presentation.rows().is_empty() {
@@ -465,7 +459,7 @@ fn format_duration(duration_us: u64) -> String {
 /// platform access while painting.
 pub fn render_usage_snapshot(ui: &mut Ui, snapshot: &ApplicationUsageSnapshot) {
     let data = PresentableData::Ready(Arc::new(snapshot.clone()));
-    let presentation = UsagePresentation::from_data(&data, 5);
+    let presentation = UsagePresentation::from_data(&data, 7);
     render_usage(ui, &presentation);
 }
 

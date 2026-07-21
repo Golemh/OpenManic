@@ -45,25 +45,39 @@ impl LayoutDocument {
                             Height::Tall,
                         ),
                         layout_widget(
+                            "today.category-distribution",
+                            "openmanic.distribution.category",
+                            1,
+                            4,
+                            Height::Standard,
+                        ),
+                        layout_widget(
                             "today.usage",
                             "openmanic.usage.application",
-                            1,
+                            2,
+                            4,
+                            Height::Standard,
+                        ),
+                        layout_widget(
+                            "today.focus-break",
+                            "openmanic.distribution.focus-break",
+                            3,
                             4,
                             Height::Standard,
                         ),
                         layout_widget(
                             "today.distribution",
                             "openmanic.distribution.time",
-                            2,
                             4,
-                            Height::Standard,
+                            4,
+                            Height::Compact,
                         ),
                         layout_widget(
                             "today.focus",
                             "openmanic.focus.session",
-                            3,
+                            5,
                             4,
-                            Height::Standard,
+                            Height::Compact,
                         ),
                     ],
                 },
@@ -1503,7 +1517,7 @@ mod tests {
     fn safe_defaults_validate_the_complete_document_values() {
         let layout = LayoutDocument::safe_default();
         assert_eq!(layout.schema_version(), LAYOUT_SCHEMA);
-        assert_eq!(layout.widget_count(), 4);
+        assert_eq!(layout.widget_count(), 6);
         assert!(validate_layout(&layout.envelope.payload).is_ok());
 
         let saved_view = SavedViewDocument::safe_default();

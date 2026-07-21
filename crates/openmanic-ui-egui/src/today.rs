@@ -198,6 +198,10 @@ impl TodayWidgetKind {
     pub const APPLICATION_USAGE: Self = Self("openmanic.usage.application");
     /// Category/time distribution summary.
     pub const TIME_DISTRIBUTION: Self = Self("openmanic.distribution.time");
+    /// Category distribution donut and legend.
+    pub const CATEGORY_DISTRIBUTION: Self = Self("openmanic.distribution.category");
+    /// Active focus time compared with non-active break time.
+    pub const FOCUS_VS_BREAK: Self = Self("openmanic.distribution.focus-break");
     /// Focus-session controls and state.
     pub const FOCUS: Self = Self("openmanic.focus.session");
 
@@ -414,7 +418,7 @@ pub enum TodayWidgetRegistryError {
     DuplicateKind,
 }
 
-const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
+const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 6] = [
     TodayWidgetDefinition {
         kind: TodayWidgetKind::TIMELINE,
         schema_version: 2,
@@ -424,10 +428,26 @@ const FIRST_PARTY_WIDGETS: [TodayWidgetDefinition; 4] = [
         supports_multiple_instances: false,
     },
     TodayWidgetDefinition {
+        kind: TodayWidgetKind::CATEGORY_DISTRIBUTION,
+        schema_version: 1,
+        display_name: "Category distribution",
+        description: "Tracked time by category",
+        size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
+        supports_multiple_instances: true,
+    },
+    TodayWidgetDefinition {
         kind: TodayWidgetKind::APPLICATION_USAGE,
         schema_version: 2,
         display_name: "Application usage",
         description: "Exact duration by application",
+        size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
+        supports_multiple_instances: true,
+    },
+    TodayWidgetDefinition {
+        kind: TodayWidgetKind::FOCUS_VS_BREAK,
+        schema_version: 1,
+        display_name: "Focus vs break",
+        description: "Active focus compared with break time",
         size_policy: TodayWidgetSizePolicy::new(3, 2, 2, 4),
         supports_multiple_instances: true,
     },
@@ -549,7 +569,13 @@ impl TodayWidgetRegistry {
     fn default_instances() -> Vec<TodayWidgetInstance> {
         vec![
             TodayWidgetInstance::new("today.timeline", TodayWidgetKind::TIMELINE, 2),
+            TodayWidgetInstance::new(
+                "today.category-distribution",
+                TodayWidgetKind::CATEGORY_DISTRIBUTION,
+                1,
+            ),
             TodayWidgetInstance::new("today.usage", TodayWidgetKind::APPLICATION_USAGE, 2),
+            TodayWidgetInstance::new("today.focus-break", TodayWidgetKind::FOCUS_VS_BREAK, 1),
             TodayWidgetInstance::new("today.distribution", TodayWidgetKind::TIME_DISTRIBUTION, 2),
             TodayWidgetInstance::new("today.focus", TodayWidgetKind::FOCUS, 2),
         ]
@@ -912,17 +938,17 @@ mod tests {
         let model = UiModel::<()>::default();
         let widgets = controller.widget_bindings(&model);
 
-        assert_eq!(controller.registry().definitions().len(), 4);
+        assert_eq!(controller.registry().definitions().len(), 6);
         assert_eq!(
             widgets.widgets()[0].instance().id().as_str(),
             "today.timeline"
         );
         assert_eq!(
-            widgets.widgets()[1].instance().kind_id(),
+            widgets.widgets()[2].instance().kind_id(),
             TodayWidgetKind::APPLICATION_USAGE.id()
         );
         assert_eq!(
-            widgets.widgets()[3].instance().kind_id(),
+            widgets.widgets()[5].instance().kind_id(),
             TodayWidgetKind::FOCUS.id()
         );
         assert!(matches!(
@@ -957,7 +983,7 @@ mod tests {
         layout.widgets[1].kind_id = "openmanic.future.unavailable".to_owned();
         let bindings = controller.widget_bindings_for_layout(&model, &layout);
 
-        assert_eq!(bindings.widgets().len(), 4);
+        assert_eq!(bindings.widgets().len(), 6);
         assert_eq!(
             bindings.widgets()[1].resolution(),
             TodayWidgetResolution::MissingRenderer

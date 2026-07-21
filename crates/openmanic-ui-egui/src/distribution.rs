@@ -393,7 +393,7 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
     let DistributionRenderModel::Content { presentation, .. } = render_model(
         &data,
         DistributionLayout::Compact {
-            max_named_groups: 4,
+            max_named_groups: 7,
         },
     ) else {
         return;
@@ -430,19 +430,7 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
                 );
             });
         });
-        let (bar, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
-        ui.painter().rect_filled(bar, 5.0, crate::design::TRACK);
-        let bounded = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
-        let width = bar.width() * (f32::from(bounded) / 10_000.0);
-        if width >= 1.0 {
-            crate::design::paint_bar_gradient(
-                ui.painter(),
-                egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
-                color,
-            );
-        }
-        ui.add_space(4.0);
+        ui.add_space(9.0);
     }
     if presentation.segments().len() == 1
         && presentation.segments()[0]
@@ -455,6 +443,85 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
             "Assign applications to categories to reveal a richer breakdown.",
         );
     }
+}
+
+/// Paints the reference category-distribution donut and its exact-duration legend.
+#[expect(
+    clippy::excessive_nesting,
+    reason = "the bounded donut and legend are one compact visual with shared source rows"
+)]
+pub fn render_category_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSnapshot) {
+    let total = snapshot.total_included_micros();
+    let groups = snapshot.groups();
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(174.0, 174.0), egui::Sense::hover());
+        let center = rect.center();
+        let radius = 54.0;
+        let stroke_width = 20.0;
+        ui.painter().circle_stroke(
+            center,
+            radius,
+            egui::Stroke::new(stroke_width, crate::design::TRACK),
+        );
+        if total > 0 {
+            let mut angle = -std::f32::consts::FRAC_PI_2;
+            for group in groups.iter().take(7) {
+                let hundredths = percentage_hundredths(group.included_micros, total);
+                let bounded = u16::try_from(hundredths.min(10_000)).unwrap_or(10_000);
+                let sweep = std::f32::consts::TAU * f32::from(bounded) / 10_000.0;
+                let color = distribution_color(&group.label);
+                let points = (0_u16..=32)
+                    .map(|step| {
+                        let fraction = f32::from(step) / 32.0;
+                        center + egui::Vec2::angled(angle + sweep * fraction) * radius
+                    })
+                    .collect();
+                ui.painter().add(egui::epaint::PathShape::line(
+                    points,
+                    egui::Stroke::new(stroke_width, color),
+                ));
+                angle += sweep;
+            }
+        }
+        ui.painter().text(
+            center + egui::vec2(0.0, -8.0),
+            egui::Align2::CENTER_CENTER,
+            format_duration(total),
+            egui::FontId::monospace(16.0),
+            crate::design::TEXT_PRIMARY,
+        );
+        ui.painter().text(
+            center + egui::vec2(0.0, 12.0),
+            egui::Align2::CENTER_CENTER,
+            "TRACKED",
+            egui::FontId::proportional(10.0),
+            crate::design::TEXT_MUTED,
+        );
+        ui.vertical(|ui| {
+            ui.add_space(4.0);
+            for group in groups.iter().take(7) {
+                let color = distribution_color(&group.label);
+                ui.horizontal(|ui| {
+                    crate::design::color_dot(ui, color, 10.0);
+                    ui.label(
+                        egui::RichText::new(&group.label)
+                            .size(13.0)
+                            .strong()
+                            .color(crate::design::TEXT_SECONDARY),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format_duration(group.included_micros))
+                                .size(12.0)
+                                .monospace()
+                                .color(crate::design::TEXT_SECTION),
+                        );
+                    });
+                });
+                ui.add_space(8.0);
+            }
+        });
+    });
 }
 
 fn distribution_color(label: &str) -> Color32 {

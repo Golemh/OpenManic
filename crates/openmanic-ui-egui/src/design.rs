@@ -220,17 +220,21 @@ fn push_gradient_quad(mesh: &mut Mesh, rect: Rect, top: Color32, bottom: Color32
 }
 
 /// Returns the standard card frame (surface fill, border, radius, padding).
-#[must_use]
 pub fn card_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0, BORDER))
         .corner_radius(CornerRadius::same(RADIUS_CARD))
         .inner_margin(egui::Margin::same(16))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 30,
+            spread: 0,
+            color: Color32::from_black_alpha(89),
+        })
 }
 
 /// Returns the inset panel frame used behind timelines and clocks.
-#[must_use]
 pub fn inset_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(INSET)
@@ -365,8 +369,10 @@ pub fn stat_chip(ui: &mut egui::Ui, key: &str, value: &str, accent: bool) {
         .corner_radius(CornerRadius::same(RADIUS_CHIP))
         .inner_margin(egui::Margin::symmetric(15, 8))
         .show(ui, |ui| {
+            ui.set_width(66.0);
             ui.vertical(|ui| {
-                ui.set_min_width(66.0);
+                ui.set_width(66.0);
+                ui.spacing_mut().item_spacing.y = 1.0;
                 ui.label(
                     egui::RichText::new(key.to_ascii_uppercase())
                         .size(10.5)

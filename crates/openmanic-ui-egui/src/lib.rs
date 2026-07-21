@@ -43,7 +43,7 @@ pub use controller::{
 };
 pub use distribution::{
     DistributionBuildError, DistributionContribution, DistributionGrouping, DistributionSnapshot,
-    render_distribution_snapshot,
+    render_category_distribution_snapshot, render_distribution_snapshot,
 };
 pub use jobs::{
     DestructiveConfirmation, JobDescriptor, JobPresentation, JobPresentationState, JobProgress,

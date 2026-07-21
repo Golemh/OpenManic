@@ -25,15 +25,15 @@ use super::{
 };
 use crate::{DataLimitation, PresentableData, ThemeTokens, TodayAction, TodayViewContext};
 
-const BAND_LABEL_WIDTH: f32 = 96.0;
+const BAND_LABEL_WIDTH: f32 = 22.0;
 const OVERVIEW_TOP_PADDING: f32 = 22.0;
-const OVERVIEW_HEIGHT: f32 = 24.0;
+const OVERVIEW_HEIGHT: f32 = 44.0;
 const OVERVIEW_AXIS_GAP: f32 = 8.0;
 const TICK_HEIGHT: f32 = 24.0;
-const CATEGORY_BAND_HEIGHT: f32 = 112.0;
-const ACTIVITY_BAND_HEIGHT: f32 = 16.0;
-const APPLICATION_BAND_HEIGHT: f32 = 16.0;
-const BAND_GAP: f32 = 8.0;
+const CATEGORY_BAND_HEIGHT: f32 = 132.0;
+const ACTIVITY_BAND_HEIGHT: f32 = 14.0;
+const APPLICATION_BAND_HEIGHT: f32 = 26.0;
+const BAND_GAP: f32 = 6.0;
 const TIMELINE_BOTTOM_PADDING: f32 = 6.0;
 const TIMELINE_HEIGHT: f32 = OVERVIEW_TOP_PADDING
     + OVERVIEW_HEIGHT
@@ -521,6 +521,9 @@ impl TimelineRenderer {
             && pointer_over_bands
             && (input.scroll.x != 0.0 || input.scroll.y != 0.0)
         {
+            // The timeline owns wheel input while the pointer is over a lane. Clear the shared
+            // delta after copying it so an enclosing page ScrollArea cannot also move this frame.
+            ui.input_mut(|state| state.smooth_scroll_delta = Vec2::ZERO);
             return input.pointer.map(|pointer| TimelineGesture::Scrolled {
                 x: pointer.x,
                 horizontal_delta: input.scroll.x,
@@ -622,7 +625,7 @@ impl TimelineRenderer {
             layout.overview_hover,
             self.theme_tokens,
         );
-        paint_band_labels(painter, layout.bands, self.theme_tokens);
+        paint_band_tracks(painter, layout.bands, self.theme_tokens);
         let plan = TimelinePaintPlan::from_snapshot(transform, snapshot);
         if self.lane_visibility[CATEGORY_LANE] {
             paint_category_band(
@@ -1110,23 +1113,8 @@ fn overview_range_for_pointer(
     .ok()
 }
 
-fn paint_band_labels(painter: &Painter, bands: BandRects, theme_tokens: ThemeTokens) {
-    for (band, rect) in [
-        (TimelineBand::Category, bands.category),
-        (TimelineBand::Activity, bands.activity),
-        (TimelineBand::Application, bands.application),
-    ] {
-        painter.text(
-            Pos2::new(rect.min.x - BAND_LABEL_WIDTH + 8.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            band.label(),
-            FontId::proportional(if band == TimelineBand::Category {
-                12.0
-            } else {
-                10.0
-            }),
-            theme_tokens.content_primary(),
-        );
+fn paint_band_tracks(painter: &Painter, bands: BandRects, theme_tokens: ThemeTokens) {
+    for rect in [bands.category, bands.activity, bands.application] {
         painter.rect_filled(rect, 4.0, TRACK);
         painter.rect_stroke(
             rect,
@@ -1357,7 +1345,7 @@ fn paint_category_band(
             CategoryBandValue::Uncategorized => {
                 Color32::from_rgb(51, 65, 85).gamma_multiply(if show_labels { 1.0 } else { 0.3 })
             }
-            CategoryBandValue::NonApplicationState(state) => activity_color(*state),
+            CategoryBandValue::NonApplicationState(_) => TRACK,
         },
         |value| {
             show_labels.then(|| match value {
@@ -1366,7 +1354,7 @@ fn paint_category_band(
                     .cloned()
                     .unwrap_or_else(|| "Category".to_owned()),
                 CategoryBandValue::Uncategorized => "Uncategorized".to_owned(),
-                CategoryBandValue::NonApplicationState(state) => activity_label(*state).to_owned(),
+                CategoryBandValue::NonApplicationState(_) => String::new(),
             })
         },
     );
@@ -1412,7 +1400,7 @@ fn paint_application_band(
             ApplicationBandValue::Application(application_id) => {
                 application_color_for(*application_id, labels)
             }
-            ApplicationBandValue::NoApplication(state) => activity_color(*state),
+            ApplicationBandValue::NoApplication(_) => TRACK,
             ApplicationBandValue::UnresolvedApplication => Color32::from_rgb(150, 111, 184),
         },
         |value| match value {
@@ -1549,18 +1537,6 @@ fn paint_segment_label(painter: &Painter, rect: Rect, label: Option<String>) {
         FontId::proportional(font_size),
         Color32::WHITE,
     );
-}
-
-const fn activity_label(state: ActivityState) -> &'static str {
-    match state {
-        ActivityState::Active => "Active",
-        ActivityState::Idle => "Away",
-        ActivityState::PausedByUser => "Paused",
-        ActivityState::Excluded => "Excluded",
-        ActivityState::Unavailable => "Unavailable",
-        ActivityState::PoweredOff => "Powered off",
-        ActivityState::UnknownMissing => "Unknown",
-    }
 }
 
 fn paint_selection(
