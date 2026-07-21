@@ -95,6 +95,7 @@ impl SettingsBasicDraft {
 pub struct SettingsAdvancedDraft {
     consent_revision: u32,
     idle_threshold_seconds: u32,
+    foreground_switch_delay_seconds: u32,
     idle_policy_code: u16,
     time_zone_mode: u8,
     manual_time_zone_id: Option<String>,
@@ -110,6 +111,10 @@ impl SettingsAdvancedDraft {
     /// Replaces the inactivity threshold in this local draft.
     pub fn set_idle_threshold_seconds(&mut self, value: u32) {
         self.idle_threshold_seconds = value;
+    }
+    /// Replaces the foreground-switch confirmation delay in this local draft.
+    pub fn set_foreground_switch_delay_seconds(&mut self, value: u32) {
+        self.foreground_switch_delay_seconds = value;
     }
     /// Replaces the durable idle-policy selection in this local draft.
     pub fn set_idle_policy_code(&mut self, value: u16) {
@@ -140,6 +145,11 @@ impl SettingsAdvancedDraft {
     #[must_use]
     pub const fn idle_threshold_seconds(&self) -> u32 {
         self.idle_threshold_seconds
+    }
+    /// Returns the foreground-switch confirmation delay in seconds.
+    #[must_use]
+    pub const fn foreground_switch_delay_seconds(&self) -> u32 {
+        self.foreground_switch_delay_seconds
     }
     /// Returns the durable idle-policy selection.
     #[must_use]
@@ -280,6 +290,7 @@ impl SettingsController {
             self.basic.start_at_login,
             self.basic.close_to_tray,
             self.advanced.idle_threshold_seconds,
+            self.advanced.foreground_switch_delay_seconds,
             self.advanced.idle_policy_code,
             self.basic.collect_window_titles,
             self.advanced.time_zone_mode,
@@ -315,6 +326,7 @@ fn advanced_from(settings: &SettingsSnapshot) -> SettingsAdvancedDraft {
     SettingsAdvancedDraft {
         consent_revision: settings.consent_revision(),
         idle_threshold_seconds: settings.idle_threshold_seconds(),
+        foreground_switch_delay_seconds: settings.foreground_switch_delay_seconds(),
         idle_policy_code: settings.idle_policy_code(),
         time_zone_mode: settings.time_zone_mode(),
         manual_time_zone_id: settings.manual_time_zone_id().map(str::to_owned),
@@ -335,6 +347,7 @@ mod tests {
             true,
             false,
             120,
+            15,
             7,
             true,
             2,
@@ -369,6 +382,7 @@ mod tests {
         assert_eq!(settings.manual_time_zone_id(), Some("Asia/Karachi"));
         assert_eq!(settings.consent_revision(), 4);
         assert_eq!(settings.theme_mode(), SettingsThemeMode::FollowSystem);
+        assert_eq!(settings.foreground_switch_delay_seconds(), 15);
     }
 
     #[test]
@@ -376,6 +390,7 @@ mod tests {
         let mut controller = SettingsController::new(persisted());
         let mut advanced = controller.advanced().clone();
         advanced.set_idle_threshold_seconds(42);
+        advanced.set_foreground_switch_delay_seconds(20);
         let _ = controller.apply(SettingsAction::SetAdvanced(advanced));
         assert_eq!(controller.advanced().idle_threshold_seconds(), 42);
 
@@ -384,6 +399,7 @@ mod tests {
             Some(SettingsEffect::Cancelled)
         );
         assert_eq!(controller.advanced().idle_threshold_seconds(), 120);
+        assert_eq!(controller.advanced().foreground_switch_delay_seconds(), 15);
         assert!(controller.basic().collect_window_titles());
     }
 

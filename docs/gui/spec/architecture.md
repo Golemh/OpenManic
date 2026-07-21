@@ -336,6 +336,14 @@ Starting a focus session may immediately display `Starting`, but it displays `Ru
 
 The platform adapter produces evidence; the application tracking reducer owns canonical intervals.
 
+Before foreground-to-foreground evidence reaches the reducer, composition applies the persisted
+5-20 second foreground-switch confirmation delay. The first trusted foreground after startup or a
+non-foreground lifecycle state is immediate. Later application changes remain pending until stable;
+accepted changes retain their original observation boundary, while shorter switches are discarded.
+Pause, idle, lock, suspend, power, adapter-availability, evidence-loss, clock-discontinuity, and an
+explicit exclusion-policy change for the currently accepted application are never delayed by this
+filter.
+
 Reducer inputs include:
 
 - Foreground observations.

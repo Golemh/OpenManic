@@ -2,6 +2,13 @@
 
 use crate::{DataRevision, EntityRevision};
 
+/// Smallest supported delay before a foreground application switch is accepted.
+pub const MIN_FOREGROUND_SWITCH_DELAY_SECONDS: u32 = 5;
+/// Largest supported delay before a foreground application switch is accepted.
+pub const MAX_FOREGROUND_SWITCH_DELAY_SECONDS: u32 = 20;
+/// Default delay that filters incidental window switches without making tracking feel stale.
+pub const DEFAULT_FOREGROUND_SWITCH_DELAY_SECONDS: u32 = 10;
+
 /// One approved built-in appearance mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsThemeMode {
@@ -51,6 +58,7 @@ pub struct SettingsSnapshot {
     start_at_login: bool,
     close_to_tray: bool,
     idle_threshold_seconds: u32,
+    foreground_switch_delay_seconds: u32,
     idle_policy_code: u16,
     collect_window_titles: bool,
     time_zone_mode: u8,
@@ -73,6 +81,7 @@ impl SettingsSnapshot {
             start_at_login: false,
             close_to_tray: true,
             idle_threshold_seconds: 300,
+            foreground_switch_delay_seconds: DEFAULT_FOREGROUND_SWITCH_DELAY_SECONDS,
             idle_policy_code: 1,
             collect_window_titles: true,
             time_zone_mode: 0,
@@ -99,6 +108,7 @@ impl SettingsSnapshot {
         start_at_login: bool,
         close_to_tray: bool,
         idle_threshold_seconds: u32,
+        foreground_switch_delay_seconds: u32,
         idle_policy_code: u16,
         collect_window_titles: bool,
         time_zone_mode: u8,
@@ -116,6 +126,7 @@ impl SettingsSnapshot {
             start_at_login,
             close_to_tray,
             idle_threshold_seconds,
+            foreground_switch_delay_seconds,
             idle_policy_code,
             collect_window_titles,
             time_zone_mode,
@@ -153,6 +164,11 @@ impl SettingsSnapshot {
     #[must_use]
     pub const fn idle_threshold_seconds(&self) -> u32 {
         self.idle_threshold_seconds
+    }
+    /// Returns the foreground-switch confirmation delay in seconds.
+    #[must_use]
+    pub const fn foreground_switch_delay_seconds(&self) -> u32 {
+        self.foreground_switch_delay_seconds
     }
     /// Returns the durable idle-policy code.
     #[must_use]
@@ -247,7 +263,7 @@ pub enum SettingsError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsSnapshot, SettingsThemeMode};
+    use super::{DEFAULT_FOREGROUND_SWITCH_DELAY_SECONDS, SettingsSnapshot, SettingsThemeMode};
     use crate::EntityRevision;
 
     #[test]
@@ -257,6 +273,10 @@ mod tests {
         assert!(settings.start_tracking_automatically());
         assert!(settings.collect_window_titles());
         assert!(settings.close_to_tray());
+        assert_eq!(
+            settings.foreground_switch_delay_seconds(),
+            DEFAULT_FOREGROUND_SWITCH_DELAY_SECONDS
+        );
         assert_eq!(settings.revision(), EntityRevision::new(0));
         assert_eq!(
             SettingsThemeMode::try_from_code(2),

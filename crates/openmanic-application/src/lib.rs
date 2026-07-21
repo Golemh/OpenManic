@@ -111,8 +111,9 @@ pub use schedule_time::{
     resolve_schedule_boundary, schedule_rule_conflicts_with_intervals,
 };
 pub use settings::{
-    SettingsError, SettingsPersistence, SettingsPersistenceError, SettingsSnapshot,
-    SettingsThemeMode,
+    DEFAULT_FOREGROUND_SWITCH_DELAY_SECONDS, MAX_FOREGROUND_SWITCH_DELAY_SECONDS,
+    MIN_FOREGROUND_SWITCH_DELAY_SECONDS, SettingsError, SettingsPersistence,
+    SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode,
 };
 pub use timeline_projection::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, IntervalIndex,

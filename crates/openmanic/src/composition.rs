@@ -29,7 +29,8 @@ use openmanic_application::{
     FocusNotificationError, FocusNotificationPort, FocusPersistence, FocusPersistenceError,
     FocusService, FocusSnapshot, ImportBatchId, ImportDestinationScope, ImportScopeOutcome, JobId,
     JobState, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox, LatestMailboxReceiver,
-    LayoutPersistence, LayoutSnapshot, MailboxReceive, MutationOutcome, OrderingKey,
+    LayoutPersistence, LayoutSnapshot, MAX_FOREGROUND_SWITCH_DELAY_SECONDS,
+    MIN_FOREGROUND_SWITCH_DELAY_SECONDS, MailboxReceive, MutationOutcome, OrderingKey,
     PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
     RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
     RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
@@ -270,11 +271,121 @@ impl fmt::Debug for WindowTitleObservation {
 /// The stateful application services which are exclusively owned by the writer worker.
 struct WriterServices {
     tracking: TrackingService<WriterPersistence>,
+    foreground_switch_stabilizer: ForegroundSwitchStabilizer,
     catalog: CatalogService<WriterPersistence>,
     schedules: ScheduleService<WriterPersistence>,
     focus: FocusService<WriterPersistence, InAppFocusNotifications>,
     title_stabilizer: TitleStabilizer,
     ui_event_sequence: u64,
+}
+
+#[derive(Debug)]
+struct PendingForegroundSwitch {
+    application: Application,
+    command: CommandEnvelope<TrackingCommand>,
+    observed_at_utc: UtcMicros,
+}
+
+#[derive(Debug)]
+struct ForegroundSwitchStabilizer {
+    accepted_application_id: Option<ApplicationId>,
+    delay_seconds: u32,
+    pending: Option<PendingForegroundSwitch>,
+}
+
+enum ForegroundSwitchDecision {
+    Immediate {
+        application: Application,
+        command: CommandEnvelope<TrackingCommand>,
+    },
+    Pending,
+}
+
+impl ForegroundSwitchStabilizer {
+    fn new(delay_seconds: u32) -> Self {
+        Self {
+            accepted_application_id: None,
+            delay_seconds,
+            pending: None,
+        }
+    }
+
+    fn observe(
+        &mut self,
+        application: Application,
+        command: CommandEnvelope<TrackingCommand>,
+    ) -> ForegroundSwitchDecision {
+        let application_id = application.id();
+        let Some(observed_at_utc) = foreground_observed_at(&command) else {
+            return ForegroundSwitchDecision::Immediate {
+                application,
+                command,
+            };
+        };
+        if self.accepted_application_id.is_none()
+            || self.accepted_application_id == Some(application_id)
+        {
+            self.accepted_application_id = Some(application_id);
+            self.pending = None;
+            return ForegroundSwitchDecision::Immediate {
+                application,
+                command,
+            };
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.application.id() == application_id)
+        {
+            return ForegroundSwitchDecision::Pending;
+        }
+        self.pending = Some(PendingForegroundSwitch {
+            application,
+            command,
+            observed_at_utc,
+        });
+        ForegroundSwitchDecision::Pending
+    }
+
+    fn take_mature(
+        &mut self,
+        now_utc: UtcMicros,
+    ) -> Option<(Application, CommandEnvelope<TrackingCommand>)> {
+        let pending = self.pending.as_ref()?;
+        let required_us = i64::from(self.delay_seconds).saturating_mul(1_000_000);
+        if now_utc.get().saturating_sub(pending.observed_at_utc.get()) < required_us {
+            return None;
+        }
+        let pending = self.pending.take()?;
+        self.accepted_application_id = Some(pending.application.id());
+        Some((pending.application, pending.command))
+    }
+
+    fn set_delay_seconds(&mut self, delay_seconds: u32) {
+        self.delay_seconds = delay_seconds;
+    }
+
+    fn clear_attribution(&mut self) {
+        self.accepted_application_id = None;
+        self.pending = None;
+    }
+}
+
+fn foreground_observed_at(command: &CommandEnvelope<TrackingCommand>) -> Option<UtcMicros> {
+    match command.payload() {
+        TrackingCommand::Evidence(TrackingEvidence::Foreground {
+            observed_at_utc, ..
+        }) => Some(*observed_at_utc),
+        _ => None,
+    }
+}
+
+fn command_ends_foreground_attribution(command: &CommandEnvelope<TrackingCommand>) -> bool {
+    !matches!(
+        command.payload(),
+        TrackingCommand::Checkpoint
+            | TrackingCommand::Evidence(TrackingEvidence::Foreground { .. })
+    )
 }
 
 /// Delivers a bounded in-app completion signal after durable focus completion.
@@ -532,6 +643,7 @@ fn settings_with_development_defaults(settings: &SettingsSnapshot) -> SettingsSn
         settings.start_at_login(),
         settings.close_to_tray(),
         settings.idle_threshold_seconds(),
+        settings.foreground_switch_delay_seconds(),
         settings.idle_policy_code(),
         true,
         settings.time_zone_mode(),
@@ -2429,11 +2541,16 @@ fn run_writer_worker(
     settings_snapshot: Arc<Mutex<SettingsSnapshot>>,
     tracking_permitted: Arc<AtomicBool>,
 ) {
+    let foreground_switch_delay_seconds = settings_snapshot.lock().map_or(
+        openmanic_application::DEFAULT_FOREGROUND_SWITCH_DELAY_SECONDS,
+        |settings| settings.foreground_switch_delay_seconds(),
+    );
     let mut services = writer_services(
         &store,
         focus_notification_error,
         focus_completion_pending,
         focus_notice_sender,
+        foreground_switch_delay_seconds,
     );
     reconcile_focus_snapshot(&mut services, &focus_snapshot);
     let mut current_projection = None;
@@ -2516,6 +2633,20 @@ fn run_writer_worker(
             LaneReceive::Empty => thread::park_timeout(WORKER_IDLE_INTERVAL),
             LaneReceive::Closed => running = false,
         }
+        if let Some((application, command)) = services
+            .foreground_switch_stabilizer
+            .take_mature(UtcMicros::new(utc_now_micros()))
+        {
+            process_catalog_foreground(
+                application,
+                command,
+                &mut services,
+                &store,
+                &mut current_projection,
+                &snapshots,
+                &ui_inbox,
+            );
+        }
         if last_focus_reconciliation.elapsed() >= Duration::from_secs(1) {
             reconcile_focus_snapshot(&mut services, &focus_snapshot);
             last_focus_reconciliation = Instant::now();
@@ -2528,6 +2659,7 @@ fn writer_services(
     _focus_notification_error: Arc<Mutex<Option<FocusNotificationError>>>,
     focus_completion_pending: Arc<AtomicBool>,
     focus_notice_sender: SyncSender<()>,
+    foreground_switch_delay_seconds: u32,
 ) -> WriterServices {
     let tracking = TrackingService::new(
         tracker_run_id(),
@@ -2556,6 +2688,9 @@ fn writer_services(
     );
     WriterServices {
         tracking,
+        foreground_switch_stabilizer: ForegroundSwitchStabilizer::new(
+            foreground_switch_delay_seconds,
+        ),
         catalog,
         schedules,
         focus,
@@ -2637,6 +2772,9 @@ fn process_writer_work(
                 snapshot.consent_revision() > 0 && snapshot.start_tracking_automatically(),
                 Ordering::Release,
             );
+            services
+                .foreground_switch_stabilizer
+                .set_delay_seconds(snapshot.foreground_switch_delay_seconds());
             *current = snapshot;
         }
         return;
@@ -2730,39 +2868,70 @@ fn process_writer_work(
         command,
     } = work
     {
-        let Ok(mut writer_store) = store.lock() else {
-            return;
-        };
-        let application = preserve_or_classify_application(&mut writer_store, application);
-        if writer_store
-            .writer()
-            .upsert_application(&application)
-            .is_err()
+        if let ForegroundSwitchDecision::Immediate {
+            application,
+            command,
+        } = services
+            .foreground_switch_stabilizer
+            .observe(application, command)
         {
-            return;
+            process_catalog_foreground(
+                application,
+                command,
+                services,
+                store,
+                current_projection,
+                snapshots,
+                ui_inbox,
+            );
         }
-        let Ok(excluded) = writer_store
-            .writer()
-            .application_is_excluded(application.id())
-        else {
-            return;
-        };
-        drop(writer_store);
-        process_tracking_command(
-            foreground_command_with_exclusion(command, excluded),
-            false,
-            services,
-            store,
-            current_projection,
-            snapshots,
-            ui_inbox,
-        );
         return;
     }
     let (command, from_ui) = work.into_parts();
+    if command_ends_foreground_attribution(&command) {
+        services.foreground_switch_stabilizer.clear_attribution();
+    }
     process_tracking_command(
         command,
         from_ui,
+        services,
+        store,
+        current_projection,
+        snapshots,
+        ui_inbox,
+    );
+}
+
+fn process_catalog_foreground(
+    application: Application,
+    command: CommandEnvelope<TrackingCommand>,
+    services: &mut WriterServices,
+    store: &Arc<Mutex<SqliteStore>>,
+    current_projection: &mut Option<ProjectionRequest<TimelineContext>>,
+    snapshots: &LatestMailbox<SnapshotEnvelope<TodaySnapshot>>,
+    ui_inbox: &UiInbox,
+) {
+    let Ok(mut writer_store) = store.lock() else {
+        return;
+    };
+    let application = preserve_or_classify_application(&mut writer_store, application);
+    if writer_store
+        .writer()
+        .upsert_application(&application)
+        .is_err()
+    {
+        return;
+    }
+    let Ok(excluded) = writer_store
+        .writer()
+        .application_is_excluded(application.id())
+    else {
+        return;
+    };
+    drop(writer_store);
+    process_tracking_command(
+        foreground_command_with_exclusion(command, excluded),
+        false,
         services,
         store,
         current_projection,
@@ -4756,6 +4925,8 @@ impl VerticalSliceApp {
         let mut titles = basic.collect_window_titles();
         let mut notifications = basic.notifications_enabled();
         let mut sounds = basic.focus_sounds_enabled();
+        let mut advanced = self.settings_controller.advanced().clone();
+        let mut foreground_switch_delay = advanced.foreground_switch_delay_seconds();
         ui.checkbox(&mut automatic, "Start tracking after consent");
         ui.checkbox(&mut login, "Start OpenManic when I sign in");
         ui.checkbox(
@@ -4766,12 +4937,24 @@ impl VerticalSliceApp {
         ui.small(self.settings_controller.title_collection_disclosure());
         ui.checkbox(&mut notifications, "Show notifications");
         ui.checkbox(&mut sounds, "Play focus sounds");
+        ui.horizontal(|ui| {
+            ui.label("Confirm a new foreground app after:");
+            ui.add(
+                eframe::egui::Slider::new(
+                    &mut foreground_switch_delay,
+                    MIN_FOREGROUND_SWITCH_DELAY_SECONDS..=MAX_FOREGROUND_SWITCH_DELAY_SECONDS,
+                )
+                .suffix(" seconds"),
+            );
+        });
+        ui.small("Shorter window switches are folded into the previously active application.");
         basic.set_start_tracking_automatically(automatic);
         basic.set_start_at_login(login);
         basic.set_close_to_tray(close_to_tray);
         basic.set_collect_window_titles(titles);
         basic.set_notifications_enabled(notifications);
         basic.set_focus_sounds_enabled(sounds);
+        advanced.set_foreground_switch_delay_seconds(foreground_switch_delay);
         ui.horizontal(|ui| {
             ui.label("Appearance:");
             for (mode, label) in [(0_u8, "Dark"), (1, "Light"), (2, "Follow system")] {
@@ -4959,6 +5142,11 @@ impl VerticalSliceApp {
                 .settings_controller
                 .apply(SettingsAction::SetBasic(basic));
         }
+        if advanced != *self.settings_controller.advanced() {
+            let _ = self
+                .settings_controller
+                .apply(SettingsAction::SetAdvanced(advanced));
+        }
         ui.horizontal(|ui| {
             if ui.button("Save settings").clicked()
                 && let Some(SettingsEffect::Save {
@@ -5007,6 +5195,7 @@ impl VerticalSliceApp {
                 settings.start_at_login(),
                 settings.close_to_tray(),
                 settings.idle_threshold_seconds(),
+                settings.foreground_switch_delay_seconds(),
                 settings.idle_policy_code(),
                 settings.collect_window_titles(),
                 settings.time_zone_mode(),
@@ -6641,18 +6830,109 @@ mod tests {
         TrackingEvidence, WorkLane, bounded_runtime_lanes,
     };
     use openmanic_domain::{
-        ApplicationId, FocusSessionState, HalfOpenInterval, ScheduleEditScope, ScheduleRule,
-        ScheduleSeriesId, UtcMicros,
+        Application, ApplicationId, ApplicationName, FocusSessionState, HalfOpenInterval,
+        ScheduleEditScope, ScheduleRule, ScheduleSeriesId, UtcMicros,
     };
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
-        CommandIdentifiers, PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError,
-        TrackingDebugState, UiInbox, UiIngress, calendar_schedule_target, day_range,
-        focus_remaining_label, focus_remaining_us, format_utc_clock, format_utc_range,
+        CommandIdentifiers, ForegroundSwitchDecision, ForegroundSwitchStabilizer,
+        PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError, TrackingDebugState,
+        UiInbox, UiIngress, calendar_schedule_target, day_range, focus_remaining_label,
+        focus_remaining_us, foreground_observed_at, format_utc_clock, format_utc_range,
         initial_category_for_application, initial_category_id, record_tracking_observation,
         recurring_schedule_rule, set_tracking_delivery, store_identity,
     };
+
+    fn foreground_application(value: u8, observed_at_utc: UtcMicros) -> Application {
+        Application::try_new(
+            ApplicationId::from_bytes([value; 16]),
+            ApplicationName::try_new(format!("Application {value}"))
+                .expect("fixture application name is valid"),
+            None,
+            observed_at_utc,
+            observed_at_utc,
+        )
+        .expect("fixture application bounds are valid")
+    }
+
+    fn foreground_command(
+        identifiers: &CommandIdentifiers,
+        sequence: u64,
+        observed_at_utc: UtcMicros,
+        application_id: ApplicationId,
+    ) -> openmanic_application::CommandEnvelope<TrackingCommand> {
+        identifiers.command(TrackingCommand::Evidence(TrackingEvidence::Foreground {
+            sequence,
+            observed_at_utc,
+            application_id,
+        }))
+    }
+
+    #[test]
+    fn foreground_switch_is_confirmed_after_delay_with_original_boundary() {
+        let identifiers = CommandIdentifiers::default();
+        let mut stabilizer = ForegroundSwitchStabilizer::new(10);
+        let first_at = UtcMicros::new(1_000_000);
+        let first = foreground_application(1, first_at);
+        let first_id = first.id();
+        assert!(matches!(
+            stabilizer.observe(
+                first,
+                foreground_command(&identifiers, 1, first_at, first_id)
+            ),
+            ForegroundSwitchDecision::Immediate { .. }
+        ));
+
+        let candidate_at = UtcMicros::new(2_000_000);
+        let candidate = foreground_application(2, candidate_at);
+        let candidate_id = candidate.id();
+        assert!(matches!(
+            stabilizer.observe(
+                candidate,
+                foreground_command(&identifiers, 2, candidate_at, candidate_id)
+            ),
+            ForegroundSwitchDecision::Pending
+        ));
+        assert!(stabilizer.take_mature(UtcMicros::new(11_999_999)).is_none());
+
+        let (accepted, command) = stabilizer
+            .take_mature(UtcMicros::new(12_000_000))
+            .expect("candidate matures at the configured threshold");
+        assert_eq!(accepted.id(), candidate_id);
+        assert_eq!(foreground_observed_at(&command), Some(candidate_at));
+    }
+
+    #[test]
+    fn brief_foreground_switch_is_discarded_when_previous_app_returns() {
+        let identifiers = CommandIdentifiers::default();
+        let mut stabilizer = ForegroundSwitchStabilizer::new(10);
+        let first_at = UtcMicros::new(1_000_000);
+        let first = foreground_application(1, first_at);
+        let first_id = first.id();
+        let _ = stabilizer.observe(
+            first,
+            foreground_command(&identifiers, 1, first_at, first_id),
+        );
+        let candidate_at = UtcMicros::new(2_000_000);
+        let candidate = foreground_application(2, candidate_at);
+        let candidate_id = candidate.id();
+        let _ = stabilizer.observe(
+            candidate,
+            foreground_command(&identifiers, 2, candidate_at, candidate_id),
+        );
+
+        let returned_at = UtcMicros::new(5_000_000);
+        let returned = foreground_application(1, returned_at);
+        assert!(matches!(
+            stabilizer.observe(
+                returned,
+                foreground_command(&identifiers, 3, returned_at, first_id)
+            ),
+            ForegroundSwitchDecision::Immediate { .. }
+        ));
+        assert!(stabilizer.take_mature(UtcMicros::new(30_000_000)).is_none());
+    }
 
     #[test]
     fn writer_ingress_is_bounded_and_retains_critical_tracking_commands() {

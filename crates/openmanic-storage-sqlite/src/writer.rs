@@ -9,11 +9,12 @@ use openmanic_application::{
     AcceptedWindowTitle, ApplicationError, ApplicationPort, CancellationToken, CatalogPersistence,
     CatalogPersistenceError, CsvImportRequest, DataRevision, EntityRevision, FocusKind,
     FocusPersistence, FocusPersistenceError, FocusSnapshot, ImportFailure, ImportScopeOutcome,
-    LayoutPersistence, LayoutPersistenceError, LayoutSnapshot, PortFailureReason, SavedViewId,
-    SavedViewPersistence, SavedViewPersistenceError, SavedViewSnapshot, ScheduleId,
-    SchedulePersistence, SchedulePersistenceError, ScheduleSnapshot, SettingsPersistence,
-    SettingsPersistenceError, SettingsSnapshot, SettingsThemeMode, TrackingPersistenceIntent,
-    TrackingPersistencePort, TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
+    LayoutPersistence, LayoutPersistenceError, LayoutSnapshot, MAX_FOREGROUND_SWITCH_DELAY_SECONDS,
+    MIN_FOREGROUND_SWITCH_DELAY_SECONDS, PortFailureReason, SavedViewId, SavedViewPersistence,
+    SavedViewPersistenceError, SavedViewSnapshot, ScheduleId, SchedulePersistence,
+    SchedulePersistenceError, ScheduleSnapshot, SettingsPersistence, SettingsPersistenceError,
+    SettingsSnapshot, SettingsThemeMode, TrackingPersistenceIntent, TrackingPersistencePort,
+    TrackingPersistenceSubmit, repeating_schedule_rules_conflict,
     schedule_rule_conflicts_with_intervals,
 };
 use openmanic_domain::{
@@ -113,6 +114,7 @@ type StoredSettingsRow = (
     i64,
     i64,
     i64,
+    i64,
     Option<String>,
     i64,
     i64,
@@ -130,9 +132,9 @@ impl StorageWriter {
     /// Returns [`StorageError`] for malformed persisted settings values or read failures.
     pub fn settings_snapshot(&mut self) -> Result<Option<SettingsSnapshot>, StorageError> {
         let row: Option<StoredSettingsRow> = self.writer.connection_mut().query_row(
-            "SELECT first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision FROM user_settings WHERE singleton_id = 1",
+            "SELECT first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, foreground_switch_delay_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision FROM user_settings WHERE singleton_id = 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?, row.get(13)?, row.get(14)?, row.get(15)?)),
         ).optional().map_err(|error| database_error(&error, "read settings snapshot"))?;
         row.map(
             |(
@@ -141,6 +143,7 @@ impl StorageWriter {
                 login,
                 close,
                 idle_seconds,
+                foreground_switch_delay_seconds,
                 idle_policy,
                 titles,
                 time_zone,
@@ -162,6 +165,7 @@ impl StorageWriter {
                     u32::try_from(idle_seconds).map_err(|_| StorageError::InvalidStoredValue {
                         field: "settings idle threshold",
                     })?,
+                    stored_foreground_switch_delay(foreground_switch_delay_seconds)?,
                     u16::try_from(idle_policy).map_err(|_| StorageError::InvalidStoredValue {
                         field: "settings idle policy",
                     })?,
@@ -1425,6 +1429,11 @@ impl SettingsPersistence for StorageWriter {
         settings: &SettingsSnapshot,
         expected_revision: Option<EntityRevision>,
     ) -> Result<DataRevision, SettingsPersistenceError> {
+        if !(MIN_FOREGROUND_SWITCH_DELAY_SECONDS..=MAX_FOREGROUND_SWITCH_DELAY_SECONDS)
+            .contains(&settings.foreground_switch_delay_seconds())
+        {
+            return Err(SettingsPersistenceError::InvalidDocument);
+        }
         let transaction = self
             .begin_writer_transaction("begin settings replacement")
             .map_err(|_| SettingsPersistenceError::Failed)?;
@@ -1457,6 +1466,7 @@ impl SettingsPersistence for StorageWriter {
             i64::from(u8::from(settings.start_at_login())),
             i64::from(u8::from(settings.close_to_tray())),
             i64::from(settings.idle_threshold_seconds()),
+            i64::from(settings.foreground_switch_delay_seconds()),
             i64::from(settings.idle_policy_code()),
             i64::from(u8::from(settings.collect_window_titles())),
             i64::from(settings.time_zone_mode()),
@@ -1471,14 +1481,14 @@ impl SettingsPersistence for StorageWriter {
         if existing.is_some() {
             transaction
                 .execute(
-                    "UPDATE user_settings SET first_launch_consent_revision = ?1, start_tracking_automatically = ?2, start_at_login = ?3, close_to_tray = ?4, idle_threshold_seconds = ?5, idle_policy = ?6, collect_window_titles = ?7, time_zone_mode = ?8, manual_time_zone_id = ?9, theme_mode = ?10, density = ?11, notifications_enabled = ?12, focus_sounds_enabled = ?13, tray_explanation_acknowledged = ?14, revision = ?15 WHERE singleton_id = 1",
+                    "UPDATE user_settings SET first_launch_consent_revision = ?1, start_tracking_automatically = ?2, start_at_login = ?3, close_to_tray = ?4, idle_threshold_seconds = ?5, foreground_switch_delay_seconds = ?6, idle_policy = ?7, collect_window_titles = ?8, time_zone_mode = ?9, manual_time_zone_id = ?10, theme_mode = ?11, density = ?12, notifications_enabled = ?13, focus_sounds_enabled = ?14, tray_explanation_acknowledged = ?15, revision = ?16 WHERE singleton_id = 1",
                     parameters,
                 )
                 .map_err(|_| SettingsPersistenceError::Failed)?;
         } else {
             transaction
                 .execute(
-                    "INSERT INTO user_settings(singleton_id, schema_version, first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision, updated_utc_us) VALUES (1, 1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 0)",
+                    "INSERT INTO user_settings(singleton_id, schema_version, first_launch_consent_revision, start_tracking_automatically, start_at_login, close_to_tray, idle_threshold_seconds, foreground_switch_delay_seconds, idle_policy, collect_window_titles, time_zone_mode, manual_time_zone_id, theme_mode, density, notifications_enabled, focus_sounds_enabled, tray_explanation_acknowledged, revision, updated_utc_us) VALUES (1, 2, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0)",
                     parameters,
                 )
                 .map_err(|_| SettingsPersistenceError::Failed)?;
@@ -1996,6 +2006,21 @@ fn setting_bool(value: i64, field: &'static str) -> Result<bool, StorageError> {
         0 => Ok(false),
         1 => Ok(true),
         _ => Err(StorageError::InvalidStoredValue { field }),
+    }
+}
+
+fn stored_foreground_switch_delay(value: i64) -> Result<u32, StorageError> {
+    let seconds = u32::try_from(value).map_err(|_| StorageError::InvalidStoredValue {
+        field: "settings foreground switch delay",
+    })?;
+    if (MIN_FOREGROUND_SWITCH_DELAY_SECONDS..=MAX_FOREGROUND_SWITCH_DELAY_SECONDS)
+        .contains(&seconds)
+    {
+        Ok(seconds)
+    } else {
+        Err(StorageError::InvalidStoredValue {
+            field: "settings foreground switch delay",
+        })
     }
 }
 
@@ -4383,6 +4408,7 @@ mod tests {
             true,
             false,
             120,
+            15,
             2,
             true,
             1,
@@ -4418,6 +4444,7 @@ mod tests {
             false,
             true,
             900,
+            20,
             3,
             false,
             0,
@@ -4443,6 +4470,7 @@ mod tests {
             replacement.start_at_login(),
             replacement.close_to_tray(),
             replacement.idle_threshold_seconds(),
+            replacement.foreground_switch_delay_seconds(),
             replacement.idle_policy_code(),
             replacement.collect_window_titles(),
             replacement.time_zone_mode(),

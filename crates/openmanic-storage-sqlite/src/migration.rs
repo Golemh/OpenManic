@@ -16,7 +16,7 @@ use crate::backup::{
 use crate::{StorageError, StoreOpenOptions};
 
 /// The newest migration version compiled into this storage crate.
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const INITIAL_CHECKSUM: [u8; 8] = migration_checksum(INITIAL_SCHEMA);
@@ -24,7 +24,11 @@ const SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_SCHEMA: &str =
     include_str!("../migrations/0002_schedule_exception_boundary_resolution.sql");
 const SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_CHECKSUM: [u8; 8] =
     migration_checksum(SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_SCHEMA);
-const MIGRATIONS: [Migration; 2] = [
+const FOREGROUND_SWITCH_DELAY_SCHEMA: &str =
+    include_str!("../migrations/0003_foreground_switch_delay.sql");
+const FOREGROUND_SWITCH_DELAY_CHECKSUM: [u8; 8] =
+    migration_checksum(FOREGROUND_SWITCH_DELAY_SCHEMA);
+const MIGRATIONS: [Migration; 3] = [
     Migration {
         version: 1,
         source: INITIAL_SCHEMA,
@@ -34,6 +38,11 @@ const MIGRATIONS: [Migration; 2] = [
         version: 2,
         source: SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_SCHEMA,
         checksum: SCHEDULE_EXCEPTION_BOUNDARY_RESOLUTION_CHECKSUM,
+    },
+    Migration {
+        version: 3,
+        source: FOREGROUND_SWITCH_DELAY_SCHEMA,
+        checksum: FOREGROUND_SWITCH_DELAY_CHECKSUM,
     },
 ];
 
@@ -808,6 +817,55 @@ mod tests {
     }
 
     #[test]
+    fn foreground_switch_delay_migration_preserves_settings_with_safe_default() {
+        let database = TemporaryDatabase::new("foreground-switch-delay");
+        let options = open_options(9);
+        let mut connection = initialized_connection(&database, &options);
+        migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &MIGRATIONS[..2],
+            apply_migration_sql,
+        )
+        .expect("the fixture should reach the schema-v2 settings shape");
+        connection
+            .execute(
+                "INSERT INTO user_settings(
+                    singleton_id, schema_version, first_launch_consent_revision,
+                    start_tracking_automatically, start_at_login, close_to_tray,
+                    idle_threshold_seconds, idle_policy, collect_window_titles,
+                    time_zone_mode, manual_time_zone_id, theme_mode, density,
+                    notifications_enabled, focus_sounds_enabled,
+                    tray_explanation_acknowledged, revision, updated_utc_us
+                 ) VALUES (1, 1, 1, 1, 0, 1, 300, 1, 0, 0, NULL, 0, 1, 1, 1, 0, 0, 0)",
+                [],
+            )
+            .expect("the schema-v2 settings fixture should insert");
+
+        migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &MIGRATIONS,
+            apply_migration_sql,
+        )
+        .expect("the foreground-switch delay migration should succeed");
+
+        assert_eq!(super::verify_existing_with(&connection, &MIGRATIONS), Ok(3));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT foreground_switch_delay_seconds FROM user_settings WHERE singleton_id = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("the migrated setting should remain readable"),
+            10
+        );
+    }
+
+    #[test]
     fn post_migration_foreign_key_failure_rolls_back_and_restores_original_database() {
         let database = TemporaryDatabase::new("post-migration-foreign-key-failure");
         let options = open_options(7);
@@ -837,7 +895,7 @@ mod tests {
         );
         let reopened = SqliteWriter::open(database.path(), &options)
             .expect("the restored original database should reopen as a writer");
-        assert_eq!(reopened.schema_version(), Ok(2));
+        assert_eq!(reopened.schema_version(), Ok(3));
         assert_writer_configuration(reopened.configuration());
     }
 

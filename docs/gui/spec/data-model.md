@@ -622,6 +622,7 @@ Relative ranges store a rule such as “current week”; fixed custom ranges sto
 | `start_at_login` | INTEGER | Desired state; platform adapter reconciles actual OS state |
 | `close_to_tray` | INTEGER | Boolean, default true |
 | `idle_threshold_seconds` | INTEGER | Positive bounded value |
+| `foreground_switch_delay_seconds` | INTEGER | 5-20 seconds; default 10 |
 | `idle_policy` | INTEGER | Versioned enum |
 | `collect_window_titles` | INTEGER | Boolean |
 | `time_zone_mode` | INTEGER | Auto or Manual |
@@ -635,6 +636,11 @@ Relative ranges store a rule such as “current week”; fixed custom ranges sto
 | `updated_utc_us` | INTEGER | Required |
 
 Excluded applications are stored on `application`, not duplicated in settings.
+
+The foreground-switch delay does not add a new activity entity or interval field. A newly
+observed application remains an in-memory candidate until the delay elapses. Once confirmed, its
+canonical interval begins at the candidate's original observation time. If the previously accepted
+application returns first, the candidate is discarded and the existing interval remains continuous.
 
 The public theme contract is a versioned declarative `ThemeSpec`, not a serialized `egui::Style`. Built-in themes follow the same parse/validate/resolve path as future external themes. MVP persistence stores only a built-in theme key and approved widget appearance overrides.
 
