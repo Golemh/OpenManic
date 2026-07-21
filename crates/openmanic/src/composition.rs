@@ -19,27 +19,27 @@ use std::{
 };
 
 use openmanic_application::{
-    ActivityStateValue, AppEvent, ApplicationError, ApplicationIconCache,
+    ActivityStateValue, AppEvent, ApplicationBandValue, ApplicationError, ApplicationIconCache,
     ApplicationIconCacheLimits, ApplicationIconLookup, ApplicationIconResult, ApplicationPort,
     CalendarBlockId, CalendarDayContext, CalendarDayProjector, CalendarDaySnapshot,
     CalendarProjectionSource, CalendarSourceFocus, CancellationRequest, CancellationSource,
     CancellationToken, CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService,
-    CommandEnvelope, CommandId, CommandReceipt, CsvExportRequest, CsvImportRequest,
-    DataOperationDestination, DataOperationOutcome, DataRevision, EntityRevision, EventEnvelope,
-    FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort, FocusPersistence,
-    FocusPersistenceError, FocusService, FocusSnapshot, ImportBatchId, ImportDestinationScope,
-    ImportScopeOutcome, JobId, JobState, LaneCapacities, LaneReceive, LaneSubmit, LatestMailbox,
-    LatestMailboxReceiver, LayoutPersistence, LayoutSnapshot, MAX_FOREGROUND_SWITCH_DELAY_SECONDS,
-    MIN_FOREGROUND_SWITCH_DELAY_SECONDS, MailboxReceive, MutationOutcome, OrderingKey,
-    PortFailureReason, ProjectionContextKey, ProjectionRequest, ProjectionSlot,
-    RecurringOccurrenceOverride, RecurringScheduleEdit, RecurringScheduleRuleChange,
-    RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor, RuntimeWorker, ScheduleCommand,
-    ScheduleId, ScheduleOccurrenceId, SchedulePersistence, SchedulePersistenceError,
-    ScheduleService, ScheduleSnapshot, SchemaRevision, SettingsPersistence, SettingsSnapshot,
-    ShutdownCoordinator, ShutdownPhase, ShutdownStep, SnapshotEnvelope, ThreadRoot,
-    TimelineApplication, TimelineContext, TimelineProjector, TimelineRawIntervalId,
-    TimelineSnapshot, TimelineSourceActivity, TitleDisclosure, TitleObservationResult,
-    TitleStabilizer, TrackingCheckpoint, TrackingCommand, TrackingEvidence,
+    CategoryBandValue, CommandEnvelope, CommandId, CommandReceipt, CsvExportRequest,
+    CsvImportRequest, DataOperationDestination, DataOperationOutcome, DataRevision, EntityRevision,
+    EventEnvelope, FocusCommand, FocusKind, FocusNotificationError, FocusNotificationPort,
+    FocusPersistence, FocusPersistenceError, FocusService, FocusSnapshot, ImportBatchId,
+    ImportDestinationScope, ImportScopeOutcome, JobId, JobState, LaneCapacities, LaneReceive,
+    LaneSubmit, LatestMailbox, LatestMailboxReceiver, LayoutPersistence, LayoutSnapshot,
+    MAX_FOREGROUND_SWITCH_DELAY_SECONDS, MIN_FOREGROUND_SWITCH_DELAY_SECONDS, MailboxReceive,
+    MutationOutcome, OrderingKey, PortFailureReason, ProjectionContextKey, ProjectionRequest,
+    ProjectionSlot, RecurringOccurrenceOverride, RecurringScheduleEdit,
+    RecurringScheduleRuleChange, RuntimeLaneReceiver, RuntimeLanes, RuntimeSupervisor,
+    RuntimeWorker, ScheduleCommand, ScheduleId, ScheduleOccurrenceId, SchedulePersistence,
+    SchedulePersistenceError, ScheduleService, ScheduleSnapshot, SchemaRevision,
+    SettingsPersistence, SettingsSnapshot, ShutdownCoordinator, ShutdownPhase, ShutdownStep,
+    SnapshotEnvelope, ThreadRoot, TimelineApplication, TimelineContext, TimelineProjector,
+    TimelineRawIntervalId, TimelineSnapshot, TimelineSourceActivity, TitleDisclosure,
+    TitleObservationResult, TitleStabilizer, TrackingCheckpoint, TrackingCommand, TrackingEvidence,
     TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
     WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
@@ -68,9 +68,10 @@ use openmanic_ui_egui::{
     DestructiveConfirmation, InboundMessage, JobDescriptor, JobPresentationState, JobsAction,
     JobsController, JobsEffect, LayoutEditAction, LayoutEditEffect, LayoutEditor, MutationStatus,
     OpenManicApp, PresentableData, SettingsAction, SettingsController, SettingsEffect,
-    ShutdownController, ShutdownEffect, TodayAction, TodayController, TodayTrackingRequest,
-    TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction, UiController, UiModel,
-    reflow_dashboard, render_distribution_snapshot, render_shutdown_failure, render_usage_snapshot,
+    ShutdownController, ShutdownEffect, TodayAction, TodayCategoryFilter, TodayController,
+    TodayTrackingRequest, TodayWidgetKind, TodayWidgetResolution, TrackingControlAction, UiAction,
+    UiController, UiModel, reflow_dashboard, render_distribution_snapshot, render_shutdown_failure,
+    render_usage_snapshot,
 };
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
@@ -3731,6 +3732,99 @@ fn format_compact_duration(micros: u64) -> String {
     format!("{}h {:02}m", minutes / 60, minutes % 60)
 }
 
+fn today_selection_summary(
+    snapshot: &TodaySnapshot,
+    context: &openmanic_ui_egui::TodayViewContext,
+    unfiltered_usage_us: u64,
+) -> (String, u64) {
+    let selected_range = context.timeline_selection();
+    if context.category_filter().len() == 1
+        && let Some(filter) = context.category_filter().iter().next().copied()
+    {
+        let title = match filter {
+            TodayCategoryFilter::Category(category_id) => snapshot
+                .categories()
+                .iter()
+                .find(|category| category.id() == category_id)
+                .map_or_else(
+                    || "Category".to_owned(),
+                    |category| category.name().as_str().to_owned(),
+                ),
+            TodayCategoryFilter::Uncategorized => "Uncategorized".to_owned(),
+        };
+        let duration = snapshot
+            .timeline()
+            .category_band()
+            .intervals()
+            .iter()
+            .filter(|interval| match (filter, *interval.value()) {
+                (
+                    TodayCategoryFilter::Category(selected),
+                    CategoryBandValue::Category(category_id),
+                ) => selected == category_id,
+                (TodayCategoryFilter::Uncategorized, CategoryBandValue::Uncategorized) => true,
+                _ => false,
+            })
+            .fold(0_u64, |total, interval| {
+                total.saturating_add(clipped_duration_us(interval.range(), selected_range))
+            });
+        return (title, duration);
+    }
+    if context.application_filter().len() == 1
+        && let Some(application_id) = context.application_filter().iter().next().copied()
+    {
+        let title = snapshot
+            .applications()
+            .iter()
+            .find(|(application, _)| application.id() == application_id)
+            .map_or_else(
+                || "Application".to_owned(),
+                |(application, _)| application.name().as_str().to_owned(),
+            );
+        let duration = snapshot
+            .timeline()
+            .application_band()
+            .intervals()
+            .iter()
+            .filter(|interval| {
+                *interval.value() == ApplicationBandValue::Application(application_id)
+            })
+            .fold(0_u64, |total, interval| {
+                total.saturating_add(clipped_duration_us(interval.range(), selected_range))
+            });
+        return (title, duration);
+    }
+    if let Some(range) = selected_range {
+        let duration = snapshot
+            .timeline()
+            .category_band()
+            .intervals()
+            .iter()
+            .filter(|interval| {
+                matches!(
+                    interval.value(),
+                    CategoryBandValue::Category(_) | CategoryBandValue::Uncategorized
+                )
+            })
+            .fold(0_u64, |total, interval| {
+                total.saturating_add(clipped_duration_us(interval.range(), Some(range)))
+            });
+        return ("Selected time range".to_owned(), duration);
+    }
+    ("Whole view window".to_owned(), unfiltered_usage_us)
+}
+
+fn clipped_duration_us(range: HalfOpenInterval, selection: Option<HalfOpenInterval>) -> u64 {
+    let Some(selection) = selection else {
+        return range.duration_us();
+    };
+    HalfOpenInterval::try_new(
+        range.start().max(selection.start()),
+        range.end().min(selection.end()),
+    )
+    .map_or(0, HalfOpenInterval::duration_us)
+}
+
 fn relative_day_label(day_offset: i32) -> String {
     match day_offset {
         0 => "Today".to_owned(),
@@ -4794,6 +4888,7 @@ impl VerticalSliceApp {
             .model()
             .today_view_context()
             .selected_day_offset();
+        let context = self.app.controller().model().today_view_context().clone();
         let data = self
             .app
             .controller()
@@ -4804,13 +4899,17 @@ impl VerticalSliceApp {
         let recorded_us = data.as_ref().map_or(0, |snapshot| {
             snapshot.timeline().totals().known_duration_us()
         });
-        let usage_us = data.as_ref().map_or(0, |snapshot| {
+        let unfiltered_usage_us = data.as_ref().map_or(0, |snapshot| {
             snapshot
                 .usage()
                 .applications()
                 .iter()
                 .fold(0_u64, |sum, app| sum.saturating_add(app.duration_us()))
         });
+        let (selection_title, usage_us) = data.as_ref().map_or_else(
+            || ("Whole view window".to_owned(), 0),
+            |snapshot| today_selection_summary(snapshot, &context, unfiltered_usage_us),
+        );
         let tracked_bounds = data.as_ref().and_then(|snapshot| {
             let mut recorded = snapshot
                 .timeline()
@@ -4928,7 +5027,6 @@ impl VerticalSliceApp {
         });
         ui.add_space(11.0);
         self.render_layout_editor_controls(ui);
-        let context = self.app.controller().model().today_view_context().clone();
         let Some(snapshot) = data else {
             openmanic_ui_egui::design::card_frame().show(ui, |ui| {
                 ui.heading("Preparing your dashboard");
@@ -5024,7 +5122,7 @@ impl VerticalSliceApp {
                                             .color(openmanic_ui_egui::design::TEXT_MUTED),
                                     );
                                     ui.label(
-                                        eframe::egui::RichText::new("Whole view window")
+                                        eframe::egui::RichText::new(&selection_title)
                                             .size(19.0)
                                             .strong()
                                             .color(openmanic_ui_egui::design::TEXT_PRIMARY),
@@ -7530,7 +7628,7 @@ impl ScheduleDraft {
     fn new(range: HalfOpenInterval) -> Self {
         Self {
             range,
-            label: "New schedule".to_owned(),
+            label: String::new(),
             repeats: false,
             weekday_mask: 0b0111_1111,
             validation_error: None,
@@ -7908,62 +8006,201 @@ fn format_micros_duration(duration_us: u64) -> String {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the schedule modal keeps its reference-matched fields, time summary, and actions together"
+)]
 fn render_schedule_draft(
     ui: &mut eframe::egui::Ui,
     draft: &mut ScheduleDraft,
 ) -> ScheduleDraftAction {
-    ui.group(|ui| {
-        ui.strong(if draft.existing.is_some() { "Edit schedule" } else { "New schedule" });
-        ui.label(format!(
-            "Provisional range: {}",
-            format_utc_range(draft.range)
-        ));
-        ui.horizontal(|ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut draft.label);
+    use openmanic_ui_egui::design;
+
+    let context = ui.ctx().clone();
+    let dim_layer = eframe::egui::LayerId::new(
+        eframe::egui::Order::Foreground,
+        eframe::egui::Id::new("schedule-modal-dim"),
+    );
+    context.layer_painter(dim_layer).rect_filled(
+        context.content_rect(),
+        0.0,
+        eframe::egui::Color32::from_black_alpha(178),
+    );
+    let mut action = ScheduleDraftAction::None;
+    eframe::egui::Window::new("schedule-editor")
+        .id(eframe::egui::Id::new("schedule-editor-modal"))
+        .anchor(
+            eframe::egui::Align2::CENTER_CENTER,
+            eframe::egui::Vec2::ZERO,
+        )
+        .order(eframe::egui::Order::Foreground)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .fixed_size(eframe::egui::vec2(420.0, 360.0))
+        .frame(
+            eframe::egui::Frame::new()
+                .fill(eframe::egui::Color32::from_rgb(14, 24, 50))
+                .stroke(eframe::egui::Stroke::new(1.0, design::BORDER))
+                .corner_radius(20.0)
+                .inner_margin(eframe::egui::Margin::same(26)),
+        )
+        .show(&context, |ui| {
+            ui.set_width(368.0);
+            ui.horizontal(|ui| {
+                eframe::egui::Frame::new()
+                    .fill(design::SCHEDULED.gamma_multiply(0.15))
+                    .corner_radius(10.0)
+                    .inner_margin(eframe::egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.label(eframe::egui::RichText::new("▦").size(18.0));
+                    });
+                ui.add_space(2.0);
+                ui.label(
+                    eframe::egui::RichText::new(if draft.existing.is_some() {
+                        "Edit scheduled event"
+                    } else {
+                        "Set scheduled event"
+                    })
+                    .size(18.0)
+                    .strong()
+                    .color(design::TEXT_PRIMARY),
+                );
+            });
+            ui.add_space(17.0);
+            modal_field_label(ui, "NAME");
+            ui.add_space(6.0);
+            ui.add_sized(
+                [ui.available_width(), 42.0],
+                eframe::egui::TextEdit::singleline(&mut draft.label)
+                    .hint_text("Deep work, standup, lunch…")
+                    .font(eframe::egui::TextStyle::Body)
+                    .text_color(design::TEXT_PRIMARY)
+                    .margin(eframe::egui::Margin::symmetric(13, 11)),
+            );
+            ui.add_space(16.0);
+            ui.columns(2, |columns| {
+                render_schedule_time_field(&mut columns[0], "FROM", draft.range.start());
+                render_schedule_time_field(&mut columns[1], "TO", draft.range.end());
+            });
+            ui.add_space(16.0);
+            ui.label(
+                eframe::egui::RichText::new(format!(
+                    "Duration {} · {}",
+                    format_micros_duration(draft.range.duration_us()),
+                    format_schedule_date(draft.range.start())
+                ))
+                .size(12.0)
+                .color(design::TEXT_MUTED),
+            );
+            if let Some(error) = draft.validation_error {
+                ui.add_space(6.0);
+                ui.colored_label(design::AWAY, error.message());
+            }
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_sized(
+                        [149.0, 44.0],
+                        eframe::egui::Button::new(
+                            eframe::egui::RichText::new("Cancel")
+                                .size(14.0)
+                                .strong()
+                                .color(design::TEXT_SECONDARY),
+                        )
+                        .fill(design::SURFACE_RAISED)
+                        .stroke(eframe::egui::Stroke::new(1.0, design::BORDER))
+                        .corner_radius(11.0),
+                    )
+                    .clicked()
+                {
+                    action = ScheduleDraftAction::Cancel;
+                }
+                ui.add_space(6.0);
+                if ui
+                    .add_enabled(
+                        !draft.label.trim().is_empty(),
+                        eframe::egui::Button::new(
+                            eframe::egui::RichText::new("Schedule on Calendar")
+                                .size(14.0)
+                                .strong()
+                                .color(eframe::egui::Color32::from_rgb(4, 18, 26)),
+                        )
+                        .min_size(eframe::egui::vec2(207.0, 44.0))
+                        .fill(design::SCHEDULED)
+                        .stroke(eframe::egui::Stroke::NONE)
+                        .corner_radius(11.0),
+                    )
+                    .clicked()
+                {
+                    action = ScheduleDraftAction::Save;
+                }
+            });
         });
-        ui.checkbox(&mut draft.repeats, "Repeat");
-        if draft.repeats {
-            render_weekday_selector(ui, &mut draft.weekday_mask);
-            ui.label("Choose at least one day. Recurring times use UTC until local-zone editing is added.");
-        }
-        if let Some(recurring) = draft.recurring.as_mut() {
-            ui.radio_value(&mut recurring.scope, ScheduleEditScope::OnlyThisDate, "Only this occurrence");
-            ui.radio_value(&mut recurring.scope, ScheduleEditScope::ThisAndFuture, "This and future occurrences");
-            ui.radio_value(&mut recurring.scope, ScheduleEditScope::EveryOccurrence, "Every occurrence");
-        }
-        if let Some(error) = draft.validation_error {
-            ui.colored_label(eframe::egui::Color32::from_rgb(200, 70, 70), error.message());
-        }
-        if ui
-            .add_enabled(!draft.label.trim().is_empty(), eframe::egui::Button::new("Save schedule"))
-            .clicked()
-        {
-            ScheduleDraftAction::Save
-        } else if ui.button("Cancel").clicked() {
-            ScheduleDraftAction::Cancel
-        } else {
-            ScheduleDraftAction::None
-        }
-    })
-    .inner
+    action
 }
 
-fn render_weekday_selector(ui: &mut eframe::egui::Ui, weekday_mask: &mut u8) {
-    ui.horizontal(|ui| {
-        for (index, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            .iter()
-            .enumerate()
-        {
-            let bit = 1_u8 << index;
-            if ui
-                .selectable_label(*weekday_mask & bit != 0, *label)
-                .clicked()
-            {
-                *weekday_mask ^= bit;
-            }
-        }
-    });
+fn modal_field_label(ui: &mut eframe::egui::Ui, label: &str) {
+    ui.label(
+        eframe::egui::RichText::new(label)
+            .size(11.5)
+            .strong()
+            .color(openmanic_ui_egui::design::TEXT_MUTED),
+    );
+}
+
+fn render_schedule_time_field(ui: &mut eframe::egui::Ui, label: &str, instant: UtcMicros) {
+    modal_field_label(ui, label);
+    ui.add_space(6.0);
+    eframe::egui::Frame::new()
+        .fill(openmanic_ui_egui::design::BG_DEEP)
+        .stroke(eframe::egui::Stroke::new(
+            1.0,
+            openmanic_ui_egui::design::BORDER,
+        ))
+        .corner_radius(10.0)
+        .inner_margin(eframe::egui::Margin::symmetric(13, 11))
+        .show(ui, |ui| {
+            ui.set_min_width((ui.available_width() - 26.0).max(1.0));
+            ui.label(
+                eframe::egui::RichText::new(format_utc_clock(instant))
+                    .size(14.0)
+                    .monospace()
+                    .color(openmanic_ui_egui::design::ACCENT_TEXT),
+            );
+        });
+}
+
+fn format_schedule_date(instant: UtcMicros) -> String {
+    let days_since_epoch = instant.get().div_euclid(86_400_000_000);
+    let (year, month, day) = civil_date_from_days(days_since_epoch);
+    let weekday = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ][usize::try_from((days_since_epoch + 4).rem_euclid(7)).unwrap_or(0)];
+    let month_name = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ]
+    .get(usize::try_from(month.saturating_sub(1)).unwrap_or(usize::MAX))
+    .copied()
+    .unwrap_or("Unknown");
+    format!("{weekday}, {month_name} {day}, {year}")
 }
 
 impl eframe::App for VerticalSliceApp {
@@ -8473,9 +8710,9 @@ mod tests {
         PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError, TrackingDebugState,
         UiInbox, UiIngress, calendar_schedule_target, civil_date_from_days, day_range,
         focus_remaining_label, focus_remaining_us, foreground_observed_at, format_clock_label,
-        format_utc_clock, format_utc_range, initial_category_for_application, initial_category_id,
-        record_tracking_observation, recurring_schedule_rule, set_tracking_delivery,
-        store_identity,
+        format_schedule_date, format_utc_clock, format_utc_range, initial_category_for_application,
+        initial_category_id, record_tracking_observation, recurring_schedule_rule,
+        set_tracking_delivery, store_identity,
     };
 
     #[test]
@@ -8483,6 +8720,10 @@ mod tests {
         assert_eq!(civil_date_from_days(0), (1970, 1, 1));
         assert_eq!(civil_date_from_days(19_782), (2024, 2, 29));
         assert_eq!(format_clock_label(UtcMicros::new(0)), "12:00 AM");
+        assert_eq!(
+            format_schedule_date(UtcMicros::new(0)),
+            "Thursday, January 1, 1970"
+        );
         assert_eq!(
             format_clock_label(UtcMicros::new(13 * 3_600_000_000 + 5 * 60_000_000)),
             "1:05 PM"
