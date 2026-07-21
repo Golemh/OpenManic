@@ -6407,7 +6407,6 @@ impl VerticalSliceApp {
         }
         self.render_schedule_hint(ui.ctx());
         self.render_schedule_editor(ui);
-        self.render_existing_schedule_controls(ui, snapshot);
     }
 
     #[expect(
@@ -6627,24 +6626,28 @@ impl VerticalSliceApp {
                                 design::application_brand_color(application.name().as_str())
                                     .unwrap_or(design::UNKNOWN);
                             design::color_dot(ui, accent, 12.0);
-                            ui.vertical(|ui| {
-                                if !excluded {
-                                    ui.add_space(3.0);
-                                }
+                            if *excluded {
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        eframe::egui::RichText::new(application.name().as_str())
+                                            .size(13.5)
+                                            .strong()
+                                            .color(design::TEXT_SECONDARY),
+                                    );
+                                    ui.label(
+                                        eframe::egui::RichText::new("Excluded from tracking")
+                                            .size(11.0)
+                                            .color(design::AWAY),
+                                    );
+                                });
+                            } else {
                                 ui.label(
                                     eframe::egui::RichText::new(application.name().as_str())
                                         .size(13.5)
                                         .strong()
                                         .color(design::TEXT_SECONDARY),
                                 );
-                                if *excluded {
-                                    ui.label(
-                                        eframe::egui::RichText::new("Excluded from tracking")
-                                            .size(11.0)
-                                            .color(design::AWAY),
-                                    );
-                                }
-                            });
+                            }
                         },
                     );
                 });
@@ -7415,74 +7418,6 @@ impl VerticalSliceApp {
             self.schedule_draft = None;
         }
         self.render_schedule_status(ui);
-    }
-
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "each occurrence retains its own edit and delete controls with the immutable occurrence identity."
-    )]
-    fn render_existing_schedule_controls(
-        &mut self,
-        ui: &mut eframe::egui::Ui,
-        today: &TodaySnapshot,
-    ) {
-        let entries = today
-            .timeline()
-            .schedule_occurrences()
-            .iter()
-            .filter_map(|occurrence| {
-                let (schedule_id, anchor_date) = match occurrence.id() {
-                    ScheduleOccurrenceId::OneTime(schedule_id) => (schedule_id, None),
-                    ScheduleOccurrenceId::Recurring {
-                        schedule_id,
-                        anchor_date,
-                    } => (schedule_id, Some(anchor_date)),
-                };
-                today
-                    .schedules()
-                    .iter()
-                    .find(|snapshot| snapshot.id() == schedule_id)
-                    .cloned()
-                    .map(|snapshot| (snapshot, anchor_date, occurrence.interval()))
-            })
-            .collect::<Vec<_>>();
-        if !entries.is_empty() {
-            ui.add_space(12.0);
-            ui.heading("Schedules in this view");
-            for (schedule, anchor_date, interval) in entries {
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{} - {}",
-                        schedule.rule().label(),
-                        format_utc_range(interval)
-                    ));
-                    if ui.button("Delete…").clicked() {
-                        self.schedule_delete_request = Some(ScheduleDeleteRequest {
-                            snapshot: schedule.clone(),
-                            anchor_date,
-                            scope: ScheduleEditScope::OnlyThisDate,
-                        });
-                    }
-                    if !schedule.rule().is_repeating() && ui.button("Edit…").clicked() {
-                        self.schedule_draft = ScheduleDraft::from_existing(schedule.clone());
-                    }
-                    if schedule.rule().is_repeating()
-                        && let (ScheduleId::Series(series_id), Some(anchor_date)) =
-                            (schedule.id(), anchor_date)
-                        && ui.button("Edit…").clicked()
-                        && let Some(draft) = ScheduleDraft::from_recurring(
-                            schedule,
-                            series_id,
-                            anchor_date,
-                            interval,
-                        )
-                    {
-                        self.schedule_draft = Some(draft);
-                    }
-                });
-            }
-        }
-        self.render_schedule_delete_confirmation(ui);
     }
 
     fn render_schedule_delete_confirmation(&mut self, ui: &mut eframe::egui::Ui) {

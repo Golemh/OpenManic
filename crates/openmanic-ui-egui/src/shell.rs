@@ -42,7 +42,8 @@ pub(crate) fn render<T>(
     );
 
     let has_presentation_notice = !matches!(model.data(), PresentableData::Ready(_));
-    let has_mutation_notice = latest_mutation(model).is_some();
+    let has_mutation_notice = latest_mutation(model)
+        .is_some_and(|(_, status)| !matches!(status, MutationStatus::Confirmed { .. }));
     if has_presentation_notice || has_mutation_notice {
         egui::Frame::new()
             .fill(tokens.canvas())
@@ -227,9 +228,7 @@ fn render_mutation_state<T>(ui: &mut egui::Ui, model: &UiModel<T>, tokens: Theme
             "A change is waiting for confirmation.".to_owned(),
             tokens.warning(),
         ),
-        MutationStatus::Confirmed { .. } => {
-            ("The last change was saved.".to_owned(), tokens.success())
-        }
+        MutationStatus::Confirmed { .. } => return false,
         MutationStatus::Rejected { reason } => (
             format!("The last change was not saved: {reason}."),
             tokens.error(),
