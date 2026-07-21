@@ -36,9 +36,9 @@ impl ApplicationUsage {
         }
     }
 
-    /// Returns the stable application identity for a future action-only interaction.
+    /// Returns the stable application identity associated with this aggregate.
     #[must_use]
-    pub(crate) const fn application_id(&self) -> ApplicationId {
+    pub const fn application_id(&self) -> ApplicationId {
         self.application_id
     }
 
