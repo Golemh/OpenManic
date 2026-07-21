@@ -6,8 +6,8 @@
 //! ports, clone history, or mutate canonical category/application data.
 
 use eframe::egui::{
-    self, Align2, Color32, FontId, Key, Painter, PointerButton, Pos2, Rect, Response, Sense,
-    Stroke, Ui, Vec2,
+    self, Align2, Color32, CursorIcon, FontId, Key, Painter, PointerButton, Pos2, Rect, Response,
+    Sense, Stroke, Ui, Vec2,
 };
 use openmanic_application::{
     ActivityStateValue, ApplicationBandValue, CategoryBandValue, DataCompleteness, TimelineSnapshot,
@@ -61,6 +61,7 @@ const POWERED_OFF_STATE: usize = 4;
 const TRACK: Color32 = Color32::from_rgb(11, 15, 25);
 const SUBWIDGET: Color32 = Color32::from_rgb(5, 8, 17);
 const BAND_BORDER: Color32 = Color32::from_rgb(30, 41, 59);
+const VIEWFINDER_ACCENT: Color32 = Color32::from_rgb(59, 130, 246);
 const MUTED: Color32 = Color32::from_rgb(137, 151, 184);
 const SELECTED: Color32 = Color32::from_rgb(255, 255, 255);
 const ERROR: Color32 = Color32::from_rgb(244, 63, 94);
@@ -289,6 +290,16 @@ impl TimelineRenderer {
             return TimelineRenderOutput::default();
         };
         let band_rects = BandRects::new(timeline_rect);
+        let overview_hover = response.hover_pos().and_then(|pointer| {
+            overview_hover_at_pointer(pointer, overview_rect, snapshot.visible_range(), view_range)
+        });
+        let cursor = self
+            .overview_capture
+            .map(OverviewCapture::cursor_icon)
+            .or_else(|| overview_hover.map(OverviewHover::cursor_icon));
+        if let Some(cursor) = cursor {
+            ui.ctx().set_cursor_icon(cursor);
+        }
         self.paint_snapshot(
             ui.painter(),
             snapshot,
@@ -296,6 +307,7 @@ impl TimelineRenderer {
             TimelinePaintLayout {
                 canvas,
                 overview: overview_rect,
+                overview_hover,
                 bands: band_rects,
             },
             context,
@@ -426,6 +438,11 @@ impl TimelineRenderer {
                 return None;
             }
             let viewport = overview_view_rect(overview_rect, day_range, view_range)?;
+            if pointer.x < viewport.left() - OVERVIEW_EDGE_GRAB_WIDTH
+                || pointer.x > viewport.right() + OVERVIEW_EDGE_GRAB_WIDTH
+            {
+                return None;
+            }
             let pointer_instant = overview_instant_at_x(overview_rect, day_range, pointer.x)?;
             self.overview_capture = Some(overview_capture_at_pointer(
                 pointer,
@@ -602,6 +619,7 @@ impl TimelineRenderer {
             snapshot,
             transform.visible_range(),
             &self.category_labels,
+            layout.overview_hover,
             self.theme_tokens,
         );
         paint_band_labels(painter, layout.bands, self.theme_tokens);
@@ -768,6 +786,7 @@ struct BandRects {
 struct TimelinePaintLayout {
     canvas: Rect,
     overview: Rect,
+    overview_hover: Option<OverviewHover>,
     bands: BandRects,
 }
 
@@ -783,6 +802,52 @@ enum OverviewCapture {
     ResizeEnd {
         initial: HalfOpenInterval,
     },
+}
+
+impl OverviewCapture {
+    const fn cursor_icon(self) -> CursorIcon {
+        match self {
+            Self::Pan { .. } => CursorIcon::Grabbing,
+            Self::ResizeStart { .. } | Self::ResizeEnd { .. } => CursorIcon::ResizeHorizontal,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverviewHover {
+    Body,
+    StartEdge,
+    EndEdge,
+}
+
+impl OverviewHover {
+    const fn cursor_icon(self) -> CursorIcon {
+        match self {
+            Self::Body => CursorIcon::Grab,
+            Self::StartEdge | Self::EndEdge => CursorIcon::ResizeHorizontal,
+        }
+    }
+}
+
+fn overview_hover_at_pointer(
+    pointer: Pos2,
+    overview_rect: Rect,
+    day_range: HalfOpenInterval,
+    view_range: HalfOpenInterval,
+) -> Option<OverviewHover> {
+    if !overview_rect.contains(pointer) {
+        return None;
+    }
+    let viewport = overview_view_rect(overview_rect, day_range, view_range)?;
+    if (pointer.x - viewport.left()).abs() <= OVERVIEW_EDGE_GRAB_WIDTH {
+        Some(OverviewHover::StartEdge)
+    } else if (pointer.x - viewport.right()).abs() <= OVERVIEW_EDGE_GRAB_WIDTH {
+        Some(OverviewHover::EndEdge)
+    } else if viewport.contains(pointer) {
+        Some(OverviewHover::Body)
+    } else {
+        None
+    }
 }
 
 fn overview_capture_at_pointer(
@@ -1078,6 +1143,7 @@ fn paint_overview(
     snapshot: &TimelineSnapshot,
     view_range: HalfOpenInterval,
     category_labels: &BTreeMap<CategoryId, String>,
+    hover: Option<OverviewHover>,
     theme_tokens: ThemeTokens,
 ) {
     painter.text(
@@ -1115,35 +1181,67 @@ fn paint_overview(
         return;
     };
     let plan = TimelinePaintPlan::from_snapshot(day_transform, snapshot);
-    paint_category_band(
-        painter,
-        plan.category(),
-        overview_rect,
-        category_labels,
-        false,
-    );
+    paint_overview_day_map(painter, overview_rect, &plan, category_labels);
     let Some(viewport) = overview_view_rect(overview_rect, snapshot.visible_range(), view_range)
     else {
         return;
     };
+    paint_overview_window(painter, viewport, hover);
+}
+
+fn paint_overview_day_map(
+    painter: &Painter,
+    overview_rect: Rect,
+    plan: &TimelinePaintPlan<'_>,
+    category_labels: &BTreeMap<CategoryId, String>,
+) {
+    let day_map_rect = Rect::from_min_max(
+        Pos2::new(overview_rect.left(), overview_rect.top() + 2.0),
+        Pos2::new(overview_rect.right(), overview_rect.bottom() - 2.0),
+    );
+    paint_band(
+        painter,
+        plan.category(),
+        day_map_rect,
+        0.0,
+        0.0,
+        |value| {
+            let color = match value {
+                CategoryBandValue::Category(category_id) => {
+                    category_color_for(*category_id, category_labels)
+                }
+                CategoryBandValue::Uncategorized => Color32::from_rgb(51, 65, 85),
+                CategoryBandValue::NonApplicationState(state) => activity_color(*state),
+            };
+            color.gamma_multiply(0.30)
+        },
+        |_| None,
+    );
+}
+
+fn paint_overview_window(painter: &Painter, viewport: Rect, hover: Option<OverviewHover>) {
     painter.rect_filled(
         viewport,
-        2.0,
-        theme_tokens.interaction_primary().gamma_multiply(0.18),
+        0.0,
+        VIEWFINDER_ACCENT.gamma_multiply(if hover == Some(OverviewHover::Body) {
+            0.20
+        } else {
+            0.15
+        }),
     );
-    painter.rect_stroke(
-        viewport,
-        2.0,
-        Stroke::new(2.0, theme_tokens.interaction_primary()),
-        egui::StrokeKind::Inside,
-    );
-    for x in [viewport.left(), viewport.right()] {
+    for (x, edge) in [
+        (viewport.left(), OverviewHover::StartEdge),
+        (viewport.right(), OverviewHover::EndEdge),
+    ] {
         painter.line_segment(
             [
-                Pos2::new(x, viewport.min.y + 3.0),
-                Pos2::new(x, viewport.max.y - 3.0),
+                Pos2::new(x, viewport.top()),
+                Pos2::new(x, viewport.bottom()),
             ],
-            Stroke::new(2.0, theme_tokens.interaction_primary()),
+            Stroke::new(
+                if hover == Some(edge) { 3.0 } else { 2.0 },
+                VIEWFINDER_ACCENT,
+            ),
         );
     }
 }
@@ -1868,9 +1966,9 @@ mod tests {
     };
 
     use super::{
-        HOUR_US, OverviewCapture, TimelineBand, TimelineDetailValue, TimelineRenderAction,
-        detail_at, format_day_clock, hour_label, initial_view_range, overview_range_for_pointer,
-        overview_view_rect,
+        HOUR_US, OverviewCapture, OverviewHover, TimelineBand, TimelineDetailValue,
+        TimelineRenderAction, detail_at, format_day_clock, hour_label, initial_view_range,
+        overview_hover_at_pointer, overview_range_for_pointer, overview_view_rect,
     };
     use crate::TodayAction;
 
@@ -2038,5 +2136,29 @@ mod tests {
         )
         .expect("navigator pan remains a valid range");
         assert_eq!(panned, range(12 * HOUR_US, 18 * HOUR_US));
+    }
+
+    #[test]
+    fn overview_hover_distinguishes_live_window_body_edges_and_empty_track() {
+        let day = range(0, 24 * HOUR_US);
+        let view = range(6 * HOUR_US, 12 * HOUR_US);
+        let overview = Rect::from_min_max(pos2(0.0, 0.0), pos2(240.0, 24.0));
+
+        assert_eq!(
+            overview_hover_at_pointer(pos2(90.0, 12.0), overview, day, view),
+            Some(OverviewHover::Body)
+        );
+        assert_eq!(
+            overview_hover_at_pointer(pos2(60.0, 12.0), overview, day, view),
+            Some(OverviewHover::StartEdge)
+        );
+        assert_eq!(
+            overview_hover_at_pointer(pos2(120.0, 12.0), overview, day, view),
+            Some(OverviewHover::EndEdge)
+        );
+        assert_eq!(
+            overview_hover_at_pointer(pos2(200.0, 12.0), overview, day, view),
+            None
+        );
     }
 }

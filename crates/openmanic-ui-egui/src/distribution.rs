@@ -424,14 +424,14 @@ pub fn render_distribution_snapshot(ui: &mut egui::Ui, snapshot: &DistributionSn
             });
         });
         let (bar, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 5.0), egui::Sense::hover());
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
         ui.painter()
-            .rect_filled(bar, 2.5, ui.visuals().faint_bg_color);
+            .rect_filled(bar, 3.5, ui.visuals().faint_bg_color);
         let bounded = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
         let width = bar.width() * (f32::from(bounded) / 10_000.0);
         ui.painter().rect_filled(
             egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
-            2.5,
+            3.5,
             color,
         );
         ui.add_space(4.0);

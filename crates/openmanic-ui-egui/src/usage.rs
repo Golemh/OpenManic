@@ -402,7 +402,7 @@ fn render_usage_row(ui: &mut Ui, row: &UsageRow) {
         .inner_margin(egui::Margin::symmetric(9, 7))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.colored_label(accent, "●");
+                paint_usage_marker(ui, accent);
                 ui.strong(row.label());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.colored_label(
@@ -412,14 +412,14 @@ fn render_usage_row(ui: &mut Ui, row: &UsageRow) {
                 });
             });
             let (bar, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 4.0), egui::Sense::hover());
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
             ui.painter()
-                .rect_filled(bar, 2.0, ui.visuals().faint_bg_color);
+                .rect_filled(bar, 3.5, ui.visuals().faint_bg_color);
             let hundredths = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
             let width = bar.width() * (f32::from(hundredths) / 10_000.0);
             ui.painter().rect_filled(
                 egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
-                2.0,
+                3.5,
                 accent,
             );
             ui.horizontal(|ui| {
@@ -429,6 +429,11 @@ fn render_usage_row(ui: &mut Ui, row: &UsageRow) {
                 });
             });
         });
+}
+
+fn paint_usage_marker(ui: &mut Ui, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
 fn usage_accent(application_id: Option<ApplicationId>, label: &str) -> egui::Color32 {

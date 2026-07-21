@@ -3571,16 +3571,23 @@ const fn tracking_status_label(status: &MutationStatus) -> &'static str {
     }
 }
 
-fn today_widget_icon(kind: TodayWidgetKind) -> &'static str {
-    if kind == TodayWidgetKind::TIMELINE {
-        "▦"
+fn paint_today_widget_marker(
+    ui: &mut eframe::egui::Ui,
+    kind: TodayWidgetKind,
+    tokens: openmanic_ui_egui::ThemeTokens,
+) {
+    let color = if kind == TodayWidgetKind::TIMELINE {
+        eframe::egui::Color32::from_rgb(59, 130, 246)
     } else if kind == TodayWidgetKind::APPLICATION_USAGE {
-        "▤"
+        eframe::egui::Color32::from_rgb(6, 182, 212)
     } else if kind == TodayWidgetKind::TIME_DISTRIBUTION {
-        "◒"
+        eframe::egui::Color32::from_rgb(168, 85, 247)
     } else {
-        "◇"
-    }
+        tokens.success()
+    };
+    let (rect, _) =
+        ui.allocate_exact_size(eframe::egui::vec2(8.0, 8.0), eframe::egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
 }
 
 const fn schedule_status_label(status: &MutationStatus) -> &'static str {
@@ -4681,10 +4688,7 @@ impl VerticalSliceApp {
                                 }
                                 TodayWidgetResolution::Available(definition) => {
                                     ui.horizontal(|ui| {
-                                        ui.colored_label(
-                                            tokens.interaction_primary(),
-                                            today_widget_icon(definition.kind()),
-                                        );
+                                        paint_today_widget_marker(ui, definition.kind(), tokens);
                                         ui.label(
                                             eframe::egui::RichText::new(
                                                 definition.display_name().to_uppercase(),
