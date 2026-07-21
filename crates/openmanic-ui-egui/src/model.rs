@@ -34,7 +34,7 @@ impl Route {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::Today => "Today",
+            Self::Today => "Tracker",
             Self::Overview => "Overview",
             Self::Categories => "Categories",
             Self::Calendar => "Calendar",

@@ -50,7 +50,7 @@ impl ApplicationUsage {
 
     /// Returns the exact aggregated duration in microseconds.
     #[must_use]
-    pub(crate) const fn duration_us(&self) -> u64 {
+    pub const fn duration_us(&self) -> u64 {
         self.duration_us
     }
 }
@@ -83,7 +83,7 @@ impl ApplicationUsageSnapshot {
 
     /// Returns the unmodified immutable application totals.
     #[must_use]
-    pub(crate) fn applications(&self) -> &[ApplicationUsage] {
+    pub fn applications(&self) -> &[ApplicationUsage] {
         &self.applications
     }
 }
@@ -392,48 +392,39 @@ fn render_usage_rows(ui: &mut Ui, rows: &[UsageRow]) {
 fn render_usage_row(ui: &mut Ui, row: &UsageRow) {
     let percentage = row.percentage().hundredths();
     let accent = usage_accent(row.application_id(), row.label());
-    egui::Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
-        .stroke(egui::Stroke::new(
-            1.0,
-            ui.visuals().widgets.inactive.bg_stroke.color,
-        ))
-        .corner_radius(8.0)
-        .inner_margin(egui::Margin::symmetric(9, 7))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                paint_usage_marker(ui, accent);
-                ui.strong(row.label());
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.colored_label(
-                        accent,
-                        format!("{}.{:02}%", percentage / 100, percentage % 100),
-                    );
-                });
-            });
-            let (bar, _) =
-                ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), egui::Sense::hover());
-            ui.painter()
-                .rect_filled(bar, 3.5, ui.visuals().faint_bg_color);
-            let hundredths = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
-            let width = bar.width() * (f32::from(hundredths) / 10_000.0);
-            ui.painter().rect_filled(
-                egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
-                3.5,
-                accent,
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.horizontal(|ui| {
+            crate::design::color_dot(ui, accent, 11.0);
+            ui.label(
+                egui::RichText::new(row.label())
+                    .size(13.5)
+                    .strong()
+                    .color(crate::design::TEXT_SECONDARY),
             );
-            ui.horizontal(|ui| {
-                ui.small(format_duration(row.duration_us()));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.colored_label(ui.visuals().weak_text_color(), "Active during this day");
-                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(format_duration(row.duration_us()))
+                        .size(12.5)
+                        .monospace()
+                        .color(crate::design::TEXT_SECTION),
+                );
             });
         });
-}
-
-fn paint_usage_marker(ui: &mut Ui, color: egui::Color32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter().circle_filled(rect.center(), 4.0, color);
+        let (bar, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 9.0), egui::Sense::hover());
+        ui.painter().rect_filled(bar, 6.0, crate::design::TRACK);
+        let hundredths = u16::try_from(percentage.min(10_000)).unwrap_or(10_000);
+        let width = bar.width() * (f32::from(hundredths) / 10_000.0);
+        if width >= 1.0 {
+            crate::design::paint_bar_gradient(
+                ui.painter(),
+                egui::Rect::from_min_size(bar.min, egui::vec2(width, bar.height())),
+                accent,
+            );
+        }
+        ui.add_space(4.0);
+    });
 }
 
 fn usage_accent(application_id: Option<ApplicationId>, label: &str) -> egui::Color32 {
@@ -445,15 +436,8 @@ fn usage_accent(application_id: Option<ApplicationId>, label: &str) -> egui::Col
         egui::Color32::from_rgb(81, 104, 220),
         egui::Color32::from_rgb(21, 201, 152),
     ];
-    let normalized = label.to_ascii_lowercase();
-    if normalized.contains("chrome") {
-        return egui::Color32::from_rgb(59, 130, 246);
-    }
-    if normalized.contains("discord") {
-        return egui::Color32::from_rgb(139, 92, 246);
-    }
-    if normalized.contains("slack") {
-        return egui::Color32::from_rgb(6, 182, 212);
+    if let Some(brand) = crate::design::application_brand_color(label) {
+        return brand;
     }
     application_id.map_or(PALETTE[0], |id| {
         let bytes = id.as_bytes();

@@ -161,8 +161,8 @@ mod native {
                 WindowsAndMessaging::{
                     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IDI_APPLICATION,
                     LoadIconW, MF_STRING, RegisterWindowMessageW, SetForegroundWindow,
-                    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
-                    WM_COMMAND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+                    TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                    WM_APP, WM_COMMAND, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
                 },
             },
         },
@@ -384,7 +384,7 @@ mod native {
         }
 
         fn populate_and_show_menu(
-            &self,
+            &mut self,
             menu: windows::Win32::UI::WindowsAndMessaging::HMENU,
         ) -> Result<(), WindowsTrayError> {
             append_menu_item(menu, MENU_OPEN, "Open")?;
@@ -397,11 +397,11 @@ mod native {
             unsafe { GetCursorPos(&raw mut point) }.map_err(|_| WindowsTrayError::Menu)?;
             // SAFETY: The control window owns the normal message loop. This is the standard
             // notification-area popup sequence and retains no caller-owned pointer.
-            let displayed = unsafe {
+            let selected_menu_id = unsafe {
                 let _ = SetForegroundWindow(self.control_window);
                 TrackPopupMenu(
                     menu,
-                    TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
+                    TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
                     point.x,
                     point.y,
                     None,
@@ -409,11 +409,21 @@ mod native {
                     None,
                 )
             };
-            if displayed.as_bool() {
-                Ok(())
-            } else {
-                Err(WindowsTrayError::Menu)
+            // `TPM_RETURNCMD` keeps command delivery on this control-loop call stack.
+            // Without it, Windows sends WM_COMMAND directly to the hidden window procedure
+            // while the popup owns a nested message loop, bypassing the bounded tray queue.
+            let selected_menu_id = selected_menu_id.0;
+            if selected_menu_id == 0 {
+                return Ok(());
             }
+            let Some(action) = usize::try_from(selected_menu_id)
+                .ok()
+                .and_then(action_for_menu_id)
+            else {
+                return Err(WindowsTrayError::Menu);
+            };
+            self.controller.on_menu_action(action);
+            Ok(())
         }
 
         fn icon_data(

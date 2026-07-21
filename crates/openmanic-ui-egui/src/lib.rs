@@ -15,6 +15,7 @@ compile_error!("select one renderer: renderer-wgpu or renderer-glow");
 mod app;
 mod calendar;
 mod controller;
+pub mod design;
 mod distribution;
 mod jobs;
 mod layout;
