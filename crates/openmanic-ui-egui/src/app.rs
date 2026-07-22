@@ -18,6 +18,8 @@ pub struct OpenManicApp<P, T> {
     theme: crate::ThemeController,
     theme_key: String,
     theme_applied: bool,
+    header_tracking_enabled: Option<bool>,
+    header_tracking_toggle_requested: bool,
 }
 
 impl<P, T> OpenManicApp<P, T> {
@@ -36,6 +38,8 @@ impl<P, T> OpenManicApp<P, T> {
             theme: crate::ThemeController::default(),
             theme_key: theme_key.into(),
             theme_applied: false,
+            header_tracking_enabled: None,
+            header_tracking_toggle_requested: false,
         }
     }
 
@@ -71,6 +75,17 @@ impl<P, T> OpenManicApp<P, T> {
     pub const fn theme_tokens(&self) -> crate::ThemeTokens {
         self.theme.current().tokens()
     }
+
+    /// Supplies the confirmed tracking state rendered in the global header.
+    pub fn set_header_tracking_enabled(&mut self, enabled: bool) {
+        self.header_tracking_enabled = Some(enabled);
+    }
+
+    /// Takes one pending global-header tracking toggle request.
+    #[must_use]
+    pub fn take_header_tracking_toggle_request(&mut self) -> bool {
+        std::mem::take(&mut self.header_tracking_toggle_requested)
+    }
 }
 
 impl<P, T> eframe::App for OpenManicApp<P, T>
@@ -96,7 +111,14 @@ where
             self.repaint.request(RepaintReason::InboundWork);
         }
         let theme_tokens = self.theme_tokens();
-        if shell::render(ui, self.controller.model_mut(), theme_tokens) {
+        let shell_output = shell::render(
+            ui,
+            self.controller.model_mut(),
+            theme_tokens,
+            self.header_tracking_enabled,
+        );
+        self.header_tracking_toggle_requested |= shell_output.tracking_toggle_requested;
+        if shell_output.changed || shell_output.tracking_toggle_requested {
             self.repaint.request(RepaintReason::UserInput);
         }
         self.repaint.request_if_needed(&context);

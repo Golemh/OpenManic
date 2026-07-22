@@ -1,6 +1,6 @@
 //! Application shell chrome styled after the OpenManic Studio design.
 //!
-//! Renders the fixed title bar (logo chip, wordmark, navigation pills, live
+//! Renders the title bar (logo chip, wordmark, navigation pills, live
 //! monitoring indicator), plus shared presentation and mutation notices.
 
 use eframe::egui::{self, Align, Color32, CornerRadius, RichText, Stroke, StrokeKind};
@@ -10,31 +10,62 @@ use crate::{
     UiModel, design,
 };
 
-/// Renders the application shell and returns whether ordinary input changed state.
-pub(crate) fn render<T>(ui: &mut egui::Ui, model: &mut UiModel<T>, tokens: ThemeTokens) -> bool {
-    let mut changed = false;
+/// One frame of interaction emitted by the shared application shell.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ShellOutput {
+    pub(crate) changed: bool,
+    pub(crate) tracking_toggle_requested: bool,
+}
+
+/// Renders the application shell and returns its bounded interaction output.
+pub(crate) fn render<T>(
+    ui: &mut egui::Ui,
+    model: &mut UiModel<T>,
+    tokens: ThemeTokens,
+    tracking_enabled: Option<bool>,
+) -> ShellOutput {
+    let mut output = ShellOutput::default();
     egui::Frame::new()
         .fill(design::TITLEBAR)
         .inner_margin(egui::Margin::symmetric(22, 12))
-        .show(ui, |ui| changed |= render_navigation(ui, model));
-    // 1px title-bar bottom border.
-    let separator_rect =
-        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 1.0));
-    ui.painter()
-        .rect_filled(separator_rect, 0.0, design::TITLEBAR_BORDER);
-
-    egui::Frame::new()
-        .fill(tokens.canvas())
-        .inner_margin(egui::Margin::symmetric(26, 22))
         .show(ui, |ui| {
-            changed |= render_presentation_state(ui, model.data(), tokens);
-            changed |= render_mutation_state(ui, model, tokens);
+            let navigation = render_navigation(ui, model, tracking_enabled);
+            output.changed |= navigation.changed;
+            output.tracking_toggle_requested |= navigation.tracking_toggle_requested;
         });
-    changed
+    // 1px title-bar bottom border.
+    let separator_y = ui.cursor().min.y;
+    ui.painter().hline(
+        ui.max_rect().x_range(),
+        separator_y,
+        Stroke::new(1.0, design::TITLEBAR_BORDER),
+    );
+
+    let has_presentation_notice = !matches!(model.data(), PresentableData::Ready(_));
+    let has_mutation_notice = latest_mutation(model)
+        .is_some_and(|(_, status)| !matches!(status, MutationStatus::Confirmed { .. }));
+    if has_presentation_notice || has_mutation_notice {
+        egui::Frame::new()
+            .fill(tokens.canvas())
+            .inner_margin(egui::Margin::symmetric(26, 11))
+            .show(ui, |ui| {
+                output.changed |= render_presentation_state(ui, model.data(), tokens);
+                output.changed |= render_mutation_state(ui, model, tokens);
+            });
+    }
+    output
 }
 
-fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
-    let mut changed = false;
+#[expect(
+    clippy::excessive_nesting,
+    reason = "the single header row keeps navigation state and its action adjacent"
+)]
+fn render_navigation<T>(
+    ui: &mut egui::Ui,
+    model: &mut UiModel<T>,
+    tracking_enabled: Option<bool>,
+) -> ShellOutput {
+    let mut output = ShellOutput::default();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
         render_logo_chip(ui);
@@ -50,7 +81,7 @@ fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
             for route in Route::all() {
                 if design::nav_pill(ui, route.label(), model.route() == route) {
                     crate::reducer::reduce(model, UiAction::Navigate(route));
-                    changed = true;
+                    output.changed = true;
                 }
             }
         });
@@ -68,9 +99,13 @@ fn render_navigation<T>(ui: &mut egui::Ui, model: &mut UiModel<T>) -> bool {
             }
             ui.add_space(5.0);
             render_monitoring_indicator(ui);
+            if let Some(tracking_enabled) = tracking_enabled {
+                ui.add_space(5.0);
+                output.tracking_toggle_requested |= design::tracking_button(ui, tracking_enabled);
+            }
         });
     });
-    changed
+    output
 }
 
 fn render_logo_chip(ui: &mut egui::Ui) {
@@ -82,7 +117,23 @@ fn render_logo_chip(ui: &mut egui::Ui) {
         CornerRadius::same(12),
         design::ACCENT.gamma_multiply(0.18),
     );
-    design::paint_cell_gradient(painter, rect, design::ACCENT_LIGHT);
+    let mut mesh = egui::epaint::Mesh::default();
+    let index = u32::try_from(mesh.vertices.len()).unwrap_or(0);
+    for (position, color) in [
+        (rect.left_top(), design::ACCENT_LIGHT),
+        (rect.right_top(), design::ACCENT),
+        (rect.right_bottom(), design::ACCENT),
+        (rect.left_bottom(), design::ACCENT_LIGHT),
+    ] {
+        mesh.vertices.push(egui::epaint::Vertex {
+            pos: position,
+            uv: egui::epaint::WHITE_UV,
+            color,
+        });
+    }
+    mesh.indices
+        .extend_from_slice(&[index, index + 1, index + 2, index, index + 2, index + 3]);
+    painter.add(mesh);
     painter.rect_stroke(
         rect,
         CornerRadius::same(9),
@@ -177,9 +228,7 @@ fn render_mutation_state<T>(ui: &mut egui::Ui, model: &UiModel<T>, tokens: Theme
             "A change is waiting for confirmation.".to_owned(),
             tokens.warning(),
         ),
-        MutationStatus::Confirmed { .. } => {
-            ("The last change was saved.".to_owned(), tokens.success())
-        }
+        MutationStatus::Confirmed { .. } => return false,
         MutationStatus::Rejected { reason } => (
             format!("The last change was not saved: {reason}."),
             tokens.error(),

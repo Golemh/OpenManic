@@ -19,21 +19,24 @@ use std::{
 };
 
 use super::{
-    PaintFill, PaintPrimitive, TimelineBand, TimelineDetail, TimelineDetailValue, TimelineGesture,
-    TimelineGestureEvent, TimelineInteraction, TimelinePaintPlan, TimelineTransform, hit_test,
-    prepare_schedule_overlays,
+    AdaptiveTickLayout, PaintFill, PaintPrimitive, TimelineBand, TimelineDetail,
+    TimelineDetailValue, TimelineGesture, TimelineGestureEvent, TimelineInteraction,
+    TimelinePaintPlan, TimelineTransform, hit_test, prepare_schedule_overlays,
 };
-use crate::{DataLimitation, PresentableData, ThemeTokens, TodayAction, TodayViewContext};
+use crate::{
+    DataLimitation, PresentableData, ThemeTokens, TodayAction, TodayCategoryFilter,
+    TodayViewContext,
+};
 
-const BAND_LABEL_WIDTH: f32 = 96.0;
-const OVERVIEW_TOP_PADDING: f32 = 22.0;
-const OVERVIEW_HEIGHT: f32 = 24.0;
-const OVERVIEW_AXIS_GAP: f32 = 8.0;
+const BAND_LABEL_WIDTH: f32 = 22.0;
+const OVERVIEW_TOP_PADDING: f32 = 45.0;
+const OVERVIEW_HEIGHT: f32 = 44.0;
+const OVERVIEW_AXIS_GAP: f32 = 12.0;
 const TICK_HEIGHT: f32 = 24.0;
-const CATEGORY_BAND_HEIGHT: f32 = 112.0;
-const ACTIVITY_BAND_HEIGHT: f32 = 16.0;
-const APPLICATION_BAND_HEIGHT: f32 = 16.0;
-const BAND_GAP: f32 = 8.0;
+const CATEGORY_BAND_HEIGHT: f32 = 132.0;
+const ACTIVITY_BAND_HEIGHT: f32 = 14.0;
+const APPLICATION_BAND_HEIGHT: f32 = 26.0;
+const BAND_GAP: f32 = 6.0;
 const TIMELINE_BOTTOM_PADDING: f32 = 6.0;
 const TIMELINE_HEIGHT: f32 = OVERVIEW_TOP_PADDING
     + OVERVIEW_HEIGHT
@@ -123,6 +126,7 @@ impl TimelineRenderOutput {
 pub struct TimelineRenderer {
     interaction: Option<TimelineInteraction>,
     persistent_detail: Option<TimelineDetail>,
+    schedule_preview: Option<HalfOpenInterval>,
     primary_down: bool,
     middle_down: bool,
     pressed_band: Option<TimelineBand>,
@@ -165,6 +169,7 @@ impl TimelineRenderer {
         Self {
             interaction: None,
             persistent_detail: None,
+            schedule_preview: None,
             primary_down: false,
             middle_down: false,
             pressed_band: None,
@@ -213,6 +218,7 @@ impl TimelineRenderer {
         if changed {
             self.interaction = Some(TimelineInteraction::new(default_range));
             self.overview_capture = None;
+            self.schedule_preview = None;
             self.primary_down = false;
             self.middle_down = false;
             self.auto_follow_default = true;
@@ -404,6 +410,7 @@ impl TimelineRenderer {
                 .is_some_and(|interaction| interaction.view_range() != default_range);
         if day_changed || self.interaction.is_none() || default_changed_while_following {
             self.interaction = Some(TimelineInteraction::new(default_range));
+            self.schedule_preview = None;
             self.snapshot_range = Some(day_range);
             self.default_view_range = Some(default_range);
             self.auto_follow_default = true;
@@ -521,6 +528,9 @@ impl TimelineRenderer {
             && pointer_over_bands
             && (input.scroll.x != 0.0 || input.scroll.y != 0.0)
         {
+            // The timeline owns wheel input while the pointer is over a lane. Clear the shared
+            // delta after copying it so an enclosing page ScrollArea cannot also move this frame.
+            ui.input_mut(|state| state.smooth_scroll_delta = Vec2::ZERO);
             return input.pointer.map(|pointer| TimelineGesture::Scrolled {
                 x: pointer.x,
                 horizontal_delta: input.scroll.x,
@@ -544,11 +554,17 @@ impl TimelineRenderer {
         let response = interaction.respond(transform, gesture);
         match response.event() {
             Some(TimelineGestureEvent::Clicked { instant }) => {
-                let detail = self
-                    .pressed_band
-                    .and_then(|band| detail_at(snapshot, band, instant));
-                self.persistent_detail = detail;
-                if detail.is_none() {
+                self.schedule_preview = None;
+                let pressed_band = self.pressed_band;
+                let detail = pressed_band.and_then(|band| detail_at(snapshot, band, instant));
+                let action = detail.and_then(TimelineDetail::action);
+                self.persistent_detail = action.is_none().then_some(detail).flatten();
+                if let Some(action) = action {
+                    output
+                        .actions
+                        .push(TimelineRenderAction::Today(TodayAction::ClearAllNarrowing));
+                    output.actions.push(TimelineRenderAction::Today(action));
+                } else if detail.is_none() {
                     output.actions.push(TimelineRenderAction::Today(
                         TodayAction::SetTimelineSelection { selection: None },
                     ));
@@ -556,6 +572,7 @@ impl TimelineRenderer {
                 self.pressed_band = None;
             }
             Some(TimelineGestureEvent::RangeSelected { range }) => {
+                self.schedule_preview = None;
                 output.actions.push(TimelineRenderAction::Today(
                     TodayAction::SetTimelineSelection {
                         selection: Some(range),
@@ -564,6 +581,7 @@ impl TimelineRenderer {
                 self.pressed_band = None;
             }
             Some(TimelineGestureEvent::ScheduleRequested { range }) => {
+                self.schedule_preview = None;
                 output
                     .actions
                     .push(TimelineRenderAction::ScheduleRequested { range });
@@ -583,13 +601,13 @@ impl TimelineRenderer {
                 }
             }
             Some(TimelineGestureEvent::Cancelled) => {
+                self.schedule_preview = None;
                 self.pressed_band = None;
             }
-            Some(
-                TimelineGestureEvent::RangePreview { .. }
-                | TimelineGestureEvent::SchedulePreview { .. },
-            )
-            | None => {}
+            Some(TimelineGestureEvent::SchedulePreview { range }) => {
+                self.schedule_preview = Some(range);
+            }
+            Some(TimelineGestureEvent::RangePreview { .. }) | None => {}
         }
     }
 
@@ -619,18 +637,23 @@ impl TimelineRenderer {
             snapshot,
             transform.visible_range(),
             &self.category_labels,
-            layout.overview_hover,
+            OverviewState {
+                hover: layout.overview_hover,
+                selected_category: single_selected_category(context),
+            },
             self.theme_tokens,
         );
-        paint_band_labels(painter, layout.bands, self.theme_tokens);
+        paint_band_tracks(painter, layout.bands, self.theme_tokens);
         let plan = TimelinePaintPlan::from_snapshot(transform, snapshot);
         if self.lane_visibility[CATEGORY_LANE] {
+            let selected_category = single_selected_category(context);
             paint_category_band(
                 painter,
                 plan.category(),
                 layout.bands.category,
                 &self.category_labels,
                 true,
+                selected_category,
             );
         }
         paint_activity_band(
@@ -647,6 +670,8 @@ impl TimelineRenderer {
                 plan.application(),
                 layout.bands.application,
                 &self.application_labels,
+                single_selected_category(context),
+                snapshot,
             );
         }
         paint_hour_axis(
@@ -669,6 +694,13 @@ impl TimelineRenderer {
             transform,
             layout.bands,
             context.timeline_selection(),
+            self.theme_tokens,
+        );
+        paint_schedule_preview(
+            painter,
+            transform,
+            layout.bands,
+            self.schedule_preview,
             self.theme_tokens,
         );
         paint_persistent_selection(painter, transform, layout.bands, self.persistent_detail);
@@ -745,34 +777,72 @@ fn paint_schedule_overlays(
     ) {
         let adjusted = overlay.occurrence().adjusted();
         let pixels = overlay.bracket().range().pixels();
-        let top = band_rects.category.min.y + 2.0;
-        let bottom = band_rects.application.max.y - 2.0;
-        let stroke = Stroke::new(
-            if adjusted { 2.0 } else { 1.0 },
+        let top = band_rects.category.min.y - 9.0;
+        let bottom = band_rects.category.min.y;
+        let left = pixels.start_x();
+        let right = pixels.end_x();
+        let corner = ((right - left) * 0.5).min(6.0);
+        let bracket_points = vec![
+            Pos2::new(left, bottom),
+            Pos2::new(left, top + corner),
+            Pos2::new(left + corner, top),
+            Pos2::new(right - corner, top),
+            Pos2::new(right, top + corner),
+            Pos2::new(right, bottom),
+        ];
+        for (width, alpha) in [(6.0, 0.08), (3.5, 0.15)] {
+            painter.add(egui::Shape::line(
+                bracket_points.clone(),
+                Stroke::new(width, theme_tokens.schedule_bracket().gamma_multiply(alpha)),
+            ));
+        }
+        painter.add(egui::Shape::line(
+            bracket_points,
+            Stroke::new(
+                if adjusted { 2.25 } else { 1.5 },
+                theme_tokens.schedule_bracket(),
+            ),
+        ));
+        let label_x = (pixels.start_x() + pixels.end_x()) * 0.5;
+        painter.text(
+            Pos2::new(label_x + 0.5, top - 2.5),
+            Align2::CENTER_BOTTOM,
+            overlay.occurrence().label(),
+            FontId::proportional(10.5),
+            Color32::BLACK.gamma_multiply(0.65),
+        );
+        painter.text(
+            Pos2::new(label_x, top - 3.0),
+            Align2::CENTER_BOTTOM,
+            overlay.occurrence().label(),
+            FontId::proportional(10.5),
             theme_tokens.schedule_bracket(),
         );
-        painter.line_segment(
-            [
-                Pos2::new(pixels.start_x(), top),
-                Pos2::new(pixels.end_x(), top),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                Pos2::new(pixels.start_x(), top),
-                Pos2::new(pixels.start_x(), bottom),
-            ],
-            stroke,
-        );
-        painter.line_segment(
-            [
-                Pos2::new(pixels.end_x(), top),
-                Pos2::new(pixels.end_x(), bottom),
-            ],
-            stroke,
-        );
     }
+}
+
+fn paint_schedule_preview(
+    painter: &Painter,
+    transform: TimelineTransform,
+    bands: BandRects,
+    preview: Option<HalfOpenInterval>,
+    theme_tokens: ThemeTokens,
+) {
+    let Some(preview) = preview.and_then(|range| transform.range_geometry(range)) else {
+        return;
+    };
+    let highlight = Rect::from_min_max(
+        Pos2::new(preview.pixels().start_x(), bands.category.min.y),
+        Pos2::new(preview.pixels().end_x(), bands.application.max.y),
+    );
+    let cyan = theme_tokens.schedule_bracket();
+    painter.rect_filled(highlight, 4.0, cyan.gamma_multiply(0.17));
+    painter.rect_stroke(
+        highlight,
+        4.0,
+        Stroke::new(1.5, cyan.gamma_multiply(0.90)),
+        egui::StrokeKind::Inside,
+    );
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -802,6 +872,12 @@ enum OverviewCapture {
     ResizeEnd {
         initial: HalfOpenInterval,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OverviewState {
+    hover: Option<OverviewHover>,
+    selected_category: Option<TodayCategoryFilter>,
 }
 
 impl OverviewCapture {
@@ -1110,23 +1186,8 @@ fn overview_range_for_pointer(
     .ok()
 }
 
-fn paint_band_labels(painter: &Painter, bands: BandRects, theme_tokens: ThemeTokens) {
-    for (band, rect) in [
-        (TimelineBand::Category, bands.category),
-        (TimelineBand::Activity, bands.activity),
-        (TimelineBand::Application, bands.application),
-    ] {
-        painter.text(
-            Pos2::new(rect.min.x - BAND_LABEL_WIDTH + 8.0, rect.center().y),
-            Align2::LEFT_CENTER,
-            band.label(),
-            FontId::proportional(if band == TimelineBand::Category {
-                12.0
-            } else {
-                10.0
-            }),
-            theme_tokens.content_primary(),
-        );
+fn paint_band_tracks(painter: &Painter, bands: BandRects, theme_tokens: ThemeTokens) {
+    for rect in [bands.category, bands.activity, bands.application] {
         painter.rect_filled(rect, 4.0, TRACK);
         painter.rect_stroke(
             rect,
@@ -1143,28 +1204,40 @@ fn paint_overview(
     snapshot: &TimelineSnapshot,
     view_range: HalfOpenInterval,
     category_labels: &BTreeMap<CategoryId, String>,
-    hover: Option<OverviewHover>,
+    state: OverviewState,
     theme_tokens: ThemeTokens,
 ) {
     painter.text(
         Pos2::new(
             overview_rect.min.x - BAND_LABEL_WIDTH + 8.0,
-            overview_rect.min.y - 9.0,
+            overview_rect.min.y - 22.0,
         ),
         Align2::LEFT_CENTER,
         "24-HOUR VIEWFINDER",
         FontId::proportional(10.0),
         theme_tokens.content_secondary(),
     );
+    let view_label = format!(
+        "View {}",
+        format_view_range(view_range, snapshot.visible_range())
+    );
+    let view_chip = Rect::from_min_size(
+        Pos2::new(overview_rect.max.x - 178.0, overview_rect.min.y - 35.0),
+        Vec2::new(178.0, 26.0),
+    );
+    painter.rect(
+        view_chip,
+        egui::CornerRadius::same(8),
+        crate::design::ACCENT.gamma_multiply(0.15),
+        Stroke::new(1.0, crate::design::ACCENT.gamma_multiply(0.75)),
+        egui::StrokeKind::Inside,
+    );
     painter.text(
-        Pos2::new(overview_rect.max.x, overview_rect.min.y - 9.0),
-        Align2::RIGHT_CENTER,
-        format!(
-            "View: {} UTC",
-            format_detail_range(view_range, snapshot.visible_range())
-        ),
-        FontId::proportional(10.0),
-        theme_tokens.interaction_primary(),
+        view_chip.center(),
+        Align2::CENTER_CENTER,
+        view_label,
+        FontId::monospace(11.0),
+        crate::design::ACCENT_TEXT,
     );
     painter.rect_filled(overview_rect, 4.0, SUBWIDGET);
     painter.rect_stroke(
@@ -1181,12 +1254,18 @@ fn paint_overview(
         return;
     };
     let plan = TimelinePaintPlan::from_snapshot(day_transform, snapshot);
-    paint_overview_day_map(painter, overview_rect, &plan, category_labels);
+    paint_overview_day_map(
+        painter,
+        overview_rect,
+        &plan,
+        category_labels,
+        state.selected_category,
+    );
     let Some(viewport) = overview_view_rect(overview_rect, snapshot.visible_range(), view_range)
     else {
         return;
     };
-    paint_overview_window(painter, viewport, hover);
+    paint_overview_window(painter, viewport, state.hover);
 }
 
 fn paint_overview_day_map(
@@ -1194,6 +1273,7 @@ fn paint_overview_day_map(
     overview_rect: Rect,
     plan: &TimelinePaintPlan<'_>,
     category_labels: &BTreeMap<CategoryId, String>,
+    selected_category: Option<TodayCategoryFilter>,
 ) {
     let day_map_rect = Rect::from_min_max(
         Pos2::new(overview_rect.left(), overview_rect.top() + 2.0),
@@ -1213,7 +1293,24 @@ fn paint_overview_day_map(
                 CategoryBandValue::Uncategorized => Color32::from_rgb(51, 65, 85),
                 CategoryBandValue::NonApplicationState(state) => activity_color(*state),
             };
-            color.gamma_multiply(0.30)
+            let selected = match (selected_category, value) {
+                (
+                    Some(TodayCategoryFilter::Category(selected)),
+                    CategoryBandValue::Category(category_id),
+                ) => selected == *category_id,
+                (Some(TodayCategoryFilter::Uncategorized), CategoryBandValue::Uncategorized)
+                | (None, _) => true,
+                _ => false,
+            };
+            color.gamma_multiply(if selected {
+                if selected_category.is_some() {
+                    0.65
+                } else {
+                    0.30
+                }
+            } else {
+                0.10
+            })
         },
         |_| None,
     );
@@ -1289,42 +1386,29 @@ fn paint_hour_axis(
     axis_top: f32,
     day_range: HalfOpenInterval,
     transform: TimelineTransform,
-    bands: BandRects,
+    _bands: BandRects,
     theme_tokens: ThemeTokens,
 ) {
-    const TICK_INTERVALS: u64 = 5;
-    let visible = transform.visible_range();
-    for tick_index in 0..=TICK_INTERVALS {
-        let offset = visible.duration_us().saturating_mul(tick_index) / TICK_INTERVALS;
-        let instant = UtcMicros::new(
-            visible
-                .start()
-                .get()
-                .saturating_add(i64::try_from(offset).unwrap_or(i64::MAX)),
-        );
-        let x = transform.x_for(instant);
-        let alignment = if tick_index == 0 {
-            Align2::LEFT_TOP
-        } else if tick_index == TICK_INTERVALS {
-            Align2::RIGHT_TOP
-        } else {
-            Align2::CENTER_TOP
-        };
+    let Ok(layout) = AdaptiveTickLayout::try_new(48.0, 8.0) else {
+        return;
+    };
+    for tick in layout.generate(transform).ticks() {
+        let instant = tick.instant();
+        let x = tick.x();
         painter.text(
             Pos2::new(x, axis_top + 2.0),
-            alignment,
+            Align2::CENTER_TOP,
             format_day_clock(day_range, instant),
             FontId::proportional(10.0),
             theme_tokens.content_secondary(),
         );
-        painter.line_segment(
-            [
-                Pos2::new(x, bands.category.min.y),
-                Pos2::new(x, bands.application.max.y),
-            ],
-            Stroke::new(0.75, theme_tokens.timeline_grid()),
-        );
     }
+}
+
+fn single_selected_category(context: &TodayViewContext) -> Option<TodayCategoryFilter> {
+    (context.category_filter().len() == 1)
+        .then(|| context.category_filter().iter().next().copied())
+        .flatten()
 }
 
 #[cfg(test)]
@@ -1344,6 +1428,7 @@ fn paint_category_band(
     rect: Rect,
     labels: &BTreeMap<CategoryId, String>,
     show_labels: bool,
+    selected: Option<TodayCategoryFilter>,
 ) {
     paint_band(
         painter,
@@ -1352,12 +1437,29 @@ fn paint_category_band(
         6.0,
         1.5,
         |value| match value {
-            CategoryBandValue::Category(category_id) => category_color_for(*category_id, labels)
-                .gamma_multiply(if show_labels { 1.0 } else { 0.3 }),
-            CategoryBandValue::Uncategorized => {
-                Color32::from_rgb(51, 65, 85).gamma_multiply(if show_labels { 1.0 } else { 0.3 })
+            CategoryBandValue::Category(category_id) => {
+                let selected_or_unfiltered = selected
+                    .is_none_or(|filter| filter == TodayCategoryFilter::Category(*category_id));
+                category_color_for(*category_id, labels).gamma_multiply(
+                    if show_labels && selected_or_unfiltered {
+                        1.0
+                    } else {
+                        0.28
+                    },
+                )
             }
-            CategoryBandValue::NonApplicationState(state) => activity_color(*state),
+            CategoryBandValue::Uncategorized => {
+                let selected_or_unfiltered =
+                    selected.is_none_or(|filter| filter == TodayCategoryFilter::Uncategorized);
+                Color32::from_rgb(51, 65, 85).gamma_multiply(
+                    if show_labels && selected_or_unfiltered {
+                        1.0
+                    } else {
+                        0.28
+                    },
+                )
+            }
+            CategoryBandValue::NonApplicationState(_) => TRACK,
         },
         |value| {
             show_labels.then(|| match value {
@@ -1366,10 +1468,58 @@ fn paint_category_band(
                     .cloned()
                     .unwrap_or_else(|| "Category".to_owned()),
                 CategoryBandValue::Uncategorized => "Uncategorized".to_owned(),
-                CategoryBandValue::NonApplicationState(state) => activity_label(*state).to_owned(),
+                CategoryBandValue::NonApplicationState(_) => String::new(),
             })
         },
     );
+    if let Some(selected) = selected {
+        paint_selected_category_outline(painter, band, rect, selected);
+    }
+}
+
+fn paint_selected_category_outline(
+    painter: &Painter,
+    band: &super::PaintBand<'_, CategoryBandValue>,
+    rect: Rect,
+    selected: TodayCategoryFilter,
+) {
+    for primitive in band.primitives() {
+        let PaintPrimitive::Segment(segment) = primitive else {
+            continue;
+        };
+        let is_selected = match (selected, segment.interval().value()) {
+            (
+                TodayCategoryFilter::Category(selected_id),
+                CategoryBandValue::Category(category_id),
+            ) => selected_id == *category_id,
+            (TodayCategoryFilter::Uncategorized, CategoryBandValue::Uncategorized) => true,
+            _ => false,
+        };
+        if !is_selected || segment.fill() != PaintFill::Visible {
+            continue;
+        }
+        let pixels = segment.geometry().pixels();
+        let mut segment_rect = Rect::from_min_max(
+            Pos2::new(pixels.start_x(), rect.min.y + 1.0),
+            Pos2::new(pixels.end_x().max(pixels.start_x() + 1.0), rect.max.y - 1.0),
+        );
+        if segment_rect.width() > 4.0 {
+            segment_rect.min.x += 1.5;
+            segment_rect.max.x -= 1.5;
+        }
+        painter.rect_stroke(
+            segment_rect,
+            6.0,
+            Stroke::new(2.0, Color32::WHITE),
+            egui::StrokeKind::Inside,
+        );
+        painter.rect_stroke(
+            segment_rect.expand(2.0),
+            7.0,
+            Stroke::new(2.0, Color32::WHITE.gamma_multiply(0.25)),
+            egui::StrokeKind::Outside,
+        );
+    }
 }
 
 fn paint_activity_band(
@@ -1401,6 +1551,8 @@ fn paint_application_band(
     band: &super::PaintBand<'_, ApplicationBandValue>,
     rect: Rect,
     labels: &BTreeMap<ApplicationId, String>,
+    selected_category: Option<TodayCategoryFilter>,
+    snapshot: &TimelineSnapshot,
 ) {
     paint_band(
         painter,
@@ -1412,7 +1564,7 @@ fn paint_application_band(
             ApplicationBandValue::Application(application_id) => {
                 application_color_for(*application_id, labels)
             }
-            ApplicationBandValue::NoApplication(state) => activity_color(*state),
+            ApplicationBandValue::NoApplication(_) => TRACK,
             ApplicationBandValue::UnresolvedApplication => Color32::from_rgb(150, 111, 184),
         },
         |value| match value {
@@ -1423,6 +1575,52 @@ fn paint_application_band(
             ApplicationBandValue::UnresolvedApplication => Some("Unknown app".to_owned()),
         },
     );
+    let Some(selected_category) = selected_category else {
+        return;
+    };
+    for primitive in band.primitives() {
+        let (pixels, instant) = match primitive {
+            PaintPrimitive::Segment(segment) if segment.fill() == PaintFill::Visible => (
+                segment.geometry().pixels(),
+                segment.interval().range().start(),
+            ),
+            PaintPrimitive::Dense(bin) => {
+                let Some(source) = bin
+                    .sources()
+                    .iter()
+                    .find(|source| source.fill() == PaintFill::Visible)
+                else {
+                    continue;
+                };
+                (bin.pixels(), source.interval().range().start())
+            }
+            PaintPrimitive::Segment(_) => continue,
+        };
+        let matches_selection =
+            snapshot
+                .category_band()
+                .at(instant)
+                .is_some_and(|interval| match (selected_category, interval.value()) {
+                    (
+                        TodayCategoryFilter::Category(selected_id),
+                        CategoryBandValue::Category(category_id),
+                    ) => selected_id == *category_id,
+                    (TodayCategoryFilter::Uncategorized, CategoryBandValue::Uncategorized) => true,
+                    _ => false,
+                });
+        if matches_selection {
+            continue;
+        }
+        let mut segment_rect = Rect::from_min_max(
+            Pos2::new(pixels.start_x(), rect.min.y + 1.0),
+            Pos2::new(pixels.end_x().max(pixels.start_x() + 1.0), rect.max.y - 1.0),
+        );
+        if segment_rect.width() > 3.0 {
+            segment_rect.min.x += 1.0;
+            segment_rect.max.x -= 1.0;
+        }
+        painter.rect_filled(segment_rect, 3.0, Color32::from_black_alpha(174));
+    }
 }
 
 fn paint_band<T>(
@@ -1551,18 +1749,6 @@ fn paint_segment_label(painter: &Painter, rect: Rect, label: Option<String>) {
     );
 }
 
-const fn activity_label(state: ActivityState) -> &'static str {
-    match state {
-        ActivityState::Active => "Active",
-        ActivityState::Idle => "Away",
-        ActivityState::PausedByUser => "Paused",
-        ActivityState::Excluded => "Excluded",
-        ActivityState::Unavailable => "Unavailable",
-        ActivityState::PoweredOff => "Powered off",
-        ActivityState::UnknownMissing => "Unknown",
-    }
-}
-
 fn paint_selection(
     painter: &Painter,
     transform: TimelineTransform,
@@ -1647,27 +1833,60 @@ fn render_timeline_legend(
     theme_tokens: ThemeTokens,
     visibility: &mut [bool; 5],
 ) {
+    visibility.fill(true);
     ui.add_space(6.0);
-    ui.horizontal_wrapped(|ui| {
-        ui.colored_label(theme_tokens.content_secondary(), "LEGEND");
-        ui.checkbox(&mut visibility[CATEGORY_LANE], "Category");
-        ui.checkbox(&mut visibility[ACTIVE_STATE], "Active");
-        ui.checkbox(&mut visibility[AWAY_STATE], "Away");
-        ui.checkbox(&mut visibility[APPLICATION_LANE], "Applications");
-        ui.checkbox(&mut visibility[POWERED_OFF_STATE], "Powered off");
-        if let DataCompleteness::Partial {
-            unknown_missing_duration_us,
-        } = snapshot.completeness()
-        {
-            let covered = snapshot
-                .visible_range()
-                .duration_us()
-                .saturating_sub(unknown_missing_duration_us);
-            ui.colored_label(
-                theme_tokens.content_secondary(),
-                format!("Recorded: {}", format_duration(covered)),
+    ui.separator();
+    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        crate::design::section_header(ui, "Legend");
+        crate::design::color_dot(ui, crate::design::ACTIVE, 11.0);
+        ui.label(
+            egui::RichText::new("Active")
+                .size(12.5)
+                .color(crate::design::ACTIVE),
+        );
+        crate::design::color_dot(ui, crate::design::AWAY, 11.0);
+        ui.label(
+            egui::RichText::new("Away")
+                .size(12.5)
+                .color(crate::design::AWAY),
+        );
+        crate::design::color_dot(ui, crate::design::POWERED_OFF, 11.0);
+        ui.label(
+            egui::RichText::new("Powered off")
+                .size(12.5)
+                .color(crate::design::TEXT_MUTED),
+        );
+        let (scheduled_rect, _) = ui.allocate_exact_size(Vec2::new(13.0, 11.0), Sense::hover());
+        ui.painter().line_segment(
+            [scheduled_rect.left_top(), scheduled_rect.right_top()],
+            Stroke::new(2.0, crate::design::SCHEDULED),
+        );
+        for x in [scheduled_rect.left(), scheduled_rect.right()] {
+            ui.painter().line_segment(
+                [
+                    Pos2::new(x, scheduled_rect.top()),
+                    Pos2::new(x, scheduled_rect.bottom()),
+                ],
+                Stroke::new(2.0, crate::design::SCHEDULED),
             );
         }
+        ui.label(
+            egui::RichText::new("Scheduled")
+                .size(12.5)
+                .color(crate::design::SCHEDULED),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(format!(
+                    "Recorded {}",
+                    format_duration(snapshot.totals().known_duration_us())
+                ))
+                .size(12.0)
+                .color(theme_tokens.content_secondary()),
+            );
+        });
     });
 }
 
@@ -1773,10 +1992,36 @@ fn detail_text(detail: TimelineDetail, detail_label: &str, day_range: HalfOpenIn
 
 fn format_detail_range(range: HalfOpenInterval, day_range: HalfOpenInterval) -> String {
     format!(
-        "{} - {}",
+        "{} – {}",
         format_day_clock(day_range, range.start()),
         format_day_clock(day_range, range.end()),
     )
+}
+
+fn format_view_range(range: HalfOpenInterval, day_range: HalfOpenInterval) -> String {
+    format!(
+        "{} – {}",
+        format_day_clock_minutes(day_range, range.start()),
+        format_day_clock_minutes(day_range, range.end()),
+    )
+}
+
+fn format_day_clock_minutes(
+    day_range: HalfOpenInterval,
+    instant: openmanic_domain::UtcMicros,
+) -> String {
+    let elapsed_us = i128::from(instant.get())
+        .saturating_sub(i128::from(day_range.start().get()))
+        .max(0);
+    let total_minutes = u64::try_from(elapsed_us / 60_000_000).unwrap_or(u64::MAX);
+    let hour = (total_minutes / 60) % 24;
+    let minute = total_minutes % 60;
+    let suffix = if hour < 12 { "AM" } else { "PM" };
+    let display_hour = match hour % 12 {
+        0 => 12,
+        value => value,
+    };
+    format!("{display_hour}:{minute:02} {suffix}")
 }
 
 fn format_day_clock(day_range: HalfOpenInterval, instant: openmanic_domain::UtcMicros) -> String {

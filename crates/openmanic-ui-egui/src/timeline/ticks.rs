@@ -69,9 +69,7 @@ impl AdaptiveTickLayout {
     /// Generates evenly aligned tick instants and their shared-transform x coordinates.
     #[must_use]
     pub fn generate(self, transform: TimelineTransform) -> TickGeneration {
-        let minimum_spacing_px = self.estimated_label_width_px + self.minimum_gap_px;
-        let desired_step_us = desired_step_us(transform, minimum_spacing_px);
-        let step_us = select_step_us(desired_step_us);
+        let step_us = reference_step_us(transform.visible_range().duration_us());
         let mut ticks = Vec::new();
         let step = i128::from(step_us);
         let start = i128::from(transform.visible_range().start().get());
@@ -198,70 +196,17 @@ impl TickGeneration {
 const SECOND_US: u64 = 1_000_000;
 const MINUTE_US: u64 = 60 * SECOND_US;
 const HOUR_US: u64 = 60 * MINUTE_US;
-const DAY_US: u64 = 24 * HOUR_US;
-const YEAR_US: u64 = 365 * DAY_US;
 
-const PREFERRED_STEPS_US: &[u64] = &[
-    SECOND_US,
-    5 * SECOND_US,
-    10 * SECOND_US,
-    15 * SECOND_US,
-    30 * SECOND_US,
-    MINUTE_US,
-    2 * MINUTE_US,
-    5 * MINUTE_US,
-    10 * MINUTE_US,
-    15 * MINUTE_US,
-    30 * MINUTE_US,
-    HOUR_US,
-    2 * HOUR_US,
-    3 * HOUR_US,
-    6 * HOUR_US,
-    12 * HOUR_US,
-    DAY_US,
-    2 * DAY_US,
-    7 * DAY_US,
-    14 * DAY_US,
-    30 * DAY_US,
-    90 * DAY_US,
-    180 * DAY_US,
-    YEAR_US,
-    2 * YEAR_US,
-    5 * YEAR_US,
-    10 * YEAR_US,
-];
-
-#[expect(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "tick cadence is deliberately chosen from f32 paint measurements and bounded to u64 microseconds"
-)]
-fn desired_step_us(transform: TimelineTransform, minimum_spacing_px: f32) -> u64 {
-    let duration = transform.visible_range().duration_us();
-    let desired =
-        (duration as f64 * f64::from(minimum_spacing_px) / f64::from(transform.width())).ceil();
-    if desired >= u64::MAX as f64 {
-        u64::MAX
+const fn reference_step_us(visible_duration_us: u64) -> u64 {
+    if visible_duration_us > 10 * HOUR_US {
+        2 * HOUR_US
+    } else if visible_duration_us > 4 * HOUR_US {
+        HOUR_US
+    } else if visible_duration_us > 2 * HOUR_US {
+        30 * MINUTE_US
     } else {
-        desired as u64
+        15 * MINUTE_US
     }
-}
-
-fn select_step_us(desired_step_us: u64) -> u64 {
-    if let Some(step) = PREFERRED_STEPS_US
-        .iter()
-        .copied()
-        .find(|step| *step >= desired_step_us)
-    {
-        return step;
-    }
-    let largest = *PREFERRED_STEPS_US.last().unwrap_or(&YEAR_US);
-    largest.saturating_mul(ceil_div(desired_step_us, largest))
-}
-
-fn ceil_div(numerator: u64, denominator: u64) -> u64 {
-    numerator / denominator + u64::from(!numerator.is_multiple_of(denominator))
 }
 
 #[cfg(test)]
@@ -278,7 +223,7 @@ mod tests {
 
     #[test]
     fn adaptive_ticks_stay_non_overlapping_at_required_widths_and_scales() {
-        let layout = AdaptiveTickLayout::try_new(72.0, 8.0).expect("valid tick layout");
+        let layout = AdaptiveTickLayout::try_new(48.0, 8.0).expect("valid tick layout");
         for logical_width in [720.0_f32, 1_024.0, 1_440.0] {
             assert_required_scale_ticks(layout, logical_width);
         }
@@ -331,6 +276,27 @@ mod tests {
                 && i128::from(tick.instant().get()).rem_euclid(i128::from(generation.step_us()))
                     == 0
         }));
+    }
+
+    #[test]
+    fn reference_cadence_uses_only_quarter_half_one_and_two_hour_steps() {
+        let layout = AdaptiveTickLayout::try_new(48.0, 8.0).expect("valid tick layout");
+        for (hours, extra_us, expected_minutes) in [
+            (2_i64, 0_i64, 15_u64),
+            (2, 1, 30),
+            (4, 0, 30),
+            (4, 1, 60),
+            (10, 0, 60),
+            (10, 1, 120),
+        ] {
+            let duration = hours * 3_600_000_000 + extra_us;
+            let transform = TimelineTransform::try_new(range(0, duration), 0.0, 1_200.0)
+                .expect("positive finite geometry");
+            assert_eq!(
+                layout.generate(transform).step_us(),
+                expected_minutes * 60 * 1_000_000
+            );
+        }
     }
 
     #[test]

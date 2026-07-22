@@ -16,7 +16,7 @@ use crate::backup::{
 use crate::{StorageError, StoreOpenOptions};
 
 /// The newest migration version compiled into this storage crate.
-pub const LATEST_SCHEMA_VERSION: u32 = 3;
+pub const LATEST_SCHEMA_VERSION: u32 = 4;
 
 const INITIAL_SCHEMA: &str = include_str!("../migrations/0001_initial.sql");
 const INITIAL_CHECKSUM: [u8; 8] = migration_checksum(INITIAL_SCHEMA);
@@ -28,7 +28,11 @@ const FOREGROUND_SWITCH_DELAY_SCHEMA: &str =
     include_str!("../migrations/0003_foreground_switch_delay.sql");
 const FOREGROUND_SWITCH_DELAY_CHECKSUM: [u8; 8] =
     migration_checksum(FOREGROUND_SWITCH_DELAY_SCHEMA);
-const MIGRATIONS: [Migration; 3] = [
+const REMOVE_PRODUCTION_DEMO_SEED_SCHEMA: &str =
+    include_str!("../migrations/0004_remove_production_demo_seed.sql");
+const REMOVE_PRODUCTION_DEMO_SEED_CHECKSUM: [u8; 8] =
+    migration_checksum(REMOVE_PRODUCTION_DEMO_SEED_SCHEMA);
+const MIGRATIONS: [Migration; 4] = [
     Migration {
         version: 1,
         source: INITIAL_SCHEMA,
@@ -43,6 +47,11 @@ const MIGRATIONS: [Migration; 3] = [
         version: 3,
         source: FOREGROUND_SWITCH_DELAY_SCHEMA,
         checksum: FOREGROUND_SWITCH_DELAY_CHECKSUM,
+    },
+    Migration {
+        version: 4,
+        source: REMOVE_PRODUCTION_DEMO_SEED_SCHEMA,
+        checksum: REMOVE_PRODUCTION_DEMO_SEED_CHECKSUM,
     },
 ];
 
@@ -847,12 +856,15 @@ mod tests {
             &mut connection,
             database.path(),
             &options,
-            &MIGRATIONS,
+            &MIGRATIONS[..3],
             apply_migration_sql,
         )
         .expect("the foreground-switch delay migration should succeed");
 
-        assert_eq!(super::verify_existing_with(&connection, &MIGRATIONS), Ok(3));
+        assert_eq!(
+            super::verify_existing_with(&connection, &MIGRATIONS[..3]),
+            Ok(3)
+        );
         assert_eq!(
             connection
                 .query_row(
@@ -862,6 +874,98 @@ mod tests {
                 )
                 .expect("the migrated setting should remain readable"),
             10
+        );
+    }
+
+    #[test]
+    fn demo_seed_cleanup_removes_only_deterministic_production_fixture() {
+        let database = TemporaryDatabase::new("demo-seed-cleanup");
+        let options = open_options(10);
+        let mut connection = initialized_connection(&database, &options);
+        migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &MIGRATIONS[..3],
+            apply_migration_sql,
+        )
+        .expect("the fixture should reach schema v3");
+        connection
+            .execute_batch(
+                "INSERT INTO application(
+                    public_id, display_name, category_id, exclusion_policy,
+                    first_seen_utc_us, last_seen_utc_us
+                 ) VALUES
+                    (X'4F4D41505001000000000000000000D1', 'Visual Studio Code', NULL, 0, 10, 20),
+                    (X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'Visual Studio Code', NULL, 0, 30, 40);
+                 INSERT INTO tracker_run(
+                    public_id, started_utc_us, ended_utc_us, clean_end,
+                    platform_session_marker, adapter_version, end_evidence
+                 ) VALUES
+                    (X'4F4D52554E00000000000000000000D1', 10, NULL, 0, NULL, 'openmanic-demo-v1', NULL),
+                    (X'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 30, NULL, 0, NULL, 'windows-control-v1', NULL);
+                 INSERT INTO activity_interval(
+                    tracker_run_id, start_utc_us, end_utc_us, state, cause,
+                    application_id, origin, uncertainty_us, source_revision
+                 ) VALUES
+                    ((SELECT id FROM tracker_run WHERE adapter_version = 'openmanic-demo-v1'),
+                     10, 20, 0, 0,
+                     (SELECT id FROM application WHERE public_id = X'4F4D41505001000000000000000000D1'),
+                     0, 0, 1),
+                    ((SELECT id FROM tracker_run WHERE adapter_version = 'windows-control-v1'),
+                     30, 40, 0, 0,
+                     (SELECT id FROM application WHERE public_id = X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+                     0, 0, 1);",
+            )
+            .expect("demo and real tracking records should insert");
+
+        migrate_existing_with(
+            &mut connection,
+            database.path(),
+            &options,
+            &MIGRATIONS,
+            apply_migration_sql,
+        )
+        .expect("the demo cleanup migration should succeed");
+
+        assert_eq!(super::verify_existing_with(&connection, &MIGRATIONS), Ok(4));
+        for (table, expected) in [
+            ("application", 1_i64),
+            ("tracker_run", 1),
+            ("activity_interval", 1),
+        ] {
+            assert_eq!(
+                connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .expect("migrated records should remain readable"),
+                expected
+            );
+        }
+        assert_eq!(
+            connection
+                .query_row("SELECT data_revision FROM store_metadata", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("the cleanup should advance the data revision"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT display_name FROM application", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("the real application should remain"),
+            "Visual Studio Code"
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT adapter_version FROM tracker_run", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .expect("the real tracker run should remain"),
+            "windows-control-v1"
         );
     }
 
@@ -895,7 +999,7 @@ mod tests {
         );
         let reopened = SqliteWriter::open(database.path(), &options)
             .expect("the restored original database should reopen as a writer");
-        assert_eq!(reopened.schema_version(), Ok(3));
+        assert_eq!(reopened.schema_version(), Ok(super::LATEST_SCHEMA_VERSION));
         assert_writer_configuration(reopened.configuration());
     }
 
