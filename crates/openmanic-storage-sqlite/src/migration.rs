@@ -877,6 +877,32 @@ mod tests {
         );
     }
 
+    // one demo-seeded and one real row in each table the cleanup migration touches
+    const DEMO_AND_REAL_RECORDS_SQL: &str = "INSERT INTO application(
+        public_id, display_name, category_id, exclusion_policy,
+        first_seen_utc_us, last_seen_utc_us
+     ) VALUES
+        (X'4F4D41505001000000000000000000D1', 'Visual Studio Code', NULL, 0, 10, 20),
+        (X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'Visual Studio Code', NULL, 0, 30, 40);
+     INSERT INTO tracker_run(
+        public_id, started_utc_us, ended_utc_us, clean_end,
+        platform_session_marker, adapter_version, end_evidence
+     ) VALUES
+        (X'4F4D52554E00000000000000000000D1', 10, NULL, 0, NULL, 'openmanic-demo-v1', NULL),
+        (X'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 30, NULL, 0, NULL, 'windows-control-v1', NULL);
+     INSERT INTO activity_interval(
+        tracker_run_id, start_utc_us, end_utc_us, state, cause,
+        application_id, origin, uncertainty_us, source_revision
+     ) VALUES
+        ((SELECT id FROM tracker_run WHERE adapter_version = 'openmanic-demo-v1'),
+         10, 20, 0, 0,
+         (SELECT id FROM application WHERE public_id = X'4F4D41505001000000000000000000D1'),
+         0, 0, 1),
+        ((SELECT id FROM tracker_run WHERE adapter_version = 'windows-control-v1'),
+         30, 40, 0, 0,
+         (SELECT id FROM application WHERE public_id = X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+         0, 0, 1);";
+
     #[test]
     fn demo_seed_cleanup_removes_only_deterministic_production_fixture() {
         let database = TemporaryDatabase::new("demo-seed-cleanup");
@@ -891,32 +917,7 @@ mod tests {
         )
         .expect("the fixture should reach schema v3");
         connection
-            .execute_batch(
-                "INSERT INTO application(
-                    public_id, display_name, category_id, exclusion_policy,
-                    first_seen_utc_us, last_seen_utc_us
-                 ) VALUES
-                    (X'4F4D41505001000000000000000000D1', 'Visual Studio Code', NULL, 0, 10, 20),
-                    (X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'Visual Studio Code', NULL, 0, 30, 40);
-                 INSERT INTO tracker_run(
-                    public_id, started_utc_us, ended_utc_us, clean_end,
-                    platform_session_marker, adapter_version, end_evidence
-                 ) VALUES
-                    (X'4F4D52554E00000000000000000000D1', 10, NULL, 0, NULL, 'openmanic-demo-v1', NULL),
-                    (X'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', 30, NULL, 0, NULL, 'windows-control-v1', NULL);
-                 INSERT INTO activity_interval(
-                    tracker_run_id, start_utc_us, end_utc_us, state, cause,
-                    application_id, origin, uncertainty_us, source_revision
-                 ) VALUES
-                    ((SELECT id FROM tracker_run WHERE adapter_version = 'openmanic-demo-v1'),
-                     10, 20, 0, 0,
-                     (SELECT id FROM application WHERE public_id = X'4F4D41505001000000000000000000D1'),
-                     0, 0, 1),
-                    ((SELECT id FROM tracker_run WHERE adapter_version = 'windows-control-v1'),
-                     30, 40, 0, 0,
-                     (SELECT id FROM application WHERE public_id = X'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
-                     0, 0, 1);",
-            )
+            .execute_batch(DEMO_AND_REAL_RECORDS_SQL)
             .expect("demo and real tracking records should insert");
 
         migrate_existing_with(

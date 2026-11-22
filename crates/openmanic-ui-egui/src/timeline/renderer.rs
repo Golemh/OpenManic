@@ -1890,25 +1890,26 @@ fn render_timeline_legend(
     });
 }
 
-#[expect(dead_code, reason = "superseded by the compact timeline legend")]
-fn paint_completeness(painter: &Painter, canvas: Rect, completeness: DataCompleteness) {
-    let DataCompleteness::Partial {
-        unknown_missing_duration_us,
-    } = completeness
-    else {
-        return;
-    };
-    painter.text(
-        Pos2::new(canvas.max.x - 8.0, canvas.min.y + 6.0),
-        Align2::RIGHT_TOP,
-        format!(
-            "Missing activity: {}",
-            format_duration(unknown_missing_duration_us)
-        ),
-        FontId::proportional(10.0),
-        WARNING,
-    );
-}
+// superseded by the compact timeline legend; kept, commented out, in case the partial-data
+// banner comes back
+// fn paint_completeness(painter: &Painter, canvas: Rect, completeness: DataCompleteness) {
+//     let DataCompleteness::Partial {
+//         unknown_missing_duration_us,
+//     } = completeness
+//     else {
+//         return;
+//     };
+//     painter.text(
+//         Pos2::new(canvas.max.x - 8.0, canvas.min.y + 6.0),
+//         Align2::RIGHT_TOP,
+//         format!(
+//             "Missing activity: {}",
+//             format_duration(unknown_missing_duration_us)
+//         ),
+//         FontId::proportional(10.0),
+//         WARNING,
+//     );
+// }
 
 #[expect(
     dead_code,
