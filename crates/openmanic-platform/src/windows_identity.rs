@@ -708,7 +708,6 @@ fn is_windows_error(error: &windows::core::Error, code: u32) -> bool {
 mod tests {
     use std::cell::Cell;
 
-    #[cfg(windows)]
     use super::WindowsExecutablePath;
     use super::{
         ApplicationIdentityResolution, IdentityUncertainty, ProcessApplicationInspection,

@@ -28,6 +28,7 @@ impl RawWindowHandle {
 
     /// Returns whether this is the null-window sentinel supplied by Windows.
     #[must_use]
+    #[cfg(windows)]
     pub(crate) const fn is_null(self) -> bool {
         self.0 == 0
     }
@@ -103,6 +104,7 @@ pub(crate) enum RawIngressDrainError {
 /// leaves already queued observations intact for normal-loop recovery.
 #[derive(Debug)]
 pub(crate) struct RawEventIngress {
+    #[cfg(any(windows, test))]
     capacity: usize,
     events: Mutex<VecDeque<RawForegroundEvent>>,
     next_source_order: AtomicU64,
@@ -114,6 +116,7 @@ impl RawEventIngress {
     #[must_use]
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
+            #[cfg(any(windows, test))]
             capacity,
             events: Mutex::new(VecDeque::with_capacity(capacity)),
             // Source order one belongs to the adapter's startup availability observation.
@@ -125,6 +128,7 @@ impl RawEventIngress {
     /// Records one callback observation without waiting or allocating.
     ///
     /// Returns `false` after recording explicit overflow when the queue cannot retain the event.
+    #[cfg(any(windows, test))]
     pub(crate) fn try_enqueue_foreground(
         &self,
         window: RawWindowHandle,

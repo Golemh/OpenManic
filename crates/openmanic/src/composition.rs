@@ -7,7 +7,6 @@ use std::{
     collections::{BTreeMap, VecDeque},
     error::Error,
     fmt, fs,
-    io::Write,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -19,8 +18,7 @@ use std::{
 };
 
 use openmanic_application::{
-    ActivityStateValue, AppEvent, ApplicationBandValue, ApplicationError, ApplicationIconCache,
-    ApplicationIconCacheLimits, ApplicationIconLookup, ApplicationIconResult, ApplicationPort,
+    ActivityStateValue, AppEvent, ApplicationBandValue, ApplicationError, ApplicationPort,
     CalendarBlockId, CalendarDayContext, CalendarDayProjector, CalendarDaySnapshot,
     CalendarProjectionSource, CalendarSourceFocus, CancellationRequest, CancellationSource,
     CancellationToken, CatalogCommand, CatalogPersistence, CatalogPersistenceError, CatalogService,
@@ -43,20 +41,28 @@ use openmanic_application::{
     TrackingPersistenceIntent, TrackingPersistencePort, TrackingPersistenceSubmit, TrackingService,
     WorkLane, bounded_runtime_lanes, latest_mailbox,
 };
-use openmanic_domain::{
-    ActivityState, Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
-    FocusSessionId, FocusSessionState, HalfOpenInterval, LayoutDocument, LayoutHeight,
-    OneTimeScheduleId, ScheduleEditScope, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+#[cfg(windows)]
+use openmanic_application::{
+    ApplicationIconCache, ApplicationIconCacheLimits, ApplicationIconLookup, ApplicationIconResult,
 };
+#[cfg(windows)]
+use openmanic_domain::ApplicationName;
+use openmanic_domain::{
+    ActivityState, Application, ApplicationId, Category, CategoryId, CategoryName, FocusSessionId,
+    FocusSessionState, HalfOpenInterval, LayoutDocument, LayoutHeight, OneTimeScheduleId,
+    ScheduleEditScope, ScheduleRule, ScheduleSeriesId, TrackerRunId, UtcMicros,
+};
+#[cfg(any(windows, test))]
+use openmanic_platform::WindowsPlatformAction;
+use openmanic_platform::WindowsTrayController;
 #[cfg(windows)]
 use openmanic_platform::{
     ActivationCommandDecode, InstanceAcquisition, LocalActivationCommand, WindowsActivationServer,
     WindowsApplicationMetadataRequest, WindowsControlAdapter, WindowsInstanceOwner,
     WindowsWindowTitleObservationRequest,
 };
-use openmanic_platform::{
-    EvidencePublishResult, TrackingEvidenceSink, WindowsPlatformAction, WindowsTrayController,
-};
+#[cfg(windows)]
+use openmanic_platform::{EvidencePublishResult, TrackingEvidenceSink};
 use openmanic_storage_sqlite::{
     RecoveryOutcome, SqliteStore, StorageWriter, StoreOpenOptions, TrackerRunRegistration,
 };
@@ -93,6 +99,7 @@ const DATA_OPERATION_REQUEST_CAPACITY: usize = 8;
 const DATA_OPERATION_RESULT_CAPACITY: usize = 32;
 const UI_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const WORKER_IDLE_INTERVAL: Duration = Duration::from_millis(10);
+#[cfg(windows)]
 const PLATFORM_PUMP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(windows)]
 const APPLICATION_METADATA_REQUEST_CAPACITY: usize = 32;
@@ -203,13 +210,31 @@ impl TodaySnapshot {
 /// returned to the UI; platform evidence follows the same reducer and persistence path.
 #[derive(Debug)]
 enum WriterWork {
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "built only by the Windows platform pump; the writer handles it on every host"
+        )
+    )]
     CatalogForeground {
         application: Application,
         command: CommandEnvelope<TrackingCommand>,
     },
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "built only by the Windows platform pump; the writer handles it on every host"
+        )
+    )]
     CatalogMetadata {
         application: Application,
     },
+    #[cfg_attr(
+        not(any(windows, test)),
+        expect(dead_code, reason = "built by the Windows evidence sink and by tests")
+    )]
     System(CommandEnvelope<TrackingCommand>),
     Ui(CommandEnvelope<TrackingCommand>),
     Catalog(CommandEnvelope<CatalogCommand>),
@@ -228,6 +253,13 @@ enum WriterWork {
         snapshot: SettingsSnapshot,
         expected_revision: Option<EntityRevision>,
     },
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "built only by the Windows platform pump; the writer handles it on every host"
+        )
+    )]
     WindowTitle(WindowTitleObservation),
 }
 
@@ -490,6 +522,7 @@ impl UiInbox {
 }
 
 /// A nonblocking sink from Windows normalization into the writer's critical ingress.
+#[cfg(windows)]
 #[derive(Clone)]
 struct RuntimeEvidenceSink {
     lanes: Arc<RuntimeLanes<WriterWork>>,
@@ -500,6 +533,7 @@ struct RuntimeEvidenceSink {
     tracking_debug_log: PathBuf,
 }
 
+#[cfg(windows)]
 impl TrackingEvidenceSink for RuntimeEvidenceSink {
     fn try_publish(&self, evidence: TrackingEvidence) -> EvidencePublishResult {
         record_tracking_observation(&self.tracking_debug, &self.tracking_debug_log, &evidence);
@@ -587,6 +621,7 @@ impl Default for TrackingDebugState {
     }
 }
 
+#[cfg(any(windows, test))]
 fn record_tracking_observation(
     debug: &Mutex<TrackingDebugState>,
     log_path: &Path,
@@ -615,6 +650,7 @@ fn record_tracking_observation(
     );
 }
 
+#[cfg(any(windows, test))]
 fn set_tracking_delivery(
     debug: &Mutex<TrackingDebugState>,
     log_path: &Path,
@@ -626,7 +662,10 @@ fn set_tracking_delivery(
     append_tracking_debug_log(log_path, &format!("writer_lane={delivery}"));
 }
 
+#[cfg(any(windows, test))]
 fn append_tracking_debug_log(log_path: &Path, line: &str) {
+    use std::io::Write;
+
     let Ok(mut file) = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -673,6 +712,7 @@ enum FocusLifecycleAction {
 }
 
 impl CommandIdentifiers {
+    #[cfg(any(windows, test))]
     fn command(&self, payload: TrackingCommand) -> CommandEnvelope<TrackingCommand> {
         let (command_id, ordering_key, submitted_at_utc) = self.next_metadata();
         CommandEnvelope::new(
@@ -916,6 +956,7 @@ impl CommandIdentifiers {
 }
 
 /// Routes retained platform actions only after their native callback has returned.
+#[cfg(any(windows, test))]
 #[derive(Clone)]
 struct PlatformActionRouter {
     lanes: Arc<RuntimeLanes<WriterWork>>,
@@ -926,6 +967,7 @@ struct PlatformActionRouter {
     quit_requested: Arc<AtomicBool>,
 }
 
+#[cfg(any(windows, test))]
 impl PlatformActionRouter {
     fn route(&self, action: WindowsPlatformAction) {
         match action {
@@ -1412,6 +1454,13 @@ impl RuntimeResources {
         let identifiers = Arc::new(CommandIdentifiers::default());
         let focus_notification_error = Arc::new(Mutex::new(None));
         let focus_completion_pending = Arc::new(AtomicBool::new(false));
+        #[cfg_attr(
+            not(windows),
+            expect(
+                unused_variables,
+                reason = "only the Windows platform pump drains focus notices"
+            )
+        )]
         let (focus_notice_sender, focus_notice_receiver) = mpsc::sync_channel(1);
         let focus_snapshot = Arc::new(Mutex::new(None));
         // A corrupt or superseded optional layout must not prevent the core tracker
@@ -1573,6 +1622,7 @@ impl RuntimeResources {
         ))
     }
 
+    #[cfg(windows)]
     fn evidence_sink(&self) -> RuntimeEvidenceSink {
         RuntimeEvidenceSink {
             lanes: self.lanes.clone(),
@@ -1598,6 +1648,7 @@ impl RuntimeResources {
         &self.tracking_debug_log
     }
 
+    #[cfg(windows)]
     fn action_router(&self) -> PlatformActionRouter {
         PlatformActionRouter {
             lanes: self.lanes.clone(),
@@ -4213,8 +4264,10 @@ impl VerticalSlice {
             UI_OUTBOUND_CAPACITY,
         )
         .map_err(|_| CompositionError::Runtime)?;
-        let (mut runtime, snapshots, calendar_snapshots) =
+        let (runtime, snapshots, calendar_snapshots) =
             RuntimeResources::start(store, bootstrap.data_root().path().to_path_buf())?;
+        #[cfg(windows)]
+        let mut runtime = runtime;
         #[cfg(windows)]
         runtime.start_windows(&instance_owner)?;
         let Some(initial_range) = day_range(0) else {
@@ -4543,7 +4596,7 @@ impl VerticalSliceApp {
             );
             return;
         };
-        let Ok((mut runtime, snapshots, calendar_snapshots)) =
+        let Ok((runtime, snapshots, calendar_snapshots)) =
             RuntimeResources::start(store, data_root)
         else {
             self.data_operation_message = Some(
@@ -4552,6 +4605,8 @@ impl VerticalSliceApp {
             );
             return;
         };
+        #[cfg(windows)]
+        let mut runtime = runtime;
         #[cfg(windows)]
         if runtime.start_windows(&self.instance_owner).is_err() {
             self.data_operation_message = Some(
@@ -5748,10 +5803,11 @@ impl VerticalSliceApp {
         reason = "the small built-in appearance picker keeps persistence submission beside selection"
     )]
     fn render_settings_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
+        use openmanic_ui_egui::design;
+
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Settings {
             return;
         }
-        use openmanic_ui_egui::design;
         ui.add_space(16.0);
         design::card_frame()
             .inner_margin(eframe::egui::Margin::symmetric(20, 14))
@@ -6408,7 +6464,6 @@ impl VerticalSliceApp {
     }
 
     #[expect(
-        clippy::too_many_lines,
         clippy::excessive_nesting,
         reason = "the Categories table coordinates filtering, row actions, and focused dialogs."
     )]
@@ -6882,13 +6937,12 @@ impl VerticalSliceApp {
             .resizable(false)
             .default_width(480.0)
             .show(context, |ui| {
-                self.render_category_manager_contents(ui, snapshot)
+                self.render_category_manager_contents(ui, snapshot);
             });
         self.show_category_manager = open;
     }
 
     #[expect(
-        clippy::too_many_lines,
         clippy::excessive_nesting,
         reason = "category CRUD and confirmations remain inside one focused manager."
     )]
@@ -7601,6 +7655,13 @@ impl VerticalSliceApp {
         }
     }
 
+    #[cfg_attr(
+        not(windows),
+        expect(
+            clippy::unused_self,
+            reason = "only Windows has platform services to stop"
+        )
+    )]
     fn stop_platform(&mut self) -> bool {
         #[cfg(windows)]
         {
