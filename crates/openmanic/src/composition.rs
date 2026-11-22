@@ -4829,141 +4829,31 @@ impl VerticalSliceApp {
         let _ = self.runtime.calendar_projection_requests.publish(request);
     }
 
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "the calendar's immediate-mode block rendering keeps selection and schedule controls adjacent"
-    )]
     fn render_calendar_dashboard(&mut self, ui: &mut eframe::egui::Ui) {
         if self.app.controller().model().route() != openmanic_ui_egui::Route::Calendar {
             return;
         }
         ui.add_space(16.0);
-        openmanic_ui_egui::design::card_frame()
+        let next_enabled = self
+            .calendar
+            .view_model(&self.calendar_data)
+            .next_day_enabled();
+        let navigation = openmanic_ui_egui::design::card_frame()
             .inner_margin(eframe::egui::Margin::symmetric(20, 14))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    if openmanic_ui_egui::design::soft_button(ui, "‹") {
-                        self.apply_calendar_action(CalendarAction::PreviousDay);
-                    }
-                    if openmanic_ui_egui::design::soft_button(ui, "○") {
-                        self.apply_calendar_action(CalendarAction::ReturnToToday);
-                    }
-                    let next_enabled = self
-                        .calendar
-                        .view_model(&self.calendar_data)
-                        .next_day_enabled();
-                    if ui
-                        .add_enabled(
-                            next_enabled,
-                            eframe::egui::Button::new(
-                                eframe::egui::RichText::new("›")
-                                    .size(14.0)
-                                    .strong()
-                                    .color(openmanic_ui_egui::design::TEXT_TERTIARY),
-                            )
-                            .fill(openmanic_ui_egui::design::SURFACE_RAISED)
-                            .stroke(eframe::egui::Stroke::new(
-                                1.0,
-                                openmanic_ui_egui::design::BORDER,
-                            )),
-                        )
-                        .clicked()
-                    {
-                        self.apply_calendar_action(CalendarAction::NextDay);
-                    }
-                    ui.add_space(8.0);
-                    ui.vertical(|ui| {
-                        ui.label(
-                            eframe::egui::RichText::new("Calendar")
-                                .size(20.0)
-                                .strong()
-                                .color(openmanic_ui_egui::design::TEXT_PRIMARY),
-                        );
-                        ui.label(
-                            eframe::egui::RichText::new("Time entries & scheduled focus")
-                                .size(12.5)
-                                .color(openmanic_ui_egui::design::TEXT_MUTED),
-                        );
-                    });
-                });
-            });
+                ui.horizontal(|ui| render_calendar_header(ui, next_enabled))
+                    .inner
+            })
+            .inner;
+        if let Some(action) = navigation {
+            self.apply_calendar_action(action);
+        }
         ui.add_space(11.0);
         let model = self.calendar.view_model(&self.calendar_data);
-        match model.state() {
-            CalendarDataState::Loading => {
-                ui.label("Loading Calendar…");
-            }
-            CalendarDataState::Empty(_) => {
-                ui.label("No Calendar blocks for this day.");
-            }
-            CalendarDataState::Error(error) => {
-                ui.label(error.message());
-            }
-            CalendarDataState::Ready { notice } => {
-                if let Some(notice) = notice {
-                    ui.label(notice);
-                }
-            }
-        }
+        render_calendar_state(ui, model.state());
         for presented in model.blocks() {
-            let block = presented.block();
-            let accent = if presented.kind() == CalendarBlockKind::Schedule {
-                openmanic_ui_egui::design::SCHEDULED
-            } else {
-                openmanic_ui_egui::design::category_color("development")
-            };
-            let fill = if presented.selected() {
-                accent.gamma_multiply(0.18)
-            } else {
-                openmanic_ui_egui::design::SURFACE
-            };
-            eframe::egui::Frame::new()
-                .fill(fill)
-                .stroke(eframe::egui::Stroke::new(
-                    1.0,
-                    if presented.selected() {
-                        accent
-                    } else {
-                        openmanic_ui_egui::design::BORDER
-                    },
-                ))
-                .corner_radius(10.0)
-                .inner_margin(eframe::egui::Margin::symmetric(12, 8))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        // Left color bar in the block's accent color.
-                        let (bar, _) = ui.allocate_exact_size(
-                            eframe::egui::vec2(3.0, 20.0),
-                            eframe::egui::Sense::hover(),
-                        );
-                        ui.painter().rect_filled(bar, 2.0, accent);
-                        let label = format!(
-                            "{:?} · {}",
-                            presented.kind(),
-                            format_utc_range(block.visual_range())
-                        );
-                        if ui
-                            .add(
-                                eframe::egui::Label::new(
-                                    eframe::egui::RichText::new(label)
-                                        .size(13.0)
-                                        .strong()
-                                        .color(openmanic_ui_egui::design::TEXT_SECONDARY),
-                                )
-                                .sense(eframe::egui::Sense::click()),
-                            )
-                            .clicked()
-                        {
-                            self.apply_calendar_action(CalendarAction::SelectBlock {
-                                id: block.id(),
-                            });
-                        }
-                        if presented.kind() == CalendarBlockKind::Schedule {
-                            self.render_calendar_schedule_controls(ui, block.id());
-                        }
-                    });
-                });
+            self.render_calendar_block(ui, presented);
             ui.add_space(6.0);
         }
         if let Some(details) = model.selected_details() {
@@ -4976,6 +4866,64 @@ impl VerticalSliceApp {
         self.render_schedule_editor(ui);
         self.render_schedule_delete_confirmation(ui);
         self.render_schedule_status(ui);
+    }
+
+    // returns whether the label was clicked; schedule blocks get their controls beside it
+    fn render_calendar_block_row(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        accent: eframe::egui::Color32,
+        label: String,
+        schedule_id: Option<CalendarBlockId>,
+    ) -> bool {
+        let clicked = render_calendar_block_label(ui, accent, label);
+        if let Some(block_id) = schedule_id {
+            self.render_calendar_schedule_controls(ui, block_id);
+        }
+        clicked
+    }
+
+    // one block row: accent bar, a clickable label, and schedule controls for scheduled blocks
+    fn render_calendar_block(
+        &mut self,
+        ui: &mut eframe::egui::Ui,
+        presented: &openmanic_ui_egui::CalendarPresentedBlock,
+    ) {
+        let block = presented.block();
+        let scheduled = presented.kind() == CalendarBlockKind::Schedule;
+        let accent = if scheduled {
+            openmanic_ui_egui::design::SCHEDULED
+        } else {
+            openmanic_ui_egui::design::category_color("development")
+        };
+        let (fill, border) = if presented.selected() {
+            (accent.gamma_multiply(0.18), accent)
+        } else {
+            (
+                openmanic_ui_egui::design::SURFACE,
+                openmanic_ui_egui::design::BORDER,
+            )
+        };
+        let label = format!(
+            "{:?} · {}",
+            presented.kind(),
+            format_utc_range(block.visual_range())
+        );
+        let clicked = eframe::egui::Frame::new()
+            .fill(fill)
+            .stroke(eframe::egui::Stroke::new(1.0, border))
+            .corner_radius(10.0)
+            .inner_margin(eframe::egui::Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    self.render_calendar_block_row(ui, accent, label, scheduled.then(|| block.id()))
+                })
+                .inner
+            })
+            .inner;
+        if clicked {
+            self.apply_calendar_action(CalendarAction::SelectBlock { id: block.id() });
+        }
     }
 
     fn apply_calendar_action(&mut self, action: CalendarAction) {
@@ -5553,37 +5501,16 @@ impl VerticalSliceApp {
             .visible_value()
             .cloned();
 
-        design::card_frame().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(
-                        eframe::egui::RichText::new("Overview")
-                            .size(22.0)
-                            .strong()
-                            .color(design::TEXT_PRIMARY),
-                    );
-                    ui.label(
-                        eframe::egui::RichText::new(self.overview_range_mode.title())
-                            .size(13.0)
-                            .color(design::TEXT_MUTED),
-                    );
-                });
-                ui.with_layout(
-                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
-                    |ui| {
-                        for mode in OverviewRangeMode::ALL.iter().rev() {
-                            if design::segment_option(
-                                ui,
-                                mode.label(),
-                                self.overview_range_mode == *mode,
-                            ) {
-                                self.overview_range_mode = *mode;
-                            }
-                        }
-                    },
-                );
-            });
-        });
+        let current_mode = self.overview_range_mode;
+        let chosen = design::card_frame()
+            .show(ui, |ui| {
+                ui.horizontal(|ui| render_overview_header(ui, current_mode))
+                    .inner
+            })
+            .inner;
+        if let Some(mode) = chosen {
+            self.overview_range_mode = mode;
+        }
         ui.add_space(11.0);
 
         let Some(snapshot) = data else {
@@ -5601,29 +5528,7 @@ impl VerticalSliceApp {
         let application_count = snapshot.usage().applications().len();
         let known_us = snapshot.timeline().totals().known_duration_us();
 
-        ui.columns(3, |columns| {
-            render_overview_tile(
-                &mut columns[0],
-                "Active total",
-                &format_micros_duration(usage_total_us),
-                "tracked this day",
-                design::TEXT_PRIMARY,
-            );
-            render_overview_tile(
-                &mut columns[1],
-                "Known coverage",
-                &format_micros_duration(known_us),
-                "of the visible range",
-                design::ACCENT_TEXT,
-            );
-            render_overview_tile(
-                &mut columns[2],
-                "Applications",
-                &application_count.to_string(),
-                "seen in this range",
-                design::ACTIVE,
-            );
-        });
+        render_overview_tiles(ui, usage_total_us, known_us, application_count);
         ui.add_space(11.0);
 
         ui.columns(2, |columns| {
@@ -6148,7 +6053,7 @@ impl VerticalSliceApp {
 
     fn render_appearance_settings_card(&mut self, ui: &mut eframe::egui::Ui, selected_theme: u8) {
         use openmanic_ui_egui::design;
-        design::card_frame().show(ui, |ui| {
+        let chosen = design::card_frame().show(ui, |ui| {
             ui.set_min_height(145.0);
             design::section_header(ui, "Appearance");
             ui.label(
@@ -6157,16 +6062,15 @@ impl VerticalSliceApp {
                     .color(design::TEXT_FAINT),
             );
             ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                for (mode, label) in [(0_u8, "Dark"), (1, "Light"), (2, "Follow system")] {
-                    if design::segment_option(ui, label, selected_theme == mode) {
-                        let _ = self
-                            .runtime
-                            .try_submit_theme(mode, UtcMicros::new(utc_now_micros()));
-                    }
-                }
-            });
+            let themes = [(0_u8, "Dark"), (1, "Light"), (2, "Follow system")];
+            ui.horizontal(|ui| segment_choice(ui, themes, selected_theme))
+                .inner
         });
+        if let Some(mode) = chosen.inner {
+            let _ = self
+                .runtime
+                .try_submit_theme(mode, UtcMicros::new(utc_now_micros()));
+        }
     }
 
     fn render_categories_settings_card(&mut self, ui: &mut eframe::egui::Ui) {
@@ -6540,7 +6444,12 @@ impl VerticalSliceApp {
     }
 
     fn render_category_filters(&mut self, ui: &mut eframe::egui::Ui, snapshot: &TodaySnapshot) {
-        ui.horizontal(|ui| {
+        let label = self.category_filter_label(snapshot);
+        let current = (
+            self.application_filter_category,
+            self.show_excluded_applications_only,
+        );
+        let chosen = ui.horizontal(|ui| {
             let filter_width = 190.0;
             ui.add_sized(
                 [
@@ -6550,75 +6459,33 @@ impl VerticalSliceApp {
                 eframe::egui::TextEdit::singleline(&mut self.application_search)
                     .hint_text("⌕  Search applications…"),
             );
-            let label = if self.show_excluded_applications_only {
-                "Excluded only".to_owned()
-            } else {
-                self.application_filter_category.map_or_else(
-                    || "No filter".to_owned(),
-                    |category_id| {
-                        category_id.map_or_else(
-                            || "Untracked only".to_owned(),
-                            |category_id| {
-                                snapshot
-                                    .categories()
-                                    .iter()
-                                    .find(|category| category.id() == category_id)
-                                    .map_or("No filter", |category| category.name().as_str())
-                                    .to_owned()
-                            },
-                        )
-                    },
-                )
-            };
             eframe::egui::ComboBox::from_id_salt("category-filter")
                 .width(filter_width)
                 .selected_text(label)
-                .show_ui(ui, |ui| {
-                    if ui
-                        .selectable_label(
-                            self.application_filter_category.is_none()
-                                && !self.show_excluded_applications_only,
-                            "No filter",
-                        )
-                        .clicked()
-                    {
-                        self.application_filter_category = None;
-                        self.show_excluded_applications_only = false;
-                    }
-                    if ui
-                        .selectable_label(
-                            self.application_filter_category == Some(None)
-                                && !self.show_excluded_applications_only,
-                            "Untracked only",
-                        )
-                        .clicked()
-                    {
-                        self.application_filter_category = Some(None);
-                        self.show_excluded_applications_only = false;
-                    }
-                    if ui
-                        .selectable_label(self.show_excluded_applications_only, "Excluded only")
-                        .clicked()
-                    {
-                        self.application_filter_category = None;
-                        self.show_excluded_applications_only = true;
-                    }
-                    for category in snapshot.categories() {
-                        let filter = Some(Some(category.id()));
-                        if ui
-                            .selectable_label(
-                                self.application_filter_category == filter
-                                    && !self.show_excluded_applications_only,
-                                category.name().as_str(),
-                            )
-                            .clicked()
-                        {
-                            self.application_filter_category = filter;
-                            self.show_excluded_applications_only = false;
-                        }
-                    }
-                });
+                .show_ui(ui, |ui| category_filter_choice(ui, snapshot, current))
+                .inner
+                .flatten()
         });
+        if let Some((category, excluded_only)) = chosen.inner {
+            self.application_filter_category = category;
+            self.show_excluded_applications_only = excluded_only;
+        }
+    }
+
+    fn category_filter_label(&self, snapshot: &TodaySnapshot) -> String {
+        if self.show_excluded_applications_only {
+            return "Excluded only".to_owned();
+        }
+        match self.application_filter_category {
+            None => "No filter".to_owned(),
+            Some(None) => "Untracked only".to_owned(),
+            Some(Some(category_id)) => snapshot
+                .categories()
+                .iter()
+                .find(|category| category.id() == category_id)
+                .map_or("No filter", |category| category.name().as_str())
+                .to_owned(),
+        }
     }
 
     #[expect(
@@ -6858,7 +6725,7 @@ impl VerticalSliceApp {
             self.assigning_application_id = None;
             return;
         };
-        eframe::egui::Window::new("Assign category")
+        let choice = eframe::egui::Window::new("Assign category")
             .id(eframe::egui::Id::new("category-assignment"))
             .anchor(
                 eframe::egui::Align2::CENTER_CENTER,
@@ -6874,47 +6741,26 @@ impl VerticalSliceApp {
                         .color(openmanic_ui_egui::design::TEXT_MUTED),
                 );
                 ui.add_space(10.0);
-                ui.horizontal_wrapped(|ui| {
-                    for category in snapshot.categories() {
-                        let name = category.name().as_str();
-                        let color = openmanic_ui_egui::design::category_color(name);
-                        let selected = application.category_id() == Some(category.id());
-                        if ui
-                            .add(
-                                eframe::egui::Button::new(
-                                    eframe::egui::RichText::new(name)
-                                        .size(12.5)
-                                        .strong()
-                                        .color(color),
-                                )
-                                .fill(color.gamma_multiply(if selected { 0.22 } else { 0.10 }))
-                                .stroke(eframe::egui::Stroke::new(1.0, color.gamma_multiply(0.65)))
-                                .corner_radius(8.0),
-                            )
-                            .clicked()
-                        {
-                            self.assign_application_category(application_id, Some(category.id()));
-                            self.assigning_application_id = None;
-                        }
-                    }
-                });
+                let current = application.category_id();
+                let picked = ui
+                    .horizontal_wrapped(|ui| category_assignment_buttons(ui, snapshot, current))
+                    .inner;
                 ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(
-                            application.category_id().is_some(),
-                            eframe::egui::Button::new("Mark untracked"),
-                        )
-                        .clicked()
-                    {
-                        self.assign_application_category(application_id, None);
-                        self.assigning_application_id = None;
-                    }
-                    if openmanic_ui_egui::design::soft_button(ui, "Cancel") {
-                        self.assigning_application_id = None;
-                    }
-                });
-            });
+                let footer = ui
+                    .horizontal(|ui| category_assignment_footer(ui, current.is_some()))
+                    .inner;
+                picked.map(|id| FormChoice::Submit(Some(id))).or(footer)
+            })
+            .and_then(|response| response.inner)
+            .flatten();
+        match choice {
+            Some(FormChoice::Submit(category_id)) => {
+                self.assign_application_category(application_id, category_id);
+                self.assigning_application_id = None;
+            }
+            Some(FormChoice::Cancel) => self.assigning_application_id = None,
+            None => {}
+        }
     }
 
     fn render_category_manager(
@@ -7023,35 +6869,33 @@ impl VerticalSliceApp {
             return;
         };
         ui.add_space(10.0);
-        openmanic_ui_egui::design::card_frame().show(ui, |ui| {
+        let choice = openmanic_ui_egui::design::card_frame().show(ui, |ui| {
             ui.label(format!("Rename {}", category.name().as_str()));
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.category_rename_name);
-                let replacement = CategoryName::try_new(self.category_rename_name.trim()).ok();
-                if ui
-                    .add_enabled(replacement.is_some(), eframe::egui::Button::new("Save"))
-                    .clicked()
-                    && let Some(name) = replacement
-                    && let Some(command_id) =
-                        self.runtime
-                            .try_submit_catalog(self.runtime.identifiers.catalog_command(
-                                CatalogCommand::RenameCategory {
-                                    category_id,
-                                    name,
-                                    observed_at_utc: UtcMicros::new(utc_now_micros()),
-                                },
-                            ))
-                {
+            ui.horizontal(|ui| category_rename_row(ui, &mut self.category_rename_name))
+                .inner
+        });
+        match choice.inner {
+            Some(FormChoice::Submit(name)) => {
+                let command =
+                    self.runtime
+                        .identifiers
+                        .catalog_command(CatalogCommand::RenameCategory {
+                            category_id,
+                            name,
+                            observed_at_utc: UtcMicros::new(utc_now_micros()),
+                        });
+                if let Some(command_id) = self.runtime.try_submit_catalog(command) {
                     self.latest_catalog_command = Some(command_id);
                     self.editing_category_id = None;
                     self.category_rename_name.clear();
                 }
-                if openmanic_ui_egui::design::soft_button(ui, "Cancel") {
-                    self.editing_category_id = None;
-                    self.category_rename_name.clear();
-                }
-            });
-        });
+            }
+            Some(FormChoice::Cancel) => {
+                self.editing_category_id = None;
+                self.category_rename_name.clear();
+            }
+            None => {}
+        }
     }
 
     fn render_category_delete_form(&mut self, ui: &mut eframe::egui::Ui, snapshot: &TodaySnapshot) {
@@ -7073,7 +6917,7 @@ impl VerticalSliceApp {
             .filter(|(application, _)| application.category_id() == Some(category_id))
             .count();
         ui.add_space(10.0);
-        eframe::egui::Frame::new()
+        let choice = eframe::egui::Frame::new()
             .fill(design::AWAY.gamma_multiply(0.08))
             .stroke(eframe::egui::Stroke::new(
                 1.0,
@@ -7086,28 +6930,22 @@ impl VerticalSliceApp {
                     "Delete {}? {assigned} application(s) will become Untracked.",
                     category.name().as_str(),
                 ));
-                ui.horizontal(|ui| {
-                    if ui
-                        .add(
-                            eframe::egui::Button::new("Delete category")
-                                .fill(design::AWAY.gamma_multiply(0.16))
-                                .stroke(eframe::egui::Stroke::new(1.0, design::AWAY)),
-                        )
-                        .clicked()
-                        && let Some(command_id) = self.runtime.try_submit_catalog(
-                            self.runtime
-                                .identifiers
-                                .catalog_command(CatalogCommand::DeleteCategory { category_id }),
-                        )
-                    {
-                        self.latest_catalog_command = Some(command_id);
-                        self.category_delete_confirmation = None;
-                    }
-                    if design::soft_button(ui, "Keep category") {
-                        self.category_delete_confirmation = None;
-                    }
-                });
+                ui.horizontal(category_delete_row).inner
             });
+        match choice.inner {
+            Some(FormChoice::Submit(())) => {
+                let command = self
+                    .runtime
+                    .identifiers
+                    .catalog_command(CatalogCommand::DeleteCategory { category_id });
+                if let Some(command_id) = self.runtime.try_submit_catalog(command) {
+                    self.latest_catalog_command = Some(command_id);
+                    self.category_delete_confirmation = None;
+                }
+            }
+            Some(FormChoice::Cancel) => self.category_delete_confirmation = None,
+            None => {}
+        }
     }
 
     fn queue_tracking_control(&mut self, action: TrackingControlAction) {
@@ -8091,6 +7929,91 @@ fn settings_action_row(
     });
 }
 
+// day navigation and title; returns the navigation clicked this frame
+fn render_calendar_header(ui: &mut eframe::egui::Ui, next_enabled: bool) -> Option<CalendarAction> {
+    let mut action = None;
+    if openmanic_ui_egui::design::soft_button(ui, "‹") {
+        action = Some(CalendarAction::PreviousDay);
+    }
+    if openmanic_ui_egui::design::soft_button(ui, "○") {
+        action = Some(CalendarAction::ReturnToToday);
+    }
+    if ui
+        .add_enabled(
+            next_enabled,
+            eframe::egui::Button::new(
+                eframe::egui::RichText::new("›")
+                    .size(14.0)
+                    .strong()
+                    .color(openmanic_ui_egui::design::TEXT_TERTIARY),
+            )
+            .fill(openmanic_ui_egui::design::SURFACE_RAISED)
+            .stroke(eframe::egui::Stroke::new(
+                1.0,
+                openmanic_ui_egui::design::BORDER,
+            )),
+        )
+        .clicked()
+    {
+        action = Some(CalendarAction::NextDay);
+    }
+    ui.add_space(8.0);
+    ui.vertical(|ui| {
+        ui.label(
+            eframe::egui::RichText::new("Calendar")
+                .size(20.0)
+                .strong()
+                .color(openmanic_ui_egui::design::TEXT_PRIMARY),
+        );
+        ui.label(
+            eframe::egui::RichText::new("Time entries & scheduled focus")
+                .size(12.5)
+                .color(openmanic_ui_egui::design::TEXT_MUTED),
+        );
+    });
+    action
+}
+
+fn render_calendar_state(ui: &mut eframe::egui::Ui, state: &CalendarDataState) {
+    match state {
+        CalendarDataState::Loading => {
+            ui.label("Loading Calendar…");
+        }
+        CalendarDataState::Empty(_) => {
+            ui.label("No Calendar blocks for this day.");
+        }
+        CalendarDataState::Error(error) => {
+            ui.label(error.message());
+        }
+        CalendarDataState::Ready { notice } => {
+            if let Some(notice) = notice {
+                ui.label(notice);
+            }
+        }
+    }
+}
+
+// returns whether the label was clicked
+fn render_calendar_block_label(
+    ui: &mut eframe::egui::Ui,
+    accent: eframe::egui::Color32,
+    label: String,
+) -> bool {
+    let (bar, _) =
+        ui.allocate_exact_size(eframe::egui::vec2(3.0, 20.0), eframe::egui::Sense::hover());
+    ui.painter().rect_filled(bar, 2.0, accent);
+    ui.add(
+        eframe::egui::Label::new(
+            eframe::egui::RichText::new(label)
+                .size(13.0)
+                .strong()
+                .color(openmanic_ui_egui::design::TEXT_SECONDARY),
+        )
+        .sense(eframe::egui::Sense::click()),
+    )
+    .clicked()
+}
+
 fn render_category_table_header(
     ui: &mut eframe::egui::Ui,
     application_width: f32,
@@ -8098,7 +8021,6 @@ fn render_category_table_header(
     today_width: f32,
     actions_width: f32,
 ) {
-    use openmanic_ui_egui::design;
     ui.horizontal(|ui| {
         for (label, width, right_aligned) in [
             ("Application", application_width, false),
@@ -8106,17 +8028,229 @@ fn render_category_table_header(
             ("Today", today_width, true),
             ("Actions", actions_width, true),
         ] {
-            ui.allocate_ui(eframe::egui::vec2(width, 26.0), |ui| {
-                ui.set_min_width(width);
-                let layout = if right_aligned {
-                    eframe::egui::Layout::right_to_left(eframe::egui::Align::Center)
-                } else {
-                    eframe::egui::Layout::left_to_right(eframe::egui::Align::Center)
-                };
-                ui.with_layout(layout, |ui| design::section_header(ui, label));
-            });
+            render_category_header_cell(ui, label, width, right_aligned);
         }
     });
+}
+
+fn render_category_header_cell(
+    ui: &mut eframe::egui::Ui,
+    label: &str,
+    width: f32,
+    right_aligned: bool,
+) {
+    let layout = if right_aligned {
+        eframe::egui::Layout::right_to_left(eframe::egui::Align::Center)
+    } else {
+        eframe::egui::Layout::left_to_right(eframe::egui::Align::Center)
+    };
+    ui.allocate_ui(eframe::egui::vec2(width, 26.0), |ui| {
+        ui.set_min_width(width);
+        ui.with_layout(layout, |ui| {
+            openmanic_ui_egui::design::section_header(ui, label);
+        });
+    });
+}
+
+/// What a form's buttons asked for this frame. Render closures return it and the caller applies
+/// it, so the state change happens outside the nested layout closures.
+enum FormChoice<T> {
+    Submit(T),
+    Cancel,
+}
+
+/// A row of segment buttons; returns the option clicked this frame, if any.
+fn segment_choice<'label, T: Copy + PartialEq>(
+    ui: &mut eframe::egui::Ui,
+    options: impl IntoIterator<Item = (T, &'label str)>,
+    selected: T,
+) -> Option<T> {
+    let mut chosen = None;
+    for (value, label) in options {
+        if openmanic_ui_egui::design::segment_option(ui, label, selected == value) {
+            chosen = Some(value);
+        }
+    }
+    chosen
+}
+
+// the three headline numbers of the overview
+fn render_overview_tiles(
+    ui: &mut eframe::egui::Ui,
+    usage_total_us: u64,
+    known_us: u64,
+    application_count: usize,
+) {
+    ui.columns(3, |columns| {
+        render_overview_tile(
+            &mut columns[0],
+            "Active total",
+            &format_micros_duration(usage_total_us),
+            "tracked this day",
+            openmanic_ui_egui::design::TEXT_PRIMARY,
+        );
+        render_overview_tile(
+            &mut columns[1],
+            "Known coverage",
+            &format_micros_duration(known_us),
+            "of the visible range",
+            openmanic_ui_egui::design::ACCENT_TEXT,
+        );
+        render_overview_tile(
+            &mut columns[2],
+            "Applications",
+            &application_count.to_string(),
+            "seen in this range",
+            openmanic_ui_egui::design::ACTIVE,
+        );
+    });
+}
+
+// title, range subtitle and the range picker; returns the range clicked this frame
+fn render_overview_header(
+    ui: &mut eframe::egui::Ui,
+    current: OverviewRangeMode,
+) -> Option<OverviewRangeMode> {
+    use openmanic_ui_egui::design;
+    ui.vertical(|ui| {
+        ui.label(
+            eframe::egui::RichText::new("Overview")
+                .size(22.0)
+                .strong()
+                .color(design::TEXT_PRIMARY),
+        );
+        ui.label(
+            eframe::egui::RichText::new(current.title())
+                .size(13.0)
+                .color(design::TEXT_MUTED),
+        );
+    });
+    let modes = OverviewRangeMode::ALL
+        .iter()
+        .rev()
+        .map(|mode| (*mode, mode.label()));
+    ui.with_layout(
+        eframe::egui::Layout::right_to_left(eframe::egui::Align::Center),
+        |ui| segment_choice(ui, modes, current),
+    )
+    .inner
+}
+
+/// The application filter is (category, excluded only): None is no filter, Some(None) untracked.
+type ApplicationFilter = (Option<Option<CategoryId>>, bool);
+
+// the filter combo's entries; returns the filter clicked this frame
+fn category_filter_choice(
+    ui: &mut eframe::egui::Ui,
+    snapshot: &TodaySnapshot,
+    current: ApplicationFilter,
+) -> Option<ApplicationFilter> {
+    let (category, excluded_only) = current;
+    let fixed = [
+        (
+            (None, false),
+            category.is_none() && !excluded_only,
+            "No filter",
+        ),
+        (
+            (Some(None), false),
+            category == Some(None) && !excluded_only,
+            "Untracked only",
+        ),
+        ((None, true), excluded_only, "Excluded only"),
+    ];
+    let mut chosen = None;
+    for (filter, selected, label) in fixed {
+        if ui.selectable_label(selected, label).clicked() {
+            chosen = Some(filter);
+        }
+    }
+    for entry in snapshot.categories() {
+        let filter = Some(Some(entry.id()));
+        let selected = category == filter && !excluded_only;
+        if ui
+            .selectable_label(selected, entry.name().as_str())
+            .clicked()
+        {
+            chosen = Some((filter, false));
+        }
+    }
+    chosen
+}
+
+// one button per category in its color; returns the category clicked this frame
+fn category_assignment_buttons(
+    ui: &mut eframe::egui::Ui,
+    snapshot: &TodaySnapshot,
+    current: Option<CategoryId>,
+) -> Option<CategoryId> {
+    let mut chosen = None;
+    for category in snapshot.categories() {
+        let name = category.name().as_str();
+        let color = openmanic_ui_egui::design::category_color(name);
+        let selected = current == Some(category.id());
+        let button = eframe::egui::Button::new(
+            eframe::egui::RichText::new(name)
+                .size(12.5)
+                .strong()
+                .color(color),
+        )
+        .fill(color.gamma_multiply(if selected { 0.22 } else { 0.10 }))
+        .stroke(eframe::egui::Stroke::new(1.0, color.gamma_multiply(0.65)))
+        .corner_radius(8.0);
+        if ui.add(button).clicked() {
+            chosen = Some(category.id());
+        }
+    }
+    chosen
+}
+
+// Submit(None) marks the application untracked
+fn category_assignment_footer(
+    ui: &mut eframe::egui::Ui,
+    has_category: bool,
+) -> Option<FormChoice<Option<CategoryId>>> {
+    let untracked = ui
+        .add_enabled(has_category, eframe::egui::Button::new("Mark untracked"))
+        .clicked();
+    let cancel = openmanic_ui_egui::design::soft_button(ui, "Cancel");
+    if untracked {
+        return Some(FormChoice::Submit(None));
+    }
+    cancel.then_some(FormChoice::Cancel)
+}
+
+// Save is enabled only while the text is a valid category name
+fn category_rename_row(
+    ui: &mut eframe::egui::Ui,
+    text: &mut String,
+) -> Option<FormChoice<CategoryName>> {
+    ui.text_edit_singleline(text);
+    let replacement = CategoryName::try_new(text.trim()).ok();
+    let save = ui
+        .add_enabled(replacement.is_some(), eframe::egui::Button::new("Save"))
+        .clicked();
+    let cancel = openmanic_ui_egui::design::soft_button(ui, "Cancel");
+    if save && let Some(name) = replacement {
+        return Some(FormChoice::Submit(name));
+    }
+    cancel.then_some(FormChoice::Cancel)
+}
+
+fn category_delete_row(ui: &mut eframe::egui::Ui) -> Option<FormChoice<()>> {
+    use openmanic_ui_egui::design;
+    let delete = ui
+        .add(
+            eframe::egui::Button::new("Delete category")
+                .fill(design::AWAY.gamma_multiply(0.16))
+                .stroke(eframe::egui::Stroke::new(1.0, design::AWAY)),
+        )
+        .clicked();
+    let keep = design::soft_button(ui, "Keep category");
+    if delete {
+        return Some(FormChoice::Submit(()));
+    }
+    keep.then_some(FormChoice::Cancel)
 }
 
 fn paint_hairline(ui: &mut eframe::egui::Ui) {
