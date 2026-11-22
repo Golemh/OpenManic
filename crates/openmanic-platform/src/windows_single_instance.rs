@@ -7,6 +7,7 @@
 /// Largest accepted activation request, including its protocol marker.
 pub const WINDOWS_ACTIVATION_MESSAGE_LIMIT: usize = 64;
 
+#[cfg(any(windows, test))]
 const ACTIVATION_PROTOCOL_PREFIX: &[u8] = b"OpenManic/activation-v1 ";
 
 /// The accepted fixed local activation commands.
@@ -54,6 +55,7 @@ pub enum ActivationCommandDecode {
 }
 
 /// Parses a complete activation request without allocating or accepting user data.
+#[cfg(any(windows, test))]
 #[must_use]
 pub(crate) fn decode_activation_command(message: &[u8]) -> ActivationCommandDecode {
     if message.len() > WINDOWS_ACTIVATION_MESSAGE_LIMIT

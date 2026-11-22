@@ -363,9 +363,11 @@ impl WindowsControlAdapter {
         sink: &dyn TrackingEvidenceSink,
         drain: &mut WindowsControlDrain,
     ) {
-        let changed_window = self.last_live_window != Some(event.window());
+        // read before last_live_window moves on; only the Windows path publishes
+        #[cfg(windows)]
+        let publish_foreground = self.last_live_window != Some(event.window())
+            || self.normalizer.reconciliation_required();
         self.last_live_window = Some(event.window());
-        let publish_foreground = changed_window || self.normalizer.reconciliation_required();
         #[cfg(windows)]
         match self
             .identity_resolver
