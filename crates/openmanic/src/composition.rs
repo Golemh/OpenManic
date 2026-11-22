@@ -14,7 +14,7 @@ use std::{
         mpsc::{self, Receiver, SyncSender, TryRecvError},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use openmanic_application::{
@@ -81,6 +81,7 @@ use openmanic_ui_egui::{
 
 use crate::bootstrap::{BootstrapDisposition, BootstrapError, BootstrapState, bootstrap};
 use crate::cli::{CliError, parse_process_cli};
+use crate::day::{day_range, utc_now_micros};
 use crate::{
     data_root::{
         BootstrapLocator, DataRootValidator, LocalDataRootValidator, LocatorError,
@@ -4003,7 +4004,7 @@ fn relative_day_label(day_offset: i32) -> String {
 }
 
 fn format_day_heading(day_offset: i32) -> String {
-    let Some(range) = day_range(day_offset) else {
+    let Some(range) = day_range(day_offset, utc_now_micros()) else {
         return relative_day_label(day_offset);
     };
     let days_since_epoch = range.start().get().div_euclid(86_400_000_000);
@@ -4270,7 +4271,7 @@ impl VerticalSlice {
         let mut runtime = runtime;
         #[cfg(windows)]
         runtime.start_windows(&instance_owner)?;
-        let Some(initial_range) = day_range(0) else {
+        let Some(initial_range) = day_range(0, utc_now_micros()) else {
             return Err(CompositionError::Runtime);
         };
         let request = projection_request(1, initial_range);
@@ -4812,14 +4813,14 @@ impl VerticalSliceApp {
             .model()
             .today_view_context()
             .selected_day_offset();
-        let Some(range) = day_range(offset) else {
+        let Some(range) = day_range(offset, utc_now_micros()) else {
             return;
         };
         self.publish_projection(range);
     }
 
     fn publish_calendar_projection(&mut self, day_offset: i32) {
-        let Some(day_range) = day_range(day_offset) else {
+        let Some(day_range) = day_range(day_offset, utc_now_micros()) else {
             return;
         };
         self.calendar_projection_sequence = self.calendar_projection_sequence.saturating_add(1);
@@ -5825,7 +5826,7 @@ impl VerticalSliceApp {
                 eframe::egui::Button::new("Export current day"),
             )
             .clicked()
-            && let Some(range) = day_range(0)
+            && let Some(range) = day_range(0, utc_now_micros())
         {
             let disclosure = if self.export_includes_titles {
                 TitleDisclosure::IncludeAfterConfirmation
@@ -8601,14 +8602,6 @@ fn bootstrap_locator_path() -> Result<PathBuf, CompositionError> {
         .ok_or(CompositionError::Storage)
 }
 
-fn utc_now_micros() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_micros()).unwrap_or(i64::MAX)
-        })
-}
-
 fn initial_category_id(index: u8) -> CategoryId {
     let mut bytes = [0_u8; 16];
     bytes[..5].copy_from_slice(b"OMCAT");
@@ -8771,19 +8764,6 @@ fn preserve_or_classify_application(
     .unwrap_or(application)
 }
 
-fn day_range(offset_days: i32) -> Option<HalfOpenInterval> {
-    const DAY_US: i64 = 86_400_000_000;
-    let now = utc_now_micros();
-    let day_start = now.div_euclid(DAY_US).saturating_mul(DAY_US);
-    let offset = i64::from(offset_days).saturating_mul(DAY_US);
-    let start = day_start.saturating_add(offset);
-    HalfOpenInterval::try_new(
-        UtcMicros::new(start),
-        UtcMicros::new(start.saturating_add(DAY_US)),
-    )
-    .ok()
-}
-
 fn projection_request(
     sequence: u64,
     range: HalfOpenInterval,
@@ -8844,6 +8824,8 @@ mod tests {
         UtcMicros,
     };
     use openmanic_platform::WindowsPlatformAction;
+
+    use crate::day::utc_now_micros;
 
     use super::{
         CommandIdentifiers, ForegroundSwitchDecision, ForegroundSwitchStabilizer,
@@ -9176,7 +9158,7 @@ mod tests {
             store_identity(std::path::Path::new("local-data"))
         );
         assert_eq!(
-            day_range(0)
+            day_range(0, utc_now_micros())
                 .expect("the current UTC day has a positive range")
                 .duration_us(),
             86_400_000_000
