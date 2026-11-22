@@ -6444,11 +6444,11 @@ impl VerticalSliceApp {
     }
 
     fn render_category_filters(&mut self, ui: &mut eframe::egui::Ui, snapshot: &TodaySnapshot) {
-        let label = self.category_filter_label(snapshot);
         let current = (
             self.application_filter_category,
             self.show_excluded_applications_only,
         );
+        let label = category_filter_label(current, snapshot.categories());
         let chosen = ui.horizontal(|ui| {
             let filter_width = 190.0;
             ui.add_sized(
@@ -6469,22 +6469,6 @@ impl VerticalSliceApp {
         if let Some((category, excluded_only)) = chosen.inner {
             self.application_filter_category = category;
             self.show_excluded_applications_only = excluded_only;
-        }
-    }
-
-    fn category_filter_label(&self, snapshot: &TodaySnapshot) -> String {
-        if self.show_excluded_applications_only {
-            return "Excluded only".to_owned();
-        }
-        match self.application_filter_category {
-            None => "No filter".to_owned(),
-            Some(None) => "Untracked only".to_owned(),
-            Some(Some(category_id)) => snapshot
-                .categories()
-                .iter()
-                .find(|category| category.id() == category_id)
-                .map_or("No filter", |category| category.name().as_str())
-                .to_owned(),
         }
     }
 
@@ -8145,37 +8129,55 @@ fn category_filter_choice(
     snapshot: &TodaySnapshot,
     current: ApplicationFilter,
 ) -> Option<ApplicationFilter> {
-    let (category, excluded_only) = current;
     let fixed = [
-        (
-            (None, false),
-            category.is_none() && !excluded_only,
-            "No filter",
-        ),
-        (
-            (Some(None), false),
-            category == Some(None) && !excluded_only,
-            "Untracked only",
-        ),
-        ((None, true), excluded_only, "Excluded only"),
+        ((None, false), "No filter"),
+        ((Some(None), false), "Untracked only"),
+        ((None, true), "Excluded only"),
     ];
     let mut chosen = None;
-    for (filter, selected, label) in fixed {
+    for (filter, label) in fixed {
+        let selected = filter_entry_selected(current, filter);
         if ui.selectable_label(selected, label).clicked() {
             chosen = Some(filter);
         }
     }
     for entry in snapshot.categories() {
-        let filter = Some(Some(entry.id()));
-        let selected = category == filter && !excluded_only;
+        let filter = (Some(Some(entry.id())), false);
+        let selected = filter_entry_selected(current, filter);
         if ui
             .selectable_label(selected, entry.name().as_str())
             .clicked()
         {
-            chosen = Some((filter, false));
+            chosen = Some(filter);
         }
     }
     chosen
+}
+
+// the combo's closed text; a filter on a since-deleted category reads as no filter
+fn category_filter_label(filter: ApplicationFilter, categories: &[Category]) -> String {
+    let (category, excluded_only) = filter;
+    if excluded_only {
+        return "Excluded only".to_owned();
+    }
+    match category {
+        None => "No filter".to_owned(),
+        Some(None) => "Untracked only".to_owned(),
+        Some(Some(category_id)) => categories
+            .iter()
+            .find(|entry| entry.id() == category_id)
+            .map_or("No filter", |entry| entry.name().as_str())
+            .to_owned(),
+    }
+}
+
+// "Excluded only" follows the flag alone; every other entry needs its category and the flag off
+fn filter_entry_selected(current: ApplicationFilter, entry: ApplicationFilter) -> bool {
+    let (category, excluded_only) = current;
+    if entry.1 {
+        return excluded_only;
+    }
+    category == entry.0 && !excluded_only
 }
 
 // one button per category in its color; returns the category clicked this frame
@@ -8837,19 +8839,21 @@ mod tests {
         TrackingEvidence, WorkLane, bounded_runtime_lanes,
     };
     use openmanic_domain::{
-        Application, ApplicationId, ApplicationName, FocusSessionState, HalfOpenInterval,
-        ScheduleEditScope, ScheduleRule, ScheduleSeriesId, UtcMicros,
+        Application, ApplicationId, ApplicationName, Category, CategoryId, CategoryName,
+        FocusSessionState, HalfOpenInterval, ScheduleEditScope, ScheduleRule, ScheduleSeriesId,
+        UtcMicros,
     };
     use openmanic_platform::WindowsPlatformAction;
 
     use super::{
         CommandIdentifiers, ForegroundSwitchDecision, ForegroundSwitchStabilizer,
         PlatformActionRouter, ScheduleDraft, ScheduleDraftValidationError, TrackingDebugState,
-        UiInbox, UiIngress, calendar_schedule_target, civil_date_from_days, day_range,
-        focus_remaining_label, focus_remaining_us, foreground_observed_at, format_clock_label,
-        format_schedule_date, format_utc_clock, format_utc_range, initial_category_for_application,
-        initial_category_id, record_tracking_observation, recurring_schedule_rule,
-        set_tracking_delivery, store_identity,
+        UiInbox, UiIngress, calendar_schedule_target, category_filter_label, civil_date_from_days,
+        day_range, filter_entry_selected, focus_remaining_label, focus_remaining_us,
+        foreground_observed_at, format_clock_label, format_schedule_date, format_utc_clock,
+        format_utc_range, initial_category_for_application, initial_category_id,
+        record_tracking_observation, recurring_schedule_rule, set_tracking_delivery,
+        store_identity,
     };
 
     #[test]
@@ -8865,6 +8869,68 @@ mod tests {
             format_clock_label(UtcMicros::new(13 * 3_600_000_000 + 5 * 60_000_000)),
             "1:05 PM"
         );
+    }
+
+    fn filter_category(byte: u8, name: &str) -> Category {
+        Category::new(
+            CategoryId::from_bytes([byte; 16]),
+            CategoryName::try_new(name).expect("fixture category name is valid"),
+        )
+    }
+
+    // the closed filter text for each filter shape, including a category deleted since it was
+    // picked and the excluded flag overriding a category
+    #[test]
+    fn category_filter_label_names_each_filter_and_falls_back_for_a_deleted_category() {
+        let categories = [filter_category(1, "Work"), filter_category(2, "Games")];
+        let work = Some(Some(categories[0].id()));
+        let deleted = Some(Some(CategoryId::from_bytes([9; 16])));
+        assert_eq!(
+            category_filter_label((None, false), &categories),
+            "No filter"
+        );
+        assert_eq!(
+            category_filter_label((Some(None), false), &categories),
+            "Untracked only"
+        );
+        assert_eq!(category_filter_label((work, false), &categories), "Work");
+        assert_eq!(
+            category_filter_label((deleted, false), &categories),
+            "No filter"
+        );
+        assert_eq!(
+            category_filter_label((work, true), &categories),
+            "Excluded only"
+        );
+        assert_eq!(category_filter_label((None, true), &[]), "Excluded only");
+    }
+
+    // every (current filter, entry) pair: exactly one entry is highlighted for each filter
+    #[test]
+    fn filter_entry_selected_highlights_exactly_the_current_entry() {
+        let work = Some(Some(CategoryId::from_bytes([1; 16])));
+        let games = Some(Some(CategoryId::from_bytes([2; 16])));
+        let entries = [
+            (None, false),
+            (Some(None), false),
+            (None, true),
+            (work, false),
+            (games, false),
+        ];
+        for current in [
+            (None, false),
+            (Some(None), false),
+            (work, false),
+            (work, true),
+            (None, true),
+        ] {
+            let lit: Vec<_> = entries
+                .iter()
+                .filter(|entry| filter_entry_selected(current, **entry))
+                .collect();
+            let expected = if current.1 { (None, true) } else { current };
+            assert_eq!(lit, [&expected], "current filter {current:?}");
+        }
     }
 
     fn foreground_application(value: u8, observed_at_utc: UtcMicros) -> Application {
