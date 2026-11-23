@@ -14,5 +14,7 @@ pub mod cli;
 pub mod composition;
 /// Data-root discovery, validation, locator persistence, and writer locking.
 pub mod data_root;
+/// Day ranges for Today and Calendar.
+mod day;
 /// Privacy-safe local bootstrap diagnostics and panic markers.
 pub mod diagnostics;
